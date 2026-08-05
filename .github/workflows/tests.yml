@@ -88,4 +88,8 @@ jobs:
 
       - name: Service logs on failure
         if: failure()
-        run: docker compose logs --tail=200
+        # No --tail limit: a 200-line-per-container cap was cutting logs
+        # off before the actual failing request, showing only whatever
+        # each container happened to log last (frequently unrelated,
+        # later activity) instead of the moment that matters.
+        run: docker compose logs
