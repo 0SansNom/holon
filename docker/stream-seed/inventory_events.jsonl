@@ -1,0 +1,12 @@
+{"sku": "SKU-1001", "warehouse": "FR-01", "quantity": 120, "updated_at": "2026-08-01T08:00:00Z"}
+{"sku": "SKU-1002", "warehouse": "DE-01", "quantity": 45, "updated_at": "2026-08-01T08:00:05Z"}
+{"sku": "SKU-1003", "warehouse": "ES-01", "quantity": 300, "updated_at": "2026-08-01T08:00:10Z"}
+{"sku": "SKU-1004", "warehouse": "FR-01", "quantity": 75, "updated_at": "2026-08-01T08:00:15Z"}
+{"sku": "SKU-1005", "warehouse": "NL-01", "quantity": 12, "updated_at": "2026-08-01T08:00:20Z"}
+{"sku": "SKU-1001", "warehouse": "FR-01", "quantity": 118, "updated_at": "2026-08-01T08:05:00Z"}
+{"sku": "SKU-1006", "warehouse": "PL-01", "quantity": 210, "updated_at": "2026-08-01T08:05:05Z"}
+{"sku": "SKU-1004", "warehouse": "FR-01", "quantity": 60, "updated_at": "2026-08-01T08:05:10Z"}
+{"sku": "SKU-1007", "warehouse": "IT-01", "quantity": 88, "updated_at": "2026-08-01T08:05:15Z"}
+{"sku": "SKU-1008", "warehouse": "SE-01", "quantity": 33, "updated_at": "2026-08-01T08:05:20Z"}
+{"sku": "SKU-1001", "warehouse": "FR-01", "quantity": 115, "updated_at": "2026-08-01T08:10:00Z"}
+{"sku": "SKU-1004", "warehouse": "FR-01", "quantity": 58, "updated_at": "2026-08-01T08:10:05Z"}

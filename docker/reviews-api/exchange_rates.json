@@ -1,0 +1,7 @@
+[
+  {"currency": "EUR", "rate_to_usd": 1.0850, "as_of": "2026-08-01T00:00:00Z"},
+  {"currency": "SEK", "rate_to_usd": 0.0945, "as_of": "2026-08-01T00:00:00Z"},
+  {"currency": "GBP", "rate_to_usd": 1.2680, "as_of": "2026-08-01T00:00:00Z"},
+  {"currency": "PLN", "rate_to_usd": 0.2490, "as_of": "2026-08-01T00:00:00Z"},
+  {"currency": "NOK", "rate_to_usd": 0.0930, "as_of": "2026-08-01T00:00:00Z"}
+]

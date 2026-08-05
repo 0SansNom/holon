@@ -1,0 +1,480 @@
+name: holon
+
+x-app-env: &app-env
+  HOLON_TENANT_ID: acme
+  HOLON_WORKSPACE_ID: demo
+  HOLON_JWT_SECRET: ${HOLON_JWT_SECRET}
+  HOLON_KAFKA_BOOTSTRAP: redpanda:9092
+  HOLON_SPICEDB_URL: http://spicedb:8443
+  HOLON_SPICEDB_PRESHARED_KEY: ${HOLON_SPICEDB_PRESHARED_KEY}
+  HOLON_SPICEDB_SCHEMA_PATH: /app/spicedb-schema.zed
+  HOLON_OPA_URL: http://opa:8181
+  HOLON_OTLP_ENDPOINT: http://jaeger:4318
+
+services:
+  # ---- Infrastructure ----------------------------------------------------
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: holon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U holon" ]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      # Hardcoded, not templated from .env — this is an identifier, not a
+      # secret (the actual credential is MINIO_ROOT_PASSWORD). Every
+      # service below authenticates to MinIO's S3 API with
+      # `AWS_ACCESS_KEY_ID: holon`, hardcoded to match — templating this
+      # one from .env while MINIO_ROOT_USER stays fixed is exactly what
+      # broke CI: .env.example's placeholder (`change-me`) never equals
+      # this literal, so every S3 call failed with "Access Key Id...
+      # does not exist" the moment CI generated .env from the example
+      # instead of a real, manually-filled-in one.
+      MINIO_ROOT_USER: holon
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    volumes:
+      - ./docker/csv-seed:/seed:ro
+    entrypoint: >
+      /bin/sh -c " until mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD}; do echo waiting for minio; sleep 2; done && mc mb -p local/holon-warehouse || true && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo bucket ready "
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      CATALOG_WAREHOUSE: s3://holon-warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: holon
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+      # JdbcCatalog on Postgres instead of the image's default embedded
+      # SQLite — SQLite is single-writer and locks up under concurrent
+      # /sync calls ([SQLITE_BUSY] The database file is locked, a real
+      # incident hit and only worked around, not fixed, before this).
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres:5432/holon_iceberg_catalog
+      CATALOG_JDBC_USER: holon
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "8181:8181"
+
+  spicedb:
+    image: authzed/spicedb:latest
+    command:
+      - serve
+      - --grpc-preshared-key=${HOLON_SPICEDB_PRESHARED_KEY}
+      - --http-enabled
+    ports:
+      - "50051:50051"
+      - "8443:8443"
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command:
+      - run
+      - --server
+      - --addr=:8181
+      - /policies/holon.rego
+    volumes:
+      - ./docker/opa/holon.rego:/policies/holon.rego:ro
+    ports:
+      - "8281:8181"
+
+  mongodb:
+    image: mongo:7
+    volumes:
+      - ./docker/mongo-init:/docker-entrypoint-initdb.d:ro
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"
+
+  reviews-api:
+    image: python:3.12-slim
+    working_dir: /data
+    volumes:
+      - ./docker/reviews-api:/data:ro
+    command: [ "python", "-m", "http.server", "8000" ]
+    ports:
+      - "8091:8000"
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      # Two listeners: INTERNAL for other containers (advertised as
+      # `redpanda:9092`, resolvable only inside the Docker network) and
+      # OUTSIDE for host-side tooling (advertised as `localhost:19092`) —
+      # a raw Kafka client on the host bootstraps fine via the port-forward
+      # on 9092, but the broker's own metadata response then tells it to
+      # reconnect to whatever address is *advertised*; without a second
+      # listener that address is the Docker-internal hostname, which the
+      # host can't resolve (`nodename nor servname provided`). Needed for
+      # tests/test_projection_rebuild.py, the first host-side Kafka client.
+      - --kafka-addr=INTERNAL://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr=INTERNAL://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+    healthcheck:
+      test: [ "CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # One-shot: seeds a Kafka topic to simulate an *external* streaming
+  # source (streaming Connectivity capability) — reuses the same Redpanda image already
+  # pulled for the `redpanda` service, no new image, no persistent
+  # container (same one-shot pattern as `minio-init`/mongo's init script).
+  inventory-stream-seed:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./docker/stream-seed:/seed:ro
+    entrypoint: >
+      /bin/sh -c " rpk topic create external-inventory-stream --brokers redpanda:9092 -p 1 -r 1 || true && cat /seed/inventory_events.jsonl | rpk topic produce external-inventory-stream --brokers redpanda:9092 --compression none && echo stream seeded "
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.0
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - bootstrap.memory_lock=false
+      - OPENSEARCH_JAVA_OPTS=-Xms256m -Xmx512m
+      # 2.12+'s security plugin demands this even with the plugin disabled
+      # flag above (its own bootstrap check runs first) — a fixed dev-only
+      # value, same treatment as SpiceDB's preshared key elsewhere in this
+      # compose file.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -su admin:${OPENSEARCH_ADMIN_PASSWORD} http://localhost:9200/_cluster/health | grep -q '\"status\":\"'" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Traces (Jaeger, receives OTLP), metrics scrape+store
+  # (Prometheus), and a shared UI (Grafana) to actually look at both.
+  # Every app service already exposes `/metrics` and emits OTLP traces to
+  # `jaeger:4318` unconditionally — these three containers
+  # are what make that data queryable rather than just present.
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - identity
+      - connectivity
+      - knowledge
+      - experience
+      - automation
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    environment:
+      # Anonymous admin access — dev-only convenience, same posture as
+      # this build's other fixed dev credentials (SpiceDB's preshared
+      # key, OpenSearch's admin password) — not for a real deployment.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  # Semantic retrieval's vector store (metadata
+  # only, never bulk instance vectorization). No auth needed for a
+  # single-node dev deployment, same posture as this build's other
+  # dev-only infra.
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+
+  # ---- Holon platforms -----------------
+
+  identity:
+    build:
+      context: .
+      dockerfile: services/identity/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_identity
+    volumes:
+      - ./libs:/app/libs
+      - ./services/identity/app:/app/app
+      - ./docker/spicedb/schema.zed:/app/spicedb-schema.zed:ro
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spicedb:
+        condition: service_started
+      opa:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+
+  connectivity:
+    build:
+      context: .
+      dockerfile: services/connectivity/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_connectivity
+      HOLON_SOURCE_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/source_erp
+      HOLON_MONGO_URL: mongodb://mongodb:27017
+      HOLON_REVIEWS_API_URL: http://reviews-api:8000/reviews.json
+      HOLON_EXCHANGE_RATE_FEED_URL: http://reviews-api:8000/exchange_rates.json
+      HOLON_KNOWLEDGE_URL: http://knowledge:8000
+      HOLON_ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      HOLON_ICEBERG_WAREHOUSE: s3://holon-warehouse/
+      AWS_ACCESS_KEY_ID: holon
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+      HOLON_S3_ENDPOINT: http://minio:9000
+    volumes:
+      - ./libs:/app/libs
+      - ./services/connectivity/app:/app/app
+    ports:
+      - "8002:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+      reviews-api:
+        condition: service_started
+      iceberg-rest:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+      inventory-stream-seed:
+        condition: service_completed_successfully
+
+  knowledge:
+    build:
+      context: .
+      dockerfile: services/knowledge/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_knowledge
+      HOLON_IDENTITY_URL: http://identity:8000
+      HOLON_INTELLIGENCE_URL: http://intelligence:8000
+      HOLON_OPENSEARCH_URL: http://opensearch:9200
+      HOLON_OPENSEARCH_PASSWORD: ${OPENSEARCH_ADMIN_PASSWORD}
+      HOLON_ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      HOLON_ICEBERG_WAREHOUSE: s3://holon-warehouse/
+      AWS_ACCESS_KEY_ID: holon
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+      HOLON_S3_ENDPOINT: http://minio:9000
+    volumes:
+      - ./libs:/app/libs
+      - ./services/knowledge/app:/app/app
+      - ./docker/spicedb/schema.zed:/app/spicedb-schema.zed:ro
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+      spicedb:
+        condition: service_started
+      opa:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
+
+  automation:
+    build:
+      context: .
+      dockerfile: services/automation/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_automation
+      HOLON_CONNECTIVITY_URL: http://connectivity:8000
+      HOLON_KNOWLEDGE_URL: http://knowledge:8000
+      HOLON_INTELLIGENCE_URL: http://intelligence:8000
+    volumes:
+      - ./libs:/app/libs
+      - ./services/automation/app:/app/app
+    ports:
+      - "8005:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      knowledge:
+        condition: service_started
+      intelligence:
+        condition: service_started
+
+  intelligence:
+    build:
+      context: .
+      dockerfile: services/intelligence/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_intelligence
+      HOLON_KNOWLEDGE_URL: http://knowledge:8000
+      HOLON_QDRANT_URL: http://qdrant:6333
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      HOLON_LLM_MODEL: claude-sonnet-5
+      HOLON_EMBEDDING_PROVIDER: ${HOLON_EMBEDDING_PROVIDER:-voyage}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY}
+      HOLON_WEATHER_FEED_URL: http://reviews-api:8000/weather.json
+      HOLON_S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: holon
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+    # Sandboxing container where the Agent
+    # Runtime's tool calls actually execute. gVisor is genuine kernel-level
+    # sandboxing — installed and tested for real on this host (Colima/
+    # Ubuntu 24.04 aarch64 VM): syscalls the sandboxed process makes are
+    # intercepted by gVisor's userspace kernel (Sentry) rather than
+    # reaching the host kernel directly, so a container-escape
+    # vulnerability in the host kernel itself is no longer sufficient on
+    # its own. `runsc-hostnet` (not plain `runsc`) specifically: gVisor's
+    # own network stack (netstack) reproducibly failed to resolve Docker's
+    # embedded DNS (127.0.0.11) for this container's compose service names
+    # (`postgres`, `knowledge`, ...) — confirmed via direct in-container
+    # socket tests, not assumed. `runsc-hostnet` is a second registered
+    # runtime (same `runsc` binary, `--network=host` gVisor flag — *not*
+    # Docker's own `--network=host`, this container still gets its own
+    # namespace/IP on the compose network) that routes network syscalls
+    # through the real host kernel instead of gVisor's netstack
+    # reimplementation, which fixed it. Real, honestly-stated trade-off:
+    # this narrows kernel-level interception specifically for network
+    # syscalls; every other syscall class (filesystem, process, memory —
+    # the larger kernel attack surface) is still fully intercepted. The
+    # application-level guarantee that actually enforces "no arbitrary
+    # network access" (Tool Registry only requirement)
+    # is unaffected either way — it's enforced in `agent_runtime.py`'s own
+    # code path, not by gVisor's network mode. Verified against real
+    # workload, not just a smoke test: the full LLM-marked suite (real
+    # Postgres/Kafka/Qdrant/Anthropic/Voyage I/O, a real multi-turn agent
+    # tool-calling loop) passes identically under `runsc-hostnet` as it
+    # did under plain `runc`, at no measurably different wall-clock time
+    # for this I/O-bound workload — stable across multiple consecutive
+    # runs. Layered with the container hardening below (no-new-privileges,
+    # dropped capabilities, read-only rootfs) rather than replacing it.
+    # Configurable because CI's GitHub-hosted runner doesn't have gVisor
+    # installed at all — CI overrides this to plain `runc` via its own
+    # .env generation, same pattern as HOLON_EMBEDDING_PROVIDER below.
+    runtime: ${HOLON_INTELLIGENCE_RUNTIME:-runc}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /root/.cache
+    volumes:
+      - ./libs:/app/libs
+      - ./services/intelligence/app:/app/app
+    ports:
+      - "8006:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      knowledge:
+        condition: service_started
+
+  experience:
+    build:
+      context: .
+      dockerfile: services/experience/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_experience
+      HOLON_KNOWLEDGE_URL: http://knowledge:8000
+      HOLON_IDENTITY_URL: http://identity:8000
+      HOLON_INTELLIGENCE_URL: http://intelligence:8000
+    volumes:
+      - ./libs:/app/libs
+      - ./services/experience/app:/app/app
+    ports:
+      - "8004:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      knowledge:
+        condition: service_started
+
+volumes:
+  pg-data:
+  minio-data:
+  mongo-data:

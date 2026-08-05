@@ -1,0 +1,7 @@
+pytest==9.0.3
+pyjwt==2.13.0
+fastapi>=0.110
+pydantic>=2,<3
+aiokafka>=0.10
+asyncpg>=0.29
+prometheus-client>=0.20

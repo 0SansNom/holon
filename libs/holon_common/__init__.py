@@ -1,0 +1,61 @@
+from . import outbox
+from . import event_catalog  # noqa: F401 — importing registers all payload schemas
+from . import registry
+from .resource import Classification, most_restrictive
+from .urn import URN, InvalidURNError, build as build_urn, parse as parse_urn
+from .events import EventActor, EventConsumer, EventEnvelope, EventProducer
+from .auth import Principal, decode_token, issue_token, make_principal_dependency, require_tenant_match
+from .db import create_pool
+from .observability import (
+    CircuitBreaker,
+    CircuitBreakerOpenError,
+    configure_json_logging,
+    instrument_cors,
+    instrument_metrics,
+    instrument_tracing,
+    retry_with_backoff,
+)
+
+__all__ = [
+    "outbox",
+    "event_catalog",
+    "registry",
+    "Classification",
+    "most_restrictive",
+    "URN",
+    "InvalidURNError",
+    "build_urn",
+    "parse_urn",
+    "EventActor",
+    "EventConsumer",
+    "EventEnvelope",
+    "EventProducer",
+    "Principal",
+    "decode_token",
+    "issue_token",
+    "make_principal_dependency",
+    "require_tenant_match",
+    "PermissionClient",
+    "create_pool",
+    "CircuitBreaker",
+    "CircuitBreakerOpenError",
+    "configure_json_logging",
+    "instrument_cors",
+    "instrument_metrics",
+    "instrument_tracing",
+    "retry_with_backoff",
+]
+
+
+def __getattr__(name):
+    # Lazy: PermissionClient needs httpx, which host-side white-box tests
+    # (e.g. test_dlq.py) deliberately don't have installed — they only
+    # ever need EventConsumer/create_pool/registry, so importing those
+    # must not drag httpx in. Deferred here (PEP 562) rather than eagerly
+    # at the top of this file, same reasoning `observability.py` already
+    # applies to its own OTel imports.
+    if name == "PermissionClient":
+        from .authz import PermissionClient
+
+        return PermissionClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
