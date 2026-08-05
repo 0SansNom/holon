@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.pytest_cache/
+*.egg-info/
+.DS_Store
+node_modules/
+services/experience/web/dist/
+services/experience/app/static/
+
+# internal architecture docs — kept locally, not published
+/nova-foundry-sas-v2.md
+/nova-foundry-architecture.md
+/nova-foundry-phase3.md
+/docs/adr/

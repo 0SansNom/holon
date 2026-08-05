@@ -1,0 +1,165 @@
+@import "@blueprintjs/core/lib/css/blueprint.css";
+@import "@blueprintjs/icons/lib/css/blueprint-icons.css";
+@import "@blueprintjs/select/lib/css/blueprint-select.css";
+@import "@blueprintjs/table/lib/css/table.css";
+
+/* A ontology-platform-inspired dark palette layered on top of Blueprint's
+   own dark theme tokens — deep graphite/navy backgrounds, a single sharp
+   accent, monospace for URNs/IDs/technical values (the exact things this
+   product treats as first-class: URNs, plan hashes, classifications). */
+:root {
+  --hl-bg-app: #0b0e14;
+  --hl-bg-panel: #12161f;
+  --hl-bg-panel-raised: #171c27;
+  --hl-border: #262c3a;
+  --hl-text: #d7dae0;
+  --hl-text-muted: #838c9e;
+  --hl-accent: #2d72d2;
+  --hl-accent-soft: rgba(45, 114, 210, 0.15);
+  --hl-danger: #cd4246;
+  --hl-warning: #d9822b;
+  --hl-success: #29a634;
+  --hl-mono: "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--hl-bg-app);
+  color: var(--hl-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+.hl-mono {
+  font-family: var(--hl-mono);
+  font-size: 0.85em;
+}
+
+.hl-shell {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: 100vh;
+}
+
+.hl-sidebar {
+  background: var(--hl-bg-panel);
+  border-right: 1px solid var(--hl-border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 8px;
+}
+
+.hl-sidebar-brand {
+  padding: 8px 12px 20px;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--hl-text);
+}
+
+.hl-sidebar-brand small {
+  display: block;
+  color: var(--hl-text-muted);
+  font-weight: 400;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.hl-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  color: var(--hl-text-muted);
+  text-decoration: none;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.hl-nav-item:hover {
+  background: var(--hl-bg-panel-raised);
+  color: var(--hl-text);
+}
+
+.hl-nav-item.active {
+  background: var(--hl-accent-soft);
+  color: #8abbff;
+}
+
+.hl-main {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.hl-topbar {
+  height: 48px;
+  border-bottom: 1px solid var(--hl-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: var(--hl-bg-panel);
+  flex-shrink: 0;
+}
+
+.hl-content {
+  padding: 24px;
+  flex: 1;
+}
+
+.hl-panel {
+  background: var(--hl-bg-panel);
+  border: 1px solid var(--hl-border);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.hl-classification-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.hl-classification-public {
+  background: rgba(41, 166, 52, 0.15);
+  color: #72ca7a;
+}
+
+.hl-classification-internal {
+  background: rgba(217, 130, 43, 0.15);
+  color: #f0b168;
+}
+
+.hl-classification-confidential {
+  background: rgba(205, 66, 70, 0.15);
+  color: #f28f92;
+}
+
+.hl-masked-field {
+  color: var(--hl-text-muted);
+  font-style: italic;
+}
+
+.hl-login-screen {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--hl-bg-app);
+}
+
+.hl-login-card {
+  width: 420px;
+  background: var(--hl-bg-panel);
+  border: 1px solid var(--hl-border);
+  border-radius: 8px;
+  padding: 32px;
+}

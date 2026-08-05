@@ -1,0 +1,91 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite is black-box e2e over HTTP: it needs the full stack.
+      # .env is git-ignored by design, so CI builds one from the example —
+      # CI-only values, never real secrets (R8.14).
+      #
+      # Intelligence (Phase 3) needs a real ANTHROPIC_API_KEY/VOYAGE_API_KEY
+      # to do anything useful, which CI doesn't have. Rather than fake those,
+      # HOLON_EMBEDDING_PROVIDER is overridden to `local` (sentence-transformers,
+      # no API key needed) so Intelligence's startup indexing succeeds, and the
+      # tests that make real LLM/embedding calls are excluded below via the
+      # `llm` pytest marker — they run on demand (`pytest -m llm`) against a
+      # stack configured with real keys, never in CI.
+      #
+      # HOLON_INTELLIGENCE_RUNTIME overrides docker-compose.yml's default
+      # `runsc-hostnet` (gVisor, ADR 025/R8.9) back to plain `runc` —
+      # GitHub's hosted runner doesn't have gVisor installed at all, so
+      # `runsc-hostnet` would be an unrecognized Docker runtime there.
+      # Real dev/prod environments keep the default.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Create .env from example
+        run: |
+          sed -e 's/=change-me$/=ci-only-not-a-secret/' \
+              -e 's/^OPENSEARCH_ADMIN_PASSWORD=.*/OPENSEARCH_ADMIN_PASSWORD=Holon-CiOnly-Not-A-Secret-2026!/' \
+              -e 's/^HOLON_JWT_SECRET=.*/HOLON_JWT_SECRET=dev-only-walking-skeleton-secret/' \
+              .env.example > .env
+          echo "HOLON_EMBEDDING_PROVIDER=local" >> .env
+          echo "HOLON_INTELLIGENCE_RUNTIME=runc" >> .env
+          # A handful of white-box test files (test_dlq.py,
+          # test_bitemporal_history.py, etc.) connect to Postgres/OpenSearch
+          # directly, reading these two credentials from os.environ (falling
+          # back to the same dev-convenience values .env.example ships) —
+          # docker-compose itself reads .env on its own for container config,
+          # but a plain `pytest` step here does not, so these need exporting
+          # explicitly into the job's environment for the two to agree.
+          grep '^POSTGRES_PASSWORD=' .env >> "$GITHUB_ENV"
+          grep '^OPENSEARCH_ADMIN_PASSWORD=' .env >> "$GITHUB_ENV"
+
+      - name: Start the stack
+        run: make up
+
+      - name: Seed the demo source
+        run: make seed
+
+      - name: Wait for the platforms
+        run: |
+          for i in $(seq 1 90); do
+            all_ok=true
+            for port in 8001 8002 8003 8004 8005 8006; do
+              if ! curl -sf -m 2 "http://localhost:${port}/health" > /dev/null; then
+                all_ok=false
+                break
+              fi
+            done
+            if [ "$all_ok" = "true" ]; then
+              echo "All 6 platform services are healthy!"
+              break
+            fi
+            sleep 3
+          done
+          for port in 8001 8002 8003 8004 8005 8006; do
+            curl -sf -m 2 "http://localhost:${port}/health" > /dev/null \
+              || { echo "service on port ${port} never became healthy"; docker compose logs; exit 1; }
+          done
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements.txt
+
+      - name: Run the suite
+        run: python3 -m pytest -q -m "not llm" tests
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --tail=200

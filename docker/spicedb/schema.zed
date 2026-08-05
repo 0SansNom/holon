@@ -1,0 +1,31 @@
+// ReBAC schema — SAS v2 §8.1. Loaded by Identity at startup via WriteSchema.
+//
+// Deliberately: tenant membership alone does NOT grant workspace access.
+// A workspace's `read` permission comes only from an explicit `viewer` or
+// `editor` relation — this is what makes the check relational rather than
+// a flat tenant-string comparison (the thing this increment replaces).
+
+definition principal {}
+
+definition tenant {
+    relation member: principal
+}
+
+definition workspace {
+    relation parent_tenant: tenant
+    relation viewer: principal
+    relation editor: principal
+    relation admin: principal
+
+    permission read = viewer + editor + admin
+    permission write = editor + admin
+    permission approve = admin
+}
+
+definition object_type {
+    relation parent_workspace: workspace
+
+    permission read = parent_workspace->read
+    permission write = parent_workspace->write
+    permission approve = parent_workspace->approve
+}
