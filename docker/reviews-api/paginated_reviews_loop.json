@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"id": 1, "order_id": 1, "rating": 5, "comment": "Loop fixture — proves the page cap actually stops a source that never terminates.", "reviewer_name": "Test", "reviewed_at": "2026-01-01T00:00:00Z"}
+  ],
+  "next": "http://reviews-api:8000/paginated_reviews_loop.json"
+}

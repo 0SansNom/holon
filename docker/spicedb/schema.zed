@@ -22,10 +22,49 @@ definition workspace {
     permission approve = admin
 }
 
+// Org/Space/Project hierarchy — Project sits one tier below
+// Workspace, the same relative position Foundry's own Project sits below
+// Space. Deliberately cascading, not exclusive: a workspace-wide
+// editor/admin still has write/approve on every project inside it
+// (`parent_workspace->write`), while a project can *also* grant its own
+// direct roles to principals who aren't workspace-wide members (e.g. a
+// contractor scoped to one project only) — the union of both is what
+// `object_type`'s own permissions below inherit from.
+definition project {
+    relation parent_workspace: workspace
+    relation viewer: principal
+    relation editor: principal
+    relation admin: principal
+
+    permission read = viewer + editor + admin + parent_workspace->read
+    permission write = editor + admin + parent_workspace->write
+    permission approve = admin + parent_workspace->approve
+}
+
 definition object_type {
     relation parent_workspace: workspace
+    relation parent_project: project
 
-    permission read = parent_workspace->read
-    permission write = parent_workspace->write
-    permission approve = parent_workspace->approve
+    // A union, not an either/or: an ObjectType keeps its `parent_workspace`
+    // relation when it also gets scoped to a project (see `ontology.py`'s
+    // `_link_object_type_to_project`), so declaring a project scope only
+    // *adds* a narrower access path, it never silently revokes existing
+    // workspace-wide access. Every ObjectType seeded before  has no
+    // `parent_project` relation at all, so this is a no-op for them —
+    // existing behavior is unchanged.
+    permission read = parent_workspace->read + parent_project->read
+    permission write = parent_workspace->write + parent_project->write
+    permission approve = parent_workspace->approve + parent_project->approve
+}
+
+// Markings — deliberately flat, not cascading like `project`
+// above: a marking grant is a direct, admin-issued clearance ("does this
+// principal hold PII clearance"), not something inherited down an org
+// hierarchy. Checked *on top of* `object_type`'s own read/write/approve
+// above, never instead of it (`main.py`'s `_authorize_markings`) — a
+// principal needs both the ordinary ReBAC/ABAC grant *and* every marking
+// the resource carries.
+definition marking {
+    relation holder: principal
+    permission hold = holder
 }

@@ -10,9 +10,8 @@ CREATE DATABASE holon_automation;
 CREATE DATABASE holon_intelligence;
 CREATE DATABASE holon_experience;
 -- Iceberg REST catalog's own JdbcCatalog metadata store — Postgres
--- instead of the image's default embedded SQLite, which is single-
--- writer and locks up under concurrent /sync calls (real incident:
--- [SQLITE_BUSY] The database file is locked).
+-- instead of embedded SQLite, which is single-writer and subject to
+-- concurrency locks under parallel /sync requests ([SQLITE_BUSY]).
 CREATE DATABASE holon_iceberg_catalog;
 
 \c source_erp

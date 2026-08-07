@@ -198,9 +198,21 @@ services:
   # Every app service already exposes `/metrics` and emits OTLP traces to
   # `jaeger:4318` unconditionally — these three containers
   # are what make that data queryable rather than just present.
+  #
+  # `profiles: [dev]`: opt-in, not part of the default `docker compose
+  # up` — a company deploying this is expected to point the same
+  # standard `/metrics` + OTLP output at its *own* observability stack
+  # (Datadog, Grafana Cloud, an existing Prometheus), not run a second
+  # bundled Grafana instance. No app service depends on any of these
+  # three at startup (`HOLON_OTLP_ENDPOINT` is just a URL string — the
+  # OTLP exporter degrades to logged, non-blocking export failures if
+  # Jaeger isn't there, never a startup dependency or a blocked
+  # request), so leaving them out of the default profile is safe. Bring
+  # them up locally with `docker compose --profile dev up`.
   jaeger:
     image: jaegertracing/all-in-one:1.60
     restart: unless-stopped
+    profiles: [ "dev" ]
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     ports:
@@ -210,6 +222,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.55.1
     restart: unless-stopped
+    profiles: [ "dev" ]
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -224,6 +237,7 @@ services:
   grafana:
     image: grafana/grafana:11.3.0
     restart: unless-stopped
+    profiles: [ "dev" ]
     environment:
       # Anonymous admin access — dev-only convenience, same posture as
       # this build's other fixed dev credentials (SpiceDB's preshared
@@ -254,6 +268,7 @@ services:
       context: .
       dockerfile: services/identity/Dockerfile
     restart: unless-stopped
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_identity
@@ -278,6 +293,8 @@ services:
       context: .
       dockerfile: services/connectivity/Dockerfile
     restart: unless-stopped
+
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_connectivity
@@ -316,6 +333,8 @@ services:
       context: .
       dockerfile: services/knowledge/Dockerfile
     restart: unless-stopped
+
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_knowledge
@@ -354,6 +373,8 @@ services:
       context: .
       dockerfile: services/automation/Dockerfile
     restart: unless-stopped
+
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_automation
@@ -380,6 +401,8 @@ services:
       context: .
       dockerfile: services/intelligence/Dockerfile
     restart: unless-stopped
+
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_intelligence
@@ -394,6 +417,13 @@ services:
       AWS_ACCESS_KEY_ID: holon
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
+
+    healthcheck:
+      test: [ "CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)" ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     # Sandboxing container where the Agent
     # Runtime's tool calls actually execute. gVisor is genuine kernel-level
     # sandboxing — installed and tested for real on this host (Colima/
@@ -457,6 +487,8 @@ services:
       context: .
       dockerfile: services/experience/Dockerfile
     restart: unless-stopped
+
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_experience

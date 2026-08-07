@@ -80,6 +80,59 @@ jobs:
               || { echo "service on port ${port} never became healthy"; docker compose logs; exit 1; }
           done
 
+      - name: Sync demo datasets
+        # `make seed` only loads raw rows into source_erp — it never
+        # calls /sync, so nothing is actually catalogued into Iceberg
+        # yet. A large slice of tests/ (test_action.py and 7 other
+        # files) assume Customer/Order/etc. objects already resolve and
+        # own no sync fixture of their own — that assumption only ever
+        # held locally by accident, from a prior manual `scripts/demo.py`
+        # run left over in a dev's long-lived stack. On CI's always-fresh
+        # stack nothing sinks in on its own, so every one of those tests
+        # got a raw NoSuchTableError / masked as JSONDecodeError.
+        #
+        # Polling each sync against Knowledge's own /catalog/datasets
+        # (matched by URN, not index [0] — the same fix already applied
+        # to scripts/demo.py) closes a second gap for free: connectivity's
+        # /sync returns as soon as the Iceberg commit lands, but Knowledge
+        # only catalogues it later, async, once its own outbox-relay
+        # consumer processes the `connectivity.sync.completed` event —
+        # fast enough to always win locally, not guaranteed on a shared
+        # runner. Per-file fixtures like `orders_synced` don't wait for
+        # that either, but they don't need their own fix once this step
+        # has already landed one prior, converged version of the same
+        # dataset — `latest_dataset_version_urn` only needs *a* version
+        # to exist, not specifically the newest one.
+        run: |
+          TOKEN=$(curl -sf -X POST http://localhost:8001/token -H "Content-Type: application/json" \
+            -d '{"principal_urn":"hl:acme:global:user:jdoe","client_secret":"jdoe-dev-secret"}' \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+          for dataset in customers orders support_tickets reviews suppliers; do
+            echo "Syncing $dataset..."
+            RESULT=$(curl -sf -X POST http://localhost:8002/sync -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" -d "{\"dataset\": \"$dataset\"}")
+            echo "  -> $RESULT"
+            DATASET_URN=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['dataset_urn'])")
+            SNAPSHOT_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['snapshot_id'])")
+
+            converged=false
+            for i in $(seq 1 30); do
+              MATCH=$(curl -sf "http://localhost:8003/catalog/datasets" -H "Authorization: Bearer $TOKEN" \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if any(x['urn']=='$DATASET_URN' and str(x['snapshot_id'])=='$SNAPSHOT_ID' for x in d) else 'no')")
+              if [ "$MATCH" = "yes" ]; then
+                echo "  -> catalogued"
+                converged=true
+                break
+              fi
+              sleep 1
+            done
+            if [ "$converged" != "true" ]; then
+              echo "  -> $dataset never converged in Knowledge's catalog within 30s"
+              exit 1
+            fi
+          done
+
       - name: Install test dependencies
         run: pip install -r tests/requirements.txt
 
