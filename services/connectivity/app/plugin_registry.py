@@ -7,25 +7,13 @@ manifest declares. `main.py`'s `run_sync` dispatch falls through to this registr
 when `DATASET_READERS` has no hardcoded entry for the requested dataset.
 
 Dataset-ownership guard: A plugin cannot register itself against a dataset name
-already owned by one of the hardcoded core connectors, or by a different
+already owned by one of the core connectors, or by a different
 already-active plugin.
 
-Honest scope boundary, stated plainly, not glossed over: a plugin's
-synced dataset lands in Iceberg with a real snapshot and a real
-`connectivity.sync.completed` event, exactly like every core connector —
-but nothing here auto-registers an `ObjectType`/`RelationType` for it in
-Knowledge's ontology. Every one of this build's five core connectors
-needed a matching, hand-written ontology registration in Knowledge; a
-plugin still would too, today. Building a manifest-driven
-auto-ontology-registration pipeline (so a plugin's dataset becomes
-queryable as a first-class ObjectType with zero Knowledge-side code) is
-real, additional work not attempted in this slice.
-`services/knowledge/app/catalog.py`'s dispatch was hardened
-(`DATASET_OBJECT_TYPES.get(...)`, not `[...]`) so an ontology-unmapped
-dataset degrades to "catalogued, not yet queryable as an ObjectType"
-instead of crashing the consumer — a real, independently-worthwhile
-robustness fix this gap surfaced, not something invented just for this
-feature.
+Scope note: A plugin's synced dataset lands in Iceberg with a snapshot and a
+`connectivity.sync.completed` event, matching core connectors. If a dataset has
+no corresponding ObjectType/RelationType mapping in Knowledge, cataloguing
+degrades gracefully to "catalogued, not yet queryable as an ObjectType".
 """
 
 from __future__ import annotations
