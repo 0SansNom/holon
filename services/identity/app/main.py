@@ -28,6 +28,7 @@ from holon_common import (
     build_urn,
     configure_json_logging,
     create_pool,
+    install_error_handlers,
     instrument_cors,
     instrument_metrics,
     instrument_tracing,
@@ -37,7 +38,17 @@ from holon_common import (
     retry_with_backoff,
 )
 
-from .seed import VALID_WORKSPACE_RELATIONS, ensure_authz_seeded, ensure_seeded, workspace_urn
+from .seed import (
+    VALID_PROJECT_RELATIONS,
+    VALID_WORKSPACE_RELATIONS,
+    create_project,
+    ensure_authz_seeded,
+    ensure_seeded,
+    get_project,
+    list_projects,
+    project_urn,
+    workspace_urn,
+)
 
 SERVICE_NAME = "identity-platform"
 configure_json_logging(SERVICE_NAME)
@@ -84,6 +95,7 @@ app = FastAPI(title="Holon — Identity Platform", lifespan=lifespan)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET)
 
 
@@ -223,3 +235,108 @@ async def revoke_access(
             await outbox.enqueue(conn, event)
 
     return {"status": "revoked", "principalUrn": principal_urn, "relation": request.relation}
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+
+
+@app.post("/projects", status_code=201)
+async def create_project_endpoint(request: CreateProjectRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """Creating a project is workspace-tier governance (`approve`,
+    admin-only) — same tier as granting workspace access itself. Once
+    created, day-to-day project membership (`.../access/grant`) can be
+    delegated to a project-specific admin, not just workspace admins.
+    """
+    await _authorize_governance_action(principal)
+    urn = project_urn(TENANT_ID, WORKSPACE_ID, request.name)
+    if await get_project(app.state.pool, urn) is not None:
+        raise HTTPException(status_code=409, detail=f"project already exists: {request.name}")
+    project = await create_project(app.state.pool, tenant_id=TENANT_ID, workspace_id=WORKSPACE_ID, name=request.name)
+    await app.state.authz.write_relationship(
+        resource_type="project",
+        resource_urn=urn,
+        relation="parent_workspace",
+        subject_type="workspace",
+        subject_urn=workspace_urn(TENANT_ID, WORKSPACE_ID),
+    )
+    return project
+
+
+@app.get("/projects")
+async def list_projects_endpoint(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return await list_projects(app.state.pool, TENANT_ID)
+
+
+@app.get("/projects/{name}")
+async def get_project_endpoint(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    project = await get_project(app.state.pool, project_urn(TENANT_ID, WORKSPACE_ID, name))
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"unknown project: {name}")
+    return project
+
+
+async def _authorize_project_governance(principal: Principal, project_name: str) -> str:
+    """Cascading, same as `object_type`'s own SpiceDB permission formula:
+    a workspace admin can govern any project (`parent_workspace->approve`),
+    *and* a project can have its own directly-granted admin distinct from
+    anyone at the workspace tier — not an either/or, a union.
+    """
+    urn = project_urn(TENANT_ID, WORKSPACE_ID, project_name)
+    if await get_project(app.state.pool, urn) is None:
+        raise HTTPException(status_code=404, detail=f"unknown project: {project_name}")
+    decision = await app.state.authz.authorize(principal, resource_type="project", resource_urn=urn, permission="approve")
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
+    return urn
+
+
+def _validate_project_relation(relation: str) -> None:
+    if relation not in VALID_PROJECT_RELATIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid relation: {relation!r} (must be one of {sorted(VALID_PROJECT_RELATIONS)})",
+        )
+
+
+@app.post("/projects/{name}/principals/{principal_urn:path}/access/grant")
+async def grant_project_access(
+    name: str, principal_urn: str, request: AccessRequest, principal: Principal = Depends(current_principal)
+) -> dict:
+    p_urn = await _authorize_project_governance(principal, name)
+    _validate_project_relation(request.relation)
+    await app.state.authz.write_relationship(
+        resource_type="project", resource_urn=p_urn, relation=request.relation, subject_urn=principal_urn,
+    )
+    return {"status": "granted", "principalUrn": principal_urn, "project": name, "relation": request.relation}
+
+
+@app.post("/projects/{name}/principals/{principal_urn:path}/access/revoke")
+async def revoke_project_access(
+    name: str, principal_urn: str, request: AccessRequest, principal: Principal = Depends(current_principal)
+) -> dict:
+    p_urn = await _authorize_project_governance(principal, name)
+    _validate_project_relation(request.relation)
+    await app.state.authz.delete_relationship(
+        resource_type="project", resource_urn=p_urn, relation=request.relation, subject_urn=principal_urn,
+    )
+
+    event_id = uuid.uuid4().hex
+    event = EventEnvelope(
+        event_id=event_id,
+        event_type="identity.permission.revoked",
+        tenant_id=TENANT_ID,
+        workspace_id=WORKSPACE_ID,
+        aggregate_type="Principal",
+        aggregate_id=principal_urn,
+        correlation_id=event_id,
+        partition_key=f"{TENANT_ID}/{principal_urn}",
+        producer="identity-platform@0.1.0",
+        actor=EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of),
+        payload={"principal_urn": principal_urn, "resource_type": "project", "resource_urn": p_urn, "relation": request.relation},
+    )
+    async with app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            await outbox.enqueue(conn, event)
+
+    return {"status": "revoked", "principalUrn": principal_urn, "project": name, "relation": request.relation}
