@@ -34,6 +34,14 @@ class ConnectivitySyncCompletedV1(_Payload):
     snapshot_id: int
     row_count: int
     location: str
+    #  (Pipeline/Transform DAG): set only when this sync is a
+    # pipeline TransformStep's output, never by an ordinary connector
+    # sync — the input DatasetVersion this output was computed from.
+    # `catalog._catalogue_sync` records a `derived_from` lineage edge
+    # when present, giving pipeline outputs real dataset-to-dataset
+    # lineage on top of the `maps_to` edges every synced dataset already
+    # gets to its ObjectType.
+    source_dataset_version_urn: Optional[str] = None
 
 
 @register("knowledge.action.requested", version=1)
@@ -49,6 +57,13 @@ class KnowledgeActionInvokedV1(_Payload):
     instance_urn: str
     reason: Optional[str] = None
     approval_id: Optional[int] = None  # present when the action went through approval
+    # The applied property->value edits — only ever set for a declarative
+    # Action Type whose approval also has a writeback target (see
+    # `actions.py`'s `approve_action`); Automation's Workflow Engine reads
+    # this to know *what* to mirror to the source, since it has no other
+    # way to learn a declarative Action's applied values (it never reads
+    # Knowledge's own tables directly).
+    edits: Optional[dict[str, Any]] = None
 
 
 @register("knowledge.action.compensated", version=1)
