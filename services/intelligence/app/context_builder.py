@@ -87,10 +87,7 @@ def _resolve_instance_id(query_text: str) -> Optional[str]:
 
 
 def classify_intent(query_text: str, *, resolved_object_type: Optional[str], resolved_id: Optional[str]) -> str:
-    """No LLM call on this path. A real trained classifier needs
-    the query log to accumulate real volume first; this is the
-    honest, simple heuristic stand-in.
-    """
+    """Determines query intent using heuristic keyword and pattern matching."""
     lowered = query_text.lower()
     if any(keyword in lowered for keyword in _AGGREGATION_KEYWORDS):
         return "aggregation"
