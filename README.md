@@ -1,16 +1,43 @@
 # Holon
 
-An enterprise knowledge platform: connectors ingest data from heterogeneous
-sources into a governed ontology (typed `ObjectType`s and `RelationType`s,
-not raw tables), with ReBAC + ABAC authorization, column-level lineage,
-governed write paths (`Action`s with human-in-the-loop approval for
-high-risk ones), a saga-based workflow engine, unified search, and an
-LLM agent runtime that only ever acts through the same governed paths a
-human user does.
+A from-scratch implementation of an ontology-centric data platform:
+connectors ingest data from heterogeneous sources into a governed
+ontology (typed `ObjectType`s and `RelationType`s, not raw tables),
+with ReBAC + ABAC authorization, column-level lineage, governed write
+paths (`Action`s with human-in-the-loop approval for high-risk ones), a
+saga-based workflow engine, unified search, and an LLM agent runtime
+that only ever acts through the same governed paths a human user does.
+
+## Where this actually stands
+
+The ontology/governance/security core is real and tested against the
+live stack, not mocked: masking is verified to actually strip
+confidential fields for an unauthorized principal, not just labeled as
+enforced; event-sourcing convergence is polled for and confirmed, not
+assumed; the no-code connector and self-serve ObjectType creation are
+exercised end to end. 332 integration tests, no unit-test theater.
+
+It is **not** production-ready as-is. Known gaps, in the order they'd
+actually bite:
+
+- **Single tenant per deployment** — no multi-tenant isolation model.
+- **Dev-only secrets everywhere** (`*-dev-secret`, a plaintext `.env`)
+  and no SSO — just the seeded demo principals.
+- **No load testing at real scale.** Everything here has only ever run
+  on a 2-CPU/4GB local VM; two real missing-timeout bugs (S3, Qdrant)
+  were found there, under trivial load, not synthetic production
+  traffic.
+- **CI runs tests, nothing else** — no build/push/deploy pipeline.
+- **No backup/disaster-recovery story** for Postgres or the
+  Iceberg/MinIO warehouse.
+
+The bundled Prometheus/Grafana/Jaeger (see below) are for local dev —
+a real deployment is expected to point its own observability stack at
+the same `/metrics` and OTLP output every service already emits.
 
 ## What's here
 
-Seven services, each its own FastAPI modulith with its own Postgres database:
+Six services, each its own FastAPI modulith with its own Postgres database:
 
 | Service | Port | Role |
 |---|---|---|
@@ -23,12 +50,8 @@ Seven services, each its own FastAPI modulith with its own Postgres database:
 
 Plus infrastructure: Postgres, MinIO (S3), Iceberg REST catalog, Redpanda
 (Kafka-compatible event bus), SpiceDB (ReBAC), OPA (ABAC), OpenSearch,
-Qdrant (semantic index). Every service exposes `/metrics` (Prometheus
-text format) and emits OTLP traces unconditionally — a deploying
-company is expected to point its own observability stack at those
-standard outputs. A bundled Prometheus/Grafana/Jaeger for local
-convenience lives behind the `dev` Compose profile (see below), not in
-the default service set.
+Qdrant (semantic index), and the dev-only Prometheus/Grafana/Jaeger
+mentioned above.
 
 Shared code (URN scheme, event envelope, transactional outbox, auth
 primitives, plugin registry) lives in `libs/holon_common`.
