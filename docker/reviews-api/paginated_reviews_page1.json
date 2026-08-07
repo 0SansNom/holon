@@ -1,0 +1,9 @@
+{
+  "results": [
+    {"id": 1, "order_id": 1,  "rating": 5, "comment": "Excellent precision, easy to integrate.",     "reviewer_name": "Acme Robotics Ops",   "reviewed_at": "2026-05-20T10:00:00Z"},
+    {"id": 2, "order_id": 2,  "rating": 4, "comment": "Kit works well, manual could be clearer.",     "reviewer_name": "Acme Robotics Ops",   "reviewed_at": "2026-06-10T09:00:00Z"},
+    {"id": 3, "order_id": 4,  "rating": 3, "comment": "Delivery delayed by a week.",                  "reviewer_name": "Nordic Freight Team", "reviewed_at": "2026-06-28T14:00:00Z"},
+    {"id": 4, "order_id": 6,  "rating": 5, "comment": "Casting quality exceeded expectations.",       "reviewer_name": "Kappa QA",            "reviewed_at": "2026-04-25T11:00:00Z"}
+  ],
+  "next": "http://reviews-api:8000/paginated_reviews_page2.json"
+}

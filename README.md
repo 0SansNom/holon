@@ -23,7 +23,12 @@ Seven services, each its own FastAPI modulith with its own Postgres database:
 
 Plus infrastructure: Postgres, MinIO (S3), Iceberg REST catalog, Redpanda
 (Kafka-compatible event bus), SpiceDB (ReBAC), OPA (ABAC), OpenSearch,
-Qdrant (semantic index), Prometheus/Grafana/Jaeger.
+Qdrant (semantic index). Every service exposes `/metrics` (Prometheus
+text format) and emits OTLP traces unconditionally — a deploying
+company is expected to point its own observability stack at those
+standard outputs. A bundled Prometheus/Grafana/Jaeger for local
+convenience lives behind the `dev` Compose profile (see below), not in
+the default service set.
 
 Shared code (URN scheme, event envelope, transactional outbox, auth
 primitives, plugin registry) lives in `libs/holon_common`.
@@ -32,7 +37,8 @@ primitives, plugin registry) lives in `libs/holon_common`.
 
 ```bash
 cp .env.example .env   # fill in real values — never commit .env
-docker compose up -d --build
+docker compose up -d --build            # core services only
+docker compose --profile dev up -d --build   # + Prometheus/Grafana/Jaeger (also what `make up` does)
 ```
 
 The frontend is served by `experience` at `http://localhost:8004`. For
