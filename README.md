@@ -1,12 +1,12 @@
 # Holon
 
-A from-scratch implementation of an ontology-centric data platform:
-connectors ingest data from heterogeneous sources into a governed
-ontology (typed `ObjectType`s and `RelationType`s, not raw tables),
-with ReBAC + ABAC authorization, column-level lineage, governed write
-paths (`Action`s with human-in-the-loop approval for high-risk ones), a
+An enterprise knowledge platform: a governed ontology (typed
+`ObjectType`s and `RelationType`s, not raw tables) over heterogeneous
+sources — Postgres, MongoDB, REST, file, and streaming connectors —
+with ReBAC + ABAC authorization, column-level lineage, human-in-the-loop
+governed writes (`Action`s with approval for high-risk ones), a
 saga-based workflow engine, unified search, and an LLM agent runtime
-that only ever acts through the same governed paths a human user does.
+scoped to the same governed paths a human user goes through.
 
 ## Where this actually stands
 
