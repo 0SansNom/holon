@@ -1,5 +1,5 @@
-"""Plugin SDK. All five extension-point types are supported:
-Connectors, Agent tools, UI components, Execution adapters, Export formats.
+"""Plugin SDK. Six extension-point types are supported:
+Connectors, Agent tools, UI components, Execution adapters, Export formats, Functions.
 
 `PluginManifest` is one shared shape: every plugin type declares common
 metadata (name, version, capabilities, permissions, events, checksum via
@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger("holon_common.plugin")
 
-PluginType = Literal["connector", "agent_tool", "ui_component", "execution_adapter", "export_format"]
+PluginType = Literal["connector", "agent_tool", "ui_component", "execution_adapter", "export_format", "function"]
 
 
 class PluginManifest(BaseModel):
@@ -56,6 +56,12 @@ class PluginManifest(BaseModel):
     format_name: Optional[str] = None
     content_type: Optional[str] = None
 
+    # Function-specific (services/knowledge/app/function_registry.py).
+    # Reuses `input_schema` above (already shared with agent-tool) for the
+    # expected kwargs shape rather than declaring a second field for the
+    # same concept.
+    function_name: Optional[str] = None
+
 
 class ConnectorPlugin(Protocol):
     manifest: PluginManifest
@@ -83,6 +89,12 @@ class ExportFormatPlugin(Protocol):
     def serialize(self, rows: list[dict]) -> bytes: ...
 
 
+class FunctionPlugin(Protocol):
+    manifest: PluginManifest
+
+    async def call(self, **kwargs: Any) -> Any: ...
+
+
 DDL = """
 CREATE TABLE IF NOT EXISTS plugin_registration (
     name TEXT PRIMARY KEY,
@@ -105,12 +117,22 @@ class PluginConflictError(ValueError):
 
 
 def load_entry_point(entry_point: str) -> Any:
+    """`invalidate_caches()` matters here specifically because plugins are
+    meant to be written to disk and registered in the same breath (that's
+    the whole point of this SDK) — without it, a module written within
+    the same filesystem mtime tick as the last import can silently miss
+    `FileFinder`'s directory-listing cache and raise a spurious
+    `ModuleNotFoundError`, a well-known stdlib gotcha for dynamically
+    created modules (see `importlib.invalidate_caches`'s own docs).
+    """
+    importlib.invalidate_caches()
     module_path, class_name = entry_point.split(":")
     module = importlib.import_module(module_path)
     return getattr(module, class_name)()
 
 
 def checksum_of(entry_point: str) -> str:
+    importlib.invalidate_caches()
     module_path, _ = entry_point.split(":")
     module = importlib.import_module(module_path)
     source = inspect.getsource(module)

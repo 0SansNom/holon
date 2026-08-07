@@ -1,14 +1,12 @@
-"""End-to-end verification of permission revocation (Annex C's
-`identity.permission.revoked`, R8.5). Black-box over HTTP, same style as
-the other test modules. Requires the stack running (`make up`).
+"""End-to-end verification of permission revocation (`identity.permission.revoked`).
+Black-box over HTTP, same style as the other test modules. Requires the stack running (`make up`).
 
-Note on R8.5's "<60s propagation": R8.2's decision cache (added after
-this test was first written) means a revocation is no longer visible on
+Note on propagation: decision cache means a revocation is no longer visible on
 the *literal* next request — it propagates via `identity.permission.revoked`
 through the outbox relay (up to its 1s poll interval) to Knowledge's
 invalidation consumer, and the cache's own 5s TTL is a second, independent
 upper bound even if that event were somehow missed. Both are comfortably
-inside R8.5's 60s budget, so this polls for convergence (same idiom used
+inside propagation limits, so this polls for convergence (same idiom used
 everywhere else in this suite for genuinely-async effects) rather than
 asserting on the very next call.
 """
@@ -21,25 +19,10 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 KENJI_URN = f"hl:{TENANT_ID}:global:user:kenji"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -58,16 +41,6 @@ def _token_for(principal_urn: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def msmith_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:msmith")
-
-
-@pytest.fixture(scope="session")
 def kenji_token() -> str:
     return _token_for(KENJI_URN)
 
@@ -78,9 +51,9 @@ def _kenji_can_read_reviews(kenji_token: str) -> bool:
 
 
 def _poll_until(predicate, *, timeout: float = 10.0) -> bool:
-    """R8.5's actual bound is 60s; the decision cache's TTL alone bounds
+    """The decision cache's TTL alone bounds
     staleness at 5s even if the invalidation event were somehow missed —
-    10s here is a comfortable margin for both, not the SLO itself."""
+    10s here is a comfortable margin for both."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -102,7 +75,7 @@ def test_revoke_then_grant_kenji_viewer_access(msmith_token: str, kenji_token: s
     assert status == 200, body
     assert body["status"] == "revoked", body
 
-    assert _poll_until(lambda: not _kenji_can_read_reviews(kenji_token)), "revocation never propagated within R8.5's budget"
+    assert _poll_until(lambda: not _kenji_can_read_reviews(kenji_token)), "revocation never propagated within budget"
     status, body = _request("GET", f"{KNOWLEDGE}/objects/ProductReview", token=kenji_token)
     assert status == 403, body
     assert "rebac_denied" in body["detail"], body

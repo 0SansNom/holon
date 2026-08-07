@@ -12,12 +12,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
-
-TENANT_ID = "acme"
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE
 
 
 def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
@@ -49,16 +44,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def alice_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:alice")
 
 
 @pytest.fixture(scope="session")

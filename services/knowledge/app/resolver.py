@@ -20,6 +20,7 @@ from typing import Optional
 
 import duckdb
 from pyiceberg.catalog import load_catalog
+from pyiceberg.exceptions import NoSuchTableError
 
 _LOAD_TABLE_RETRIES = 4
 _LOAD_TABLE_RETRY_DELAY_SECONDS = 1.5
@@ -42,6 +43,16 @@ def _load_table(table_name: str, *, catalog_uri: str, warehouse: str, s3_endpoin
     for attempt in range(1, _LOAD_TABLE_RETRIES + 1):
         try:
             return catalog.load_table(("raw", table_name))
+        except NoSuchTableError:
+            # A genuinely missing table (no sync has ever run for this
+            # ObjectType yet) is a permanent condition within this
+            # request's lifetime, not a transient blip — retrying it
+            # identically 4 times only adds ~4.5s of latency before
+            # failing the same way. Raise immediately so callers can
+            # treat "table doesn't exist" as "zero rows" (see
+            # `main.py`'s `_resolve_one`/`_resolve_many`), which is what
+            # this fallback's own docstring already promises.
+            raise
         except Exception:
             if attempt == _LOAD_TABLE_RETRIES:
                 raise
@@ -159,4 +170,34 @@ def fetch_inventory_levels(*, sku: Optional[str] = None, **iceberg_config) -> li
         rows = con.execute("SELECT * FROM inventory_levels WHERE id = ?", [sku]).fetch_arrow_table()
     else:
         rows = con.execute("SELECT * FROM inventory_levels ORDER BY id").fetch_arrow_table()
+    return rows.to_pylist()
+
+
+def fetch_generic(dataset_name: str, *, id_value: Optional[str] = None, **iceberg_config) -> list[dict]:
+    """The self-serve counterpart to the five `fetch_*` functions above:
+    every one of them already does exactly this — `SELECT * FROM table`,
+    optionally `WHERE id = ?` — the only thing that ever varied between
+    them was the table name and the id kwarg's Python name, neither of
+    which changes the query. Parameterized by `dataset_name` instead of
+    hardcoded, so a self-serve ObjectType (`ontology.create_object_type`)
+    reads through the identical scan-then-DuckDB path without needing its
+    own hand-written function.
+    """
+    table = _load_table(dataset_name, **iceberg_config)
+    arrow_table = table.scan().to_arrow()
+
+    con = duckdb.connect()
+    con.register("t", arrow_table)
+    if id_value is not None:
+        # A self-serve source's `id` column type isn't known ahead of
+        # time the way the six core connectors' is (declared schemas) —
+        # try numeric first since that's the common case, fall back to
+        # the raw string rather than assume.
+        try:
+            typed_id: object = int(id_value)
+        except ValueError:
+            typed_id = id_value
+        rows = con.execute("SELECT * FROM t WHERE id = ?", [typed_id]).fetch_arrow_table()
+    else:
+        rows = con.execute("SELECT * FROM t ORDER BY id").fetch_arrow_table()
     return rows.to_pylist()

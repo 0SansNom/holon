@@ -30,6 +30,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from conftest import TENANT_ID
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 
@@ -46,7 +47,6 @@ KAFKA_BOOTSTRAP = "localhost:19092"  # the OUTSIDE listener — see docker-compo
 # worked by coincidence locally — a real CI failure, not a flake.
 # Default matches .env.example's dev convenience value.
 DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_knowledge"
-TENANT_ID = "acme"
 
 
 async def _replay_catalog_from_origin() -> dict[str, dict]:

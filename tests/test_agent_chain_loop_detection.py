@@ -28,6 +28,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from conftest import IDENTITY, INTELLIGENCE, TENANT_ID, _request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 
@@ -37,30 +38,14 @@ from holon_common import create_pool  # noqa: E402
 # secret-exposure risk); run explicitly with `pytest -m llm`.
 pytestmark = pytest.mark.llm
 
-IDENTITY = "http://localhost:8001"
-INTELLIGENCE = "http://localhost:8006"
 # Password read from the environment, not hardcoded — CI generates its
 # own .env with a different POSTGRES_PASSWORD than a dev's local one
 # (see .github/workflows/tests.yml). Default matches .env.example's dev
 # convenience value for a plain `pytest tests/` run against `make up`.
 INTELLIGENCE_DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_intelligence"
 
-TENANT_ID = "acme"
 CHAIN_TRIGGER_AGENT_URN = f"hl:{TENANT_ID}:global:service-account:automation-agent-chain-trigger"
 MAX_CHAIN_DEPTH = 2  # keeps this test to 3 real LLM calls total (root + 2 hops), not 11
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -76,11 +61,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 async def _chain_trigger_session_count(min_depth: int = 1) -> int:

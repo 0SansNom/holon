@@ -10,31 +10,15 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 WORKSPACE_ID = "demo"
 
 # Mirrors seed/source_erp.sql — customer 1 has 3 orders, customer 3 has none.
 CUSTOMER_WITH_ORDERS = 1
 EXPECTED_ORDER_COUNT_FOR_CUSTOMER_WITH_ORDERS = 3
 CUSTOMER_WITHOUT_ORDERS = 3
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -50,16 +34,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def alice_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:alice")
 
 
 @pytest.fixture(scope="session")

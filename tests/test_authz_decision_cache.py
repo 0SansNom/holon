@@ -1,4 +1,4 @@
-"""R8.2 — decision cache with event-driven invalidation
+"""Decision cache with event-driven invalidation
 (`libs/holon_common/authz.py`). Proves the cache mechanism itself (not
 just its side effects, which `test_permission_revocation.py`/
 `test_agent_delegation.py` already re-verify after this feature landed):
@@ -21,24 +21,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-
-IDENTITY = "http://localhost:8001"
-KNOWLEDGE = "http://localhost:8003"
-
-TENANT_ID = "acme"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+from conftest import IDENTITY, KNOWLEDGE, _request
 
 
 def _token_for(principal_urn: str) -> str:
@@ -54,11 +37,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 def _read_cache_counters() -> tuple[int, int]:

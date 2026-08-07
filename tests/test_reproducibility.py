@@ -9,20 +9,19 @@ black-box HTTP for everything else. Requires the stack running (`make up`).
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import time
-import urllib.error
-import urllib.request
+import sys
+from pathlib import Path
 
 import asyncpg
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 
-TENANT_ID = "acme"
+from holon_sdk import HolonClient  # noqa: E402
+
+
 # Password read from the environment, not hardcoded — CI generates its
 # own .env with a different POSTGRES_PASSWORD than a dev's local one
 # (see .github/workflows/tests.yml), so a hardcoded value here only ever
@@ -35,38 +34,16 @@ SOURCE_ERP_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holo
 CUSTOMER_ID = 4
 MUTATED_EMAIL = "r1-14-reproducibility-test@example.invalid"
 
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
+client = HolonClient(identity_url=IDENTITY)
+_request = client.request
 
 
 @pytest.fixture(scope="session")
 def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
+    try:
+        return client.token_for(f"hl:{TENANT_ID}:global:user:jdoe")
+    except TimeoutError as exc:
+        pytest.fail(str(exc))
 
 
 async def _get_email(customer_id: int) -> str:
@@ -86,18 +63,10 @@ async def _set_email(customer_id: int, email: str) -> None:
 
 
 def _sync_and_wait(jdoe_token: str) -> dict:
-    status, result = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "customers"})
-    assert status == 200, result
-
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        status, datasets = _request("GET", f"{KNOWLEDGE}/catalog/datasets", token=jdoe_token)
-        assert status == 200
-        customers = next((d for d in datasets if d["urn"] == result["dataset_urn"]), None)
-        if customers and customers["snapshot_id"] == result["snapshot_id"]:
-            return result
-        time.sleep(1)
-    pytest.fail("catalog did not converge to the new customers snapshot in time")
+    try:
+        return client.sync_and_wait(connectivity_url=CONNECTIVITY, knowledge_url=KNOWLEDGE, token=jdoe_token)
+    except (RuntimeError, TimeoutError) as exc:
+        pytest.fail(str(exc))
 
 
 def test_replaying_a_frozen_plan_reproduces_the_original_result_despite_a_later_mutation(jdoe_token: str) -> None:

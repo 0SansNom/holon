@@ -10,11 +10,9 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import IDENTITY, KNOWLEDGE
 
-IDENTITY = "http://localhost:8001"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 OBJECT_TYPES = ["Customer", "Order", "SupportTicket", "ProductReview", "Supplier", "InventoryLevel"]
 ACTIONS = ["Customer.putOnCreditHold", "Customer.closeAccount"]
 
@@ -44,11 +42,6 @@ def _token_for(principal_urn: str) -> str:
         except urllib.error.HTTPError:
             time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 @pytest.mark.parametrize("object_type", OBJECT_TYPES)

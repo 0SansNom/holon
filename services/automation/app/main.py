@@ -23,6 +23,7 @@ from holon_common import (
     Principal,
     configure_json_logging,
     create_pool,
+    install_error_handlers,
     instrument_metrics,
     instrument_tracing,
     make_principal_dependency,
@@ -97,6 +98,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Holon — Automation Platform", lifespan=lifespan)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET)
 
 

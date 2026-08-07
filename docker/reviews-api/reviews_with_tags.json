@@ -1,0 +1,14 @@
+[
+    {
+        "id": 1,
+        "comment": "Excellent precision, easy to integrate.",
+        "tags_json": "[\"quality\", \"integration\"]",
+        "address_json": "{\"city\": \"Lyon\", \"country\": \"FR\"}"
+    },
+    {
+        "id": 2,
+        "comment": "Kit works well, manual could be clearer.",
+        "tags_json": "[\"documentation\"]",
+        "address_json": "{\"city\": \"Berlin\", \"country\": \"DE\"}"
+    }
+]

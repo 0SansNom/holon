@@ -13,24 +13,7 @@ import urllib.request
 import uuid
 
 import pytest
-
-IDENTITY = "http://localhost:8001"
-EXPERIENCE = "http://localhost:8004"
-
-TENANT_ID = "acme"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+from conftest import EXPERIENCE, IDENTITY, _request
 
 
 def _token_for(principal_urn: str) -> str:
@@ -46,11 +29,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 def _object_app_definition(*, include_close_account: bool = False) -> dict:
@@ -285,3 +263,95 @@ def test_form_with_invalid_field_type_is_rejected(jdoe_token: str) -> None:
     status, body = _request("POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": bad_definition})
     assert status == 400, body
     assert "invalid type" in body["detail"], body
+
+
+def _analytics_definition(object_type: str = "Customer") -> dict:
+    return {
+        "surfaces": [{"type": "analytics", "route": "/apps/test/analytics", "objectType": object_type}],
+        "bindings": [], "actionRefs": [],
+    }
+
+
+def test_analytics_surface_creates_and_computes_dependencies(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _analytics_definition()}
+    )
+    assert status == 200, app
+    assert app["dependencies"]["objectTypes"] == ["Customer"], app
+
+
+def test_analytics_execute_is_bounded_to_the_declared_object_type(jdoe_token: str) -> None:
+    """The **analytics** surface: a real `ExecutionRequest` is
+    accepted ad hoc (unlike every other surface's fixed read path), but
+    only against the one ObjectType the surface declared — proxying
+    through to a *different* ObjectType (Order, say, on a Customer-scoped
+    surface) must be rejected before it ever reaches Knowledge.
+    """
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _analytics_definition()}
+    )
+    assert status == 200, app
+
+    status, group_by = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Customer", "operation": "group_by", "group_by_property": "segment"},
+    )
+    assert status == 200, group_by
+    assert len(group_by["results"]) > 0, group_by
+
+    status, out_of_scope = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Order", "operation": "count", "filter_property": "status", "filter_value": "pending"},
+    )
+    assert status == 403, out_of_scope
+    assert "scoped to" in out_of_scope["detail"], out_of_scope
+
+
+def test_analytics_replay_proxies_through_and_analytics_masking_is_preserved(
+    jdoe_token: str, kenji_token: str
+) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _analytics_definition()}
+    )
+    assert status == 200, app
+
+    status, run = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Customer", "operation": "filter", "filter_property": "id", "filter_value": "1"},
+    )
+    assert status == 200, run
+    assert run["results"][0]["email"] is not None, run
+
+    status, replayed = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/{run['planHash']}/replay", token=jdoe_token,
+    )
+    assert status == 200, replayed
+    assert replayed["reproducible"] is True, replayed
+
+    # Same application, same declared scope, a different (ABAC-denied)
+    # caller — Experience's proxy applies no masking of its own, so this
+    # is really proving Knowledge's own R8.7 masking survives the
+    # extra hop through Experience unchanged.
+    status, masked = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=kenji_token,
+        body={"object_type": "Customer", "operation": "filter", "filter_property": "id", "filter_value": "1"},
+    )
+    assert status == 200, masked
+    assert masked["results"][0]["email"] is None, masked
+
+
+def test_analytics_endpoints_require_the_surface_to_be_declared(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200, app
+    status, err = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Customer", "operation": "count", "filter_property": "id", "filter_value": "1"},
+    )
+    assert status == 400, err
+    assert "no analytics surface" in err["detail"], err

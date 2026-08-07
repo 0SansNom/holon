@@ -65,6 +65,14 @@ ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS causation_id TEXT;
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS causation_depth INT NOT NULL DEFAULT 0;
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS chain_trigger BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS max_chain_depth INT NOT NULL DEFAULT 10;
+
+--  (AIP-equivalent no-code tooling): an `agentApp` in Experience's
+-- Application Builder compiles its declared tool allowlist/system-prompt
+-- template into these two optional fields — `NULL` (the default) means
+-- "behave exactly as before," so every pre-Phase-D caller of
+-- `POST /sessions` is completely unaffected.
+ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS allowed_tools JSONB;
+ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS system_prompt TEXT;
 """
 
 _SYSTEM_PROMPT = (
@@ -92,12 +100,14 @@ async def create_session(
     causation_depth: int = 0,
     chain_trigger: bool = False,
     max_chain_depth: int = 10,
+    allowed_tools: Optional[list[str]] = None,
+    system_prompt: Optional[str] = None,
 ) -> dict:
     if chain_trigger and causation_depth > max_chain_depth:
-        # The authoritative circuit breaker — holds even if a caller
-        # (or a bug in Automation's own pre-check) tries to push one hop
-        # past the declared ceiling. `max_chain_depth` is inclusive: a
-        # session AT that depth is the last one allowed to exist.
+        # Authoritative circuit breaker enforcing defense-in-depth: guarantees
+        # that chained session creation is rejected if causation_depth exceeds
+        # max_chain_depth, regardless of upstream caller checks. `max_chain_depth`
+        # is inclusive: a session at that depth is the last allowed session.
         raise ValueError(
             f"refusing to start a chained agent session at causation_depth={causation_depth} "
             f"(max_chain_depth={max_chain_depth}) — loop guard"
@@ -109,11 +119,13 @@ async def create_session(
         """
         INSERT INTO agent_session
             (urn, tenant_id, agent_urn, on_behalf_of, budget, expires_at,
-             causation_id, causation_depth, chain_trigger, max_chain_depth)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+             causation_id, causation_depth, chain_trigger, max_chain_depth,
+             allowed_tools, system_prompt)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11::jsonb, $12)
         """,
         session_urn, tenant_id, agent_urn, on_behalf_of, json.dumps(full_budget), expires_at,
         causation_id, causation_depth, chain_trigger, max_chain_depth,
+        json.dumps(allowed_tools) if allowed_tools is not None else None, system_prompt,
     )
     return await get_session(pool, session_urn)
 
@@ -126,6 +138,8 @@ async def get_session(pool: asyncpg.Pool, session_urn: str) -> Optional[dict]:
     for field in ("budget", "consumed"):
         if isinstance(result[field], str):
             result[field] = json.loads(result[field])
+    if isinstance(result.get("allowed_tools"), str):
+        result["allowed_tools"] = json.loads(result["allowed_tools"])
     return result
 
 
@@ -133,9 +147,7 @@ async def get_transcript(pool: asyncpg.Pool, session_urn: str) -> list[dict]:
     rows = await pool.fetch(
         "SELECT role, content, recorded_at FROM agent_turn WHERE session_urn = $1 ORDER BY id", session_urn
     )
-    # asyncpg returns JSONB columns as raw text, not parsed dicts (unlike
-    # some other frameworks) — every other JSONB reader in this codebase
-    # (e.g. serving_store.get_instance) already does this same parse.
+    # asyncpg returns JSONB columns as unparsed strings; parse them into structured objects.
     return [{"role": row["role"], "content": json.loads(row["content"]), "recorded_at": row["recorded_at"]} for row in rows]
 
 
@@ -149,13 +161,27 @@ async def _record_turn(pool: asyncpg.Pool, session_urn: str, role: str, content:
 
 
 async def _list_tools(
-    pool: asyncpg.Pool, http: httpx.AsyncClient, knowledge_url: str, headers: dict
+    pool: asyncpg.Pool,
+    http: httpx.AsyncClient,
+    knowledge_url: str,
+    headers: dict,
+    *,
+    allowed_tool_names: Optional[list[str]] = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Compiles two sources into one tool list: Knowledge's real,
     audited ontology Actions, and any active **agent tool plugin**
     — a synthetic capability with no ontology
     backing at all (see `tool_plugin_registry.py`'s module docstring).
     Recomputed fresh every turn.
+
+    `allowed_tool_names` (an `agentApp`'s configured allowlist,
+    threaded down from `run_turn`'s session row) narrows the result to
+    just those names when given — `None` (every pre-Phase-D caller)
+    returns the full set exactly as before. Filters rather than errors on
+    an unknown name: validating that a declared name is real is
+    Experience's `application_builder.py`'s job at definition time
+    (`GET /tools`, the same list this function computes), not this
+    runtime call's.
     """
     response = await http.get(f"{knowledge_url}/actions", headers=headers)
     response.raise_for_status()
@@ -186,7 +212,23 @@ async def _list_tools(
             {"name": tool_name, "description": manifest["tool_description"], "input_schema": manifest["input_schema"]}
         )
 
+    if allowed_tool_names is not None:
+        allowed = set(allowed_tool_names)
+        tools = [t for t in tools if t["name"] in allowed]
+        by_tool_name = {name: entry for name, entry in by_tool_name.items() if name in allowed}
+
     return tools, by_tool_name
+
+
+async def list_tools(pool: asyncpg.Pool, http: httpx.AsyncClient, knowledge_url: str, headers: dict) -> list[dict]:
+    """Public counterpart to `_list_tools`, for `GET /tools` —
+    the live tool-name catalog an `agentApp` surface's declared allowlist
+    is validated against, and generally useful for any caller wanting to
+    see what an agent could be configured to use, without needing the
+    internal `by_tool_name` dispatch table.
+    """
+    tools, _ = await _list_tools(pool, http, knowledge_url, headers)
+    return tools
 
 
 async def _invoke_tool(http: httpx.AsyncClient, knowledge_url: str, headers: dict, entry: dict, tool_input: dict) -> dict:
@@ -275,6 +317,7 @@ async def run_turn(
 
     budget = session["budget"]
     consumed = session["consumed"]
+    system_prompt = session.get("system_prompt") or _SYSTEM_PROMPT
 
     await _record_turn(pool, session_urn, "user", {"text": user_message})
     messages = [{"role": "user", "content": user_message}]
@@ -282,14 +325,16 @@ async def run_turn(
     headers = {"Authorization": authorization}
     final_text = ""
     async with httpx.AsyncClient(timeout=15.0) as http:
-        tools, by_tool_name = await _list_tools(pool, http, knowledge_url, headers)
+        tools, by_tool_name = await _list_tools(
+            pool, http, knowledge_url, headers, allowed_tool_names=session.get("allowed_tools")
+        )
 
         while True:
             if consumed["iterations"] >= budget["max_iterations"]:
                 await _finish_session(pool, session, "aborted", consumed)
                 raise ValueError(f"session {session_urn} exceeded max_iterations ({budget['max_iterations']})")
 
-            response = await llm.complete(system=_SYSTEM_PROMPT, messages=messages, max_tokens=1024, tools=tools)
+            response = await llm.complete(system=system_prompt, messages=messages, max_tokens=1024, tools=tools)
             consumed["iterations"] += 1
             consumed["tokens"] += response.input_tokens + response.output_tokens
             if consumed["tokens"] > budget["max_tokens"]:
@@ -331,6 +376,9 @@ async def run_turn(
 
 
 async def replay_session(pool: asyncpg.Pool, *, session_urn: str, llm: LLMClient) -> dict:
+    session = await get_session(pool, session_urn)
+    if session is None:
+        raise ValueError(f"no agent_session found for {session_urn!r}")
     transcript = await get_transcript(pool, session_urn)
     user_turns = [t for t in transcript if t["role"] == "user" and "text" in t["content"]]
     assistant_turns = [t for t in transcript if t["role"] == "assistant"]
@@ -342,8 +390,9 @@ async def replay_session(pool: asyncpg.Pool, *, session_urn: str, llm: LLMClient
         if block.get("type") == "text":
             original_text += block["text"]
 
+    system_prompt = session.get("system_prompt") or _SYSTEM_PROMPT
     response = await llm.complete(
-        system=_SYSTEM_PROMPT, messages=[{"role": "user", "content": user_turns[0]["content"]["text"]}], max_tokens=1024
+        system=system_prompt, messages=[{"role": "user", "content": user_turns[0]["content"]["text"]}], max_tokens=1024
     )
     return {
         "sessionUrn": session_urn,

@@ -140,7 +140,7 @@ async def run_gold_set(
         "latency_p95_seconds": latencies[p95_index] if latencies else None,
         "total_tokens": total_tokens,
         # These need expert judgment / real usage patterns to compute —
-        # reported honestly as unmeasurable rather than fabricated.
+        # marked as not measurable until a gold set is provided.
         "abstention_appropriee": "not measurable without a real gold set",
         "faux_refus": "not measurable without a real gold set",
     }

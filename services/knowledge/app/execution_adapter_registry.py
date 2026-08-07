@@ -12,7 +12,7 @@ Enforced **ObjectType-ownership guard**: only one active adapter may claim a giv
 `adapter_object_type` at a time — an adapter can't silently intercept
 queries meant for a different registered engine.
 
-Isolation — honestly scoped: the adapter still only ever reads
+Isolation scope: the adapter still only ever reads
 through this same process's connection pool (`pool`), passed in
 explicitly — it doesn't get its own unaudited storage access, and the
 example adapter (`plugins/serving_store_adapter_plugin.py`) queries

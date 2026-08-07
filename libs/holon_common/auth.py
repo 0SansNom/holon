@@ -2,6 +2,32 @@
 
 `Principal` and its JWT encoding form the identity primitives.
 `holon_common.authz.PermissionClient` handles authorization decisions.
+
+**Key rotation — not implemented, deliberately deferred, design captured
+here.** Today `issue_token`/`decode_token` take a single shared secret
+(every service reads the identical `HOLON_JWT_SECRET` env var),
+`algorithm="HS256"` hardcoded, no `kid` claim. Appropriate for a
+pre-commercial build with no real users/secrets at risk yet — but real
+debt, not nothing, so the shape of the fix is written down rather than
+left to be rediscovered:
+
+- `HOLON_JWT_SECRET` (singular) → `HOLON_JWT_SECRETS`, a `kid:secret` map
+  (e.g. a small JSON object or `kid1:secretA,kid2:secretB` env value).
+- `issue_token` stamps the currently-active `kid` into the JWT header
+  (`jwt.encode(..., headers={"kid": active_kid})`).
+- `decode_token` reads the unverified header's `kid` first, looks up the
+  matching secret, *then* verifies — falling back to a clear 401 (not a
+  crash) if `kid` is missing or unknown.
+- Every internal token-minting call site needs the active `kid` threaded
+  through (10 call sites across 7 files, as of this note):
+  `services/automation/app/agent_chain_trigger.py:57`,
+  `services/automation/app/workflow.py:92,121`,
+  `services/connectivity/app/main.py:355`,
+  `services/identity/app/main.py:151` (the actual `/token` sign-in
+  endpoint), `services/intelligence/app/main.py:76,92`,
+  `services/experience/app/main.py:64`,
+  `services/knowledge/app/routers/ontology_admin.py:43`,
+  `services/knowledge/app/plugins/customer_value_model_function.py:43`.
 """
 
 from __future__ import annotations

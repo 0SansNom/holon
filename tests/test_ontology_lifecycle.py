@@ -19,24 +19,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-
-IDENTITY = "http://localhost:8001"
-KNOWLEDGE = "http://localhost:8003"
-
-TENANT_ID = "acme"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+from conftest import IDENTITY, KNOWLEDGE, _request
 
 
 def _token_for(principal_urn: str) -> str:
@@ -54,16 +37,6 @@ def _token_for(principal_urn: str) -> str:
     pytest.fail(f"could not mint a token for {principal_urn}")
 
 
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def msmith_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:msmith")
-
-
 def test_editor_cannot_propose_or_publish_a_version(jdoe_token: str) -> None:
     status, body = _request(
         "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=jdoe_token, body={"description": "should be denied"}
@@ -73,9 +46,8 @@ def test_editor_cannot_propose_or_publish_a_version(jdoe_token: str) -> None:
 
 
 def test_property_mapping_is_a_real_object_not_a_json_string(msmith_token: str) -> None:
-    """A real bug caught while building this feature: `GET /ontology/{name}`
-    had never parsed the JSONB `property_mapping` column, silently handing
-    every caller a JSON *string* instead of an object.
+    """Verifies that `GET /ontology/{name}` parses the JSONB `property_mapping`
+    column into a structured JSON object rather than returning a raw string.
     """
     status, body = _request("GET", f"{KNOWLEDGE}/ontology/Supplier", token=msmith_token)
     assert status == 200, body
@@ -91,7 +63,11 @@ def test_draft_does_not_affect_live_definition_until_published(msmith_token: str
         "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=msmith_token, body={"description": marker}
     )
     assert status == 201, draft
-    assert draft["version"] == current["version"] + 1, draft
+    # Not necessarily exactly current+1: other tests (branching, interfaces)
+    # may have left unpublished drafts at higher numbers on Supplier too —
+    # `propose_object_type_version` correctly skips past those to avoid a
+    # version-number collision, it only guarantees *newer than current*.
+    assert draft["version"] > current["version"], draft
     assert draft["status"] == "draft", draft
     # Partial update: property_mapping wasn't specified, must carry the
     # current published value forward unchanged.
@@ -132,7 +108,16 @@ def test_republishing_an_already_published_version_is_rejected(msmith_token: str
 
 
 def test_version_history_lists_every_proposed_version(msmith_token: str) -> None:
+    """Every version this file itself proposes gets published — but the
+    history can also legitimately contain a permanent `draft` from
+    elsewhere (e.g. `test_interfaces.py`'s rejected-`implements` case:
+    `object_type_version` is append-only, a failed publish leaves its
+    draft row sitting there forever), so this only asserts about the
+    versions this test file is actually responsible for.
+    """
     status, versions = _request("GET", f"{KNOWLEDGE}/ontology/Supplier/versions", token=msmith_token)
     assert status == 200, versions
     assert len(versions) >= 2, versions
-    assert all(v["status"] == "published" for v in versions), versions
+    by_description = {v["description"]: v["status"] for v in versions}
+    for marker in ("second pass",):
+        assert by_description.get(marker) == "published", versions
