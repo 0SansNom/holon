@@ -1,8 +1,7 @@
-"""End-to-end verification of the fourth connector — file import (§9.1,
-§3's architecture diagram names "import fichiers" as a distinct
-Connectivity capability) — and the standalone `Supplier` ObjectType it
-feeds. Black-box over HTTP, same style as the other connector tests.
-Requires the stack running (`make up`).
+"""End-to-end verification of the fourth connector — file import —
+and the standalone `Supplier` ObjectType it feeds. Black-box over HTTP,
+same style as the other connector tests. Requires the stack running
+(`make up`).
 """
 
 from __future__ import annotations
@@ -13,29 +12,13 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 WORKSPACE_ID = "demo"
 
 # Mirrors docker/csv-seed/suppliers.csv.
 SEEDED_SUPPLIER_COUNT = 10
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -51,11 +34,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 @pytest.fixture(scope="session")
@@ -77,7 +55,7 @@ def test_file_connector_is_a_fourth_distinct_connector(jdoe_token: str, supplier
 
 
 def test_supplier_classification_is_internal(jdoe_token: str, suppliers_synced: dict) -> None:
-    # Recomputed asynchronously by the catalog consumer (R1.5) — poll
+    # Recomputed asynchronously by the catalog consumer — poll
     # rather than assume convergence, same race every other connector
     # test already handles.
     deadline = time.monotonic() + 30

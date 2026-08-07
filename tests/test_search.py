@@ -1,4 +1,4 @@
-"""End-to-end verification of unified search (SAS R8.6) — entitlement
+"""End-to-end verification of unified search — entitlement
 tokens derived from the ReBAC/ABAC graph, filtered at the source inside
 OpenSearch's own query, never post-filtered in application code. Black-box
 over HTTP, same style as the other test modules. Requires the stack
@@ -13,25 +13,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
-
-TENANT_ID = "acme"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request
 
 
 def _token_for(principal_urn: str) -> str:
@@ -47,21 +29,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def kenji_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:kenji")
-
-
-@pytest.fixture(scope="session")
-def alice_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:alice")
 
 
 @pytest.fixture(scope="session")
@@ -115,8 +82,7 @@ def test_no_post_filter_leak_total_matches_permitted_count_only(
 ) -> None:
     """"Acme" matches both the confidential Customer ("Acme Robotics") and
     a public ProductReview (reviewer_name "Acme Robotics Ops"). kenji is
-    ABAC-denied on the former, granted on the latter (§ increment #8's
-    established proof point). R8.6: `total` must equal exactly the
+    ABAC-denied on the former, granted on the latter. `total` must equal exactly the
     permitted count — not the true cross-object-type total with a
     permitted subset silently returned underneath it.
     """
@@ -135,3 +101,40 @@ def test_rebac_denied_principal_cannot_search_at_all(alice_token: str, all_datas
     status, body = _request("GET", f"{KNOWLEDGE}/search?q=Robotics", token=alice_token)
     assert status == 403, body
     assert "rebac_denied" in body["detail"], body
+
+
+def test_facets_report_a_count_per_object_type(jdoe_token: str, all_datasets_synced: None) -> None:
+    # "Acme" matches Customer ("Acme Robotics") and ProductReview
+    # (reviewer_name "Acme Robotics Ops") — wait for both sides so the
+    # facet assertion below isn't racing indexing.
+    _search(jdoe_token, "Acme", want_object_type="ProductReview")
+    result = _search(jdoe_token, "Acme")
+    assert result["facets"].get("Customer", 0) >= 1, result
+    assert result["facets"].get("ProductReview", 0) >= 1, result
+    assert sum(result["facets"].values()) == result["total"], result
+
+
+def test_object_type_filter_narrows_hits_without_collapsing_other_facet_counts(
+    jdoe_token: str, all_datasets_synced: None
+) -> None:
+    _search(jdoe_token, "Acme", want_object_type="ProductReview")
+    baseline = _search(jdoe_token, "Acme")
+
+    status, filtered = _request("GET", f"{KNOWLEDGE}/search?q=Acme&object_type=Customer", token=jdoe_token)
+    assert status == 200, filtered
+    assert filtered["total"] == baseline["facets"]["Customer"], (filtered, baseline)
+    assert all(r["object_type"] == "Customer" for r in filtered["results"]), filtered
+    # The unselected facet's count must be unaffected by the filter — a
+    # `post_filter`, not a query-level filter, is what makes this true.
+    assert filtered["facets"] == baseline["facets"], (filtered, baseline)
+
+
+def test_pagination_size_and_from_are_respected(jdoe_token: str, all_datasets_synced: None) -> None:
+    status, page = _request("GET", f"{KNOWLEDGE}/search?q=a&size=2", token=jdoe_token)
+    assert status == 200, page
+    assert len(page["results"]) <= 2, page
+
+    status, next_page = _request("GET", f"{KNOWLEDGE}/search?q=a&size=2&from=2", token=jdoe_token)
+    assert status == 200, next_page
+    if page["results"] and next_page["results"]:
+        assert page["results"][0]["urn"] != next_page["results"][0]["urn"], (page, next_page)

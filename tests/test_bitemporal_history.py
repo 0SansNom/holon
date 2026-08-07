@@ -20,12 +20,9 @@ import urllib.request
 
 import asyncpg
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 # Password read from the environment, not hardcoded — CI generates its
 # own .env with a different POSTGRES_PASSWORD than a dev's local one
 # (see .github/workflows/tests.yml), so a hardcoded value here only ever
@@ -37,19 +34,6 @@ SOURCE_ERP_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holo
 # mutate customer email (test_reproducibility.py uses customer 4).
 CUSTOMER_ID = 2
 MUTATED_EMAIL = "p9-bitemporal-test@example.invalid"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -65,11 +49,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 async def _get_email(customer_id: int) -> str:

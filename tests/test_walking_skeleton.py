@@ -1,4 +1,4 @@
-"""End-to-end verification of the Phase 0 exit criterion (SAS v2 §14.1):
+"""End-to-end verification of end-to-end walking skeleton:
 
   "A datum enters through the connector and comes back out in a
   dashboard, with full lineage and permissions applied. No manual step."
@@ -17,29 +17,12 @@ import urllib.request
 
 import jwt
 import pytest
+from conftest import CONNECTIVITY, EXPERIENCE, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
-EXPERIENCE = "http://localhost:8004"
 
 JWT_SECRET = "dev-only-walking-skeleton-secret"  # matches docker-compose.yml x-app-env
-TENANT_ID = "acme"
 WORKSPACE_ID = "demo"
 USER_URN = f"hl:{TENANT_ID}:global:user:jdoe"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _mint_token(tenant_id: str, urn: str, country: str | None = None) -> str:
@@ -75,7 +58,7 @@ def token() -> str:
             time.sleep(1.5)
         if not healthy:
             pytest.fail(f"{name} never became healthy")
-    return _mint_token(TENANT_ID, USER_URN, country="FR")  # matches jdoe's seeded ABAC attribute (§8.1)
+    return _mint_token(TENANT_ID, USER_URN, country="FR")  # matches jdoe's seeded ABAC attribute
 
 
 @pytest.fixture(scope="session")
@@ -94,18 +77,26 @@ def test_dataset_is_catalogued(token: str, synced: dict) -> None:
     """Polls until the catalog reflects *this run's* snapshot specifically —
     a previous demo/test run may have already catalogued an older one, so
     merely seeing a non-empty list is not enough to prove convergence.
+    Looks the `customers` entry up by URN rather than assuming index 0:
+    `list_datasets` orders alphabetically by URN, and once other test
+    files (e.g. `test_pipeline.py`'s  pipeline outputs) catalogue
+    datasets whose names sort before "customers", it's no longer
+    guaranteed to be first — the same "don't assume you're the only
+    thing touching shared catalog state" lesson this build's other
+    ontology-governance tests already learned.
     """
     deadline = time.monotonic() + 30
-    datasets: list = []
+    customers_entry = None
     while time.monotonic() < deadline:
         status, datasets = _request("GET", f"{KNOWLEDGE}/catalog/datasets", token=token)
         assert status == 200
-        if datasets and datasets[0]["snapshot_id"] == synced["snapshot_id"]:
+        customers_entry = next((d for d in datasets if d["urn"] == synced["dataset_urn"]), None)
+        if customers_entry is not None and customers_entry["snapshot_id"] == synced["snapshot_id"]:
             break
         time.sleep(1)
-    assert datasets, "catalog did not converge in time"
-    assert datasets[0]["urn"] == synced["dataset_urn"]
-    assert datasets[0]["snapshot_id"] == synced["snapshot_id"]
+    assert customers_entry is not None, "catalog did not converge in time"
+    assert customers_entry["urn"] == synced["dataset_urn"]
+    assert customers_entry["snapshot_id"] == synced["snapshot_id"]
 
 
 def test_customer_objects_are_resolvable(token: str, synced: dict) -> None:

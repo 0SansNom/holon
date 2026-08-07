@@ -20,11 +20,8 @@ import urllib.request
 import asyncio
 import asyncpg
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, OPENSEARCH, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
-OPENSEARCH = "http://localhost:9200"
 # Both read from the environment, not hardcoded — CI generates its own
 # .env with different values than a dev's local one (see
 # .github/workflows/tests.yml, which sets its own
@@ -34,21 +31,7 @@ OPENSEARCH = "http://localhost:9200"
 # `pytest tests/` run against `make up`.
 OPENSEARCH_PASSWORD = os.environ.get("OPENSEARCH_ADMIN_PASSWORD", "HolonSearch#2026")
 
-TENANT_ID = "acme"
 KNOWLEDGE_DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_knowledge"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _opensearch_request(method: str, path: str, *, body: dict) -> dict:
@@ -74,11 +57,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 async def _delete_customer_serving_store_rows() -> None:

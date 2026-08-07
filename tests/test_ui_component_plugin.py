@@ -12,25 +12,10 @@ import uuid
 from pathlib import Path
 
 import pytest
+from conftest import EXPERIENCE, IDENTITY, _request
 
-IDENTITY = "http://localhost:8001"
-EXPERIENCE = "http://localhost:8004"
 
-TENANT_ID = "acme"
 PLUGINS_DIR = Path(__file__).resolve().parent.parent / "services" / "experience" / "app" / "plugins"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -46,11 +31,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 def _write_conflict_plugin(module_name: str, class_name: str, component_name: str) -> Path:

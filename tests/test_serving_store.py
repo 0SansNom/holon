@@ -1,4 +1,4 @@
-"""End-to-end verification of the Serving Store (§7.3, R7.4/R7.5) — the
+"""End-to-end verification of the Serving Store — the
 switch from a live Iceberg/DuckDB scan on every read to a materialized
 Postgres projection refreshed once per sync. Black-box over HTTP, same
 style as the other test modules. Requires the stack running (`make up`).
@@ -12,28 +12,12 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 WORKSPACE_ID = "demo"
 
 ORDER_WITH_CUSTOMER = 1  # Customer 1 (Acme Robotics)'s first order
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -49,11 +33,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
 
 
 @pytest.fixture(scope="session")

@@ -1,10 +1,10 @@
-"""Phase 3 Lot E — the **external agent tool** plugin type
-(`services/intelligence/app/tool_plugin_registry.py`). Proves P3.E1
-(manifest, activatable/deactivatable), P3.E2 (a plugin can't claim a
-tool name a real Knowledge Action or another active plugin already
-owns), and that the Agent Runtime genuinely dispatches to a plugin's own
-`invoke()` for a tool with zero ontology backing — a real Claude call
-chooses to use it, not a mocked tool-use block. Real, metered Anthropic
+"""The **external agent tool** plugin type
+(`services/intelligence/app/tool_plugin_registry.py`). Proves tool plugin
+registration (manifest, activatable/deactivatable), name collision checks
+(a plugin can't claim a tool name a real Knowledge Action or another active
+plugin already owns), and that the Agent Runtime genuinely dispatches to a
+plugin's own `invoke()` for a tool with zero ontology backing — a real Claude
+call chooses to use it, not a mocked tool-use block. Real, metered Anthropic
 call — excluded from CI by default.
 """
 
@@ -17,29 +17,14 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from conftest import IDENTITY, INTELLIGENCE, _request
 
 # Real, metered Anthropic call — excluded from CI by default (cost +
 # secret-exposure risk); run explicitly with `pytest -m llm`.
 pytestmark = pytest.mark.llm
 
-IDENTITY = "http://localhost:8001"
-INTELLIGENCE = "http://localhost:8006"
 
-TENANT_ID = "acme"
 PLUGINS_DIR = Path(__file__).resolve().parent.parent / "services" / "intelligence" / "app" / "plugins"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -57,11 +42,6 @@ def _token_for(principal_urn: str) -> str:
     pytest.fail(f"could not mint a token for {principal_urn}")
 
 
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
 def _write_conflict_plugin(module_name: str, class_name: str, tool_name: str) -> Path:
     path = PLUGINS_DIR / f"{module_name}.py"
     path.write_text(
@@ -77,8 +57,8 @@ def _write_conflict_plugin(module_name: str, class_name: str, tool_name: str) ->
         "    async def invoke(self, tool_input: dict) -> dict:\n"
         "        return {}\n"
     )
-    # The intelligence container runs under gVisor (`runsc-hostnet`,
-    # ADR 025/R8.9), whose gofer-mediated filesystem access can lag
+    # The intelligence container runs under gVisor (`runsc-hostnet`),
+    # whose gofer-mediated filesystem access can lag
     # slightly behind a host-side write to a bind-mounted volume —
     # confirmed directly (a manual write+import round trip needed ~1s to
     # become visible where plain `runc` was instant). A short, deliberate
