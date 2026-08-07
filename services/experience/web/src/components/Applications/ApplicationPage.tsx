@@ -2,8 +2,18 @@ import { useEffect, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 import { Button, Callout, H3, Tab, Tabs, Tag } from "@blueprintjs/core";
 import Editor from "@monaco-editor/react";
-import { useApplication, useApplicationDashboard, usePromoteApplication, useSaveApplication } from "../../api/hooks";
+import {
+  useApplication,
+  useApplicationDashboard,
+  useObjectTypes,
+  useActions,
+  useTools,
+  usePromoteApplication,
+  useSaveApplication,
+} from "../../api/hooks";
 import { DashboardWidgets } from "./DashboardWidgets";
+import { ApplicationBuilder } from "./Builder/ApplicationBuilder";
+import type { ApplicationDefinition } from "../../api/experience";
 import { ApiError } from "../../api/client";
 
 const DEFAULT_DEFINITION = {
@@ -19,6 +29,9 @@ export function ApplicationPage() {
   const { name } = useParams({ from: "/shell/applications/$name" });
   const { data: application, error, refetch } = useApplication(name);
   const { data: dashboard } = useApplicationDashboard(application?.status === "promoted" ? name : undefined);
+  const { data: objectTypes = [] } = useObjectTypes();
+  const { data: actions = [] } = useActions();
+  const { data: tools = [] } = useTools();
   const saveMutation = useSaveApplication(name);
   const promoteMutation = usePromoteApplication(name);
 
@@ -32,14 +45,25 @@ export function ApplicationPage() {
 
   const notFound = error instanceof ApiError && error.status === 404;
 
-  async function save() {
+  // Shared by both editors — the Builder tab constructs a definition
+  // object directly, the Definition tab parses one from Monaco's raw
+  // JSON text; either way it's the same `POST /api/applications/{name}`
+  // call and the same success/error handling.
+  async function saveDefinition(definition: ApplicationDefinition) {
     setSaveError(null);
     setSaveOk(false);
     try {
-      const definition = JSON.parse(editorValue);
       await saveMutation.mutateAsync(definition);
       setSaveOk(true);
       void refetch();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Save failed");
+    }
+  }
+
+  async function save() {
+    try {
+      await saveDefinition(JSON.parse(editorValue));
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Save failed");
     }
@@ -86,6 +110,21 @@ export function ApplicationPage() {
 
       <div style={{ marginTop: 20 }}>
       <Tabs id="application-tabs" renderActiveTabPanelOnly>
+        <Tab
+          id="builder"
+          title="Builder"
+          panel={
+            <ApplicationBuilder
+              definition={application?.definition ?? DEFAULT_DEFINITION}
+              objectTypes={objectTypes}
+              actions={actions}
+              tools={tools}
+              saving={saveMutation.isPending}
+              saveError={saveError}
+              onSave={(definition) => void saveDefinition(definition)}
+            />
+          }
+        />
         <Tab
           id="dashboard"
           title="Dashboard"

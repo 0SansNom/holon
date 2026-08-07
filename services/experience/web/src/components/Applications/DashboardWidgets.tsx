@@ -3,6 +3,14 @@ import { Card } from "@blueprintjs/core";
 import type { DashboardWidget } from "../../api/experience";
 
 export function DashboardWidgets({ widgets }: { widgets: DashboardWidget[] }) {
+  if (widgets.length === 0) {
+    return (
+      <p style={{ fontSize: 13, color: "var(--hl-text-muted)" }}>
+        No widgets configured yet — go to the Builder tab, enable Dashboard, and drag a KPI or Table widget onto
+        the canvas (each one needs an ObjectType selected before saving, or it won't be included).
+      </p>
+    );
+  }
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
       {widgets.map((widget, i) => (
@@ -34,12 +42,12 @@ function KpiWidget({ value }: { value: number }) {
         splitLine: { show: false },
         axisLabel: { show: false },
         pointer: { show: false },
-        detail: { valueAnimation: true, fontSize: 32, color: "#d7dae0", offsetCenter: [0, 0] },
+        detail: { valueAnimation: true, fontSize: 32, color: "#1c2127", offsetCenter: [0, 0] },
         data: [{ value }],
       },
     ],
   };
-  return <ReactECharts option={option} style={{ height: 160 }} theme="dark" />;
+  return <ReactECharts option={option} style={{ height: 160 }} />;
 }
 
 function TableWidget({ rows }: { rows: Array<Record<string, unknown>> }) {

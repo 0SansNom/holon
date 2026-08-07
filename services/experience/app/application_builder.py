@@ -1,12 +1,20 @@
 """Experience Platform — Application Builder.
 
 An Application Builder linked to the ontology:
-all three surfaces are built (**object app**, **dashboard**, **form**).
+all five surfaces are built (**object app**, **dashboard**, **form**,
+**agent app**, **analytics**).
 
 - Applications only declare ObjectTypes/Actions that genuinely exist in Knowledge's ontology.
 - Dependencies are computed automatically from bindings/actionRefs.
 - Applications are versioned resources (draft -> promoted).
 - Forms declare validation field schemas matching declared actions.
+- An `agentApp` surface declares a tool allowlist, a system-prompt
+  template, and budget defaults — a non-engineer's way to configure a
+  bounded agent, compiled into a real Intelligence session by `main.py`'s
+  "run" endpoints.
+- An `analytics` surface scopes ad-hoc pivot/aggregate/join
+  exploration to one declared ObjectType, proxying real `ExecutionRequest`s
+  through to Knowledge's own `/execute` (`resolve_analytics_object_type`).
 """
 
 from __future__ import annotations
@@ -36,11 +44,44 @@ CREATE TABLE IF NOT EXISTS application (
     promoted_at TIMESTAMPTZ,
     UNIQUE (tenant_id, name, version)
 );
+
+-- an `agentApp` session is opened under the single shared
+-- `ingest-bot` agent identity (Intelligence's `POST /sessions` requires
+-- the caller *be* the agent — a human principal never holds that
+-- identity's credentials), so Experience must proxy every subsequent
+-- turn using a freshly-minted token for that same identity. Without this
+-- table, *any* authenticated principal who learned a `session_urn` could
+-- drive *any other* principal's agentApp conversation, since the shared
+-- agent identity alone can't distinguish who originally launched it —
+-- `created_by_urn` is what `main.py`'s turn endpoint checks instead.
+CREATE TABLE IF NOT EXISTS agent_app_session (
+    session_urn TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    application_name TEXT NOT NULL,
+    created_by_urn TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
+
+
+async def record_agent_app_session(
+    pool: asyncpg.Pool, *, session_urn: str, tenant_id: str, application_name: str, created_by_urn: str
+) -> None:
+    await pool.execute(
+        """
+        INSERT INTO agent_app_session (session_urn, tenant_id, application_name, created_by_urn)
+        VALUES ($1, $2, $3, $4)
+        """,
+        session_urn, tenant_id, application_name, created_by_urn,
+    )
+
+
+async def get_agent_app_session_owner(pool: asyncpg.Pool, session_urn: str) -> Optional[str]:
+    return await pool.fetchval("SELECT created_by_urn FROM agent_app_session WHERE session_urn = $1", session_urn)
 
 
 class InvalidApplicationDefinition(ValueError):
@@ -55,6 +96,7 @@ class FormValidationError(ValueError):
 
 
 _VALID_FIELD_TYPES = {"string", "integer", "boolean"}
+_VALID_BUDGET_KEYS = {"max_iterations", "max_tool_calls", "max_tokens"}
 
 
 def _referenced_object_types(definition: dict) -> set[str]:
@@ -74,6 +116,17 @@ def _form_surfaces(definition: dict) -> list[dict]:
     return [s for s in definition.get("surfaces", []) if s.get("type") == "form"]
 
 
+def _agent_app_surfaces(definition: dict) -> list[dict]:
+    return [s for s in definition.get("surfaces", []) if s.get("type") == "agentApp"]
+
+
+def _referenced_tools(definition: dict) -> set[str]:
+    tools: set[str] = set()
+    for surface in _agent_app_surfaces(definition):
+        tools |= set(surface.get("tools", []))
+    return tools
+
+
 def _referenced_components(definition: dict) -> set[str]:
     components = {b["component"] for b in definition.get("bindings", []) if "component" in b}
     for surface in definition.get("surfaces", []):
@@ -83,17 +136,29 @@ def _referenced_components(definition: dict) -> set[str]:
 
 
 async def _validate_definition(
-    pool: asyncpg.Pool, http: httpx.AsyncClient, *, knowledge_url: str, authorization: str, definition: dict
+    pool: asyncpg.Pool,
+    http: httpx.AsyncClient,
+    *,
+    knowledge_url: str,
+    intelligence_url: str,
+    authorization: str,
+    definition: dict,
 ) -> dict:
     """An application can only declare ObjectTypes/Actions that genuinely
     exist in Knowledge's ontology — the set of things it's even allowed to
     bind to is bounded by the ontology API. Component names are checked the
     identical way, against the UI component plugin registry or built-in components.
+    An `agentApp` surface's declared `tools` are checked the same way
+    again, against Intelligence's own live tool catalog (`GET /tools`) —
+    only if any are actually declared, the same "don't pay for a
+    cross-service call nothing referenced" discipline every other check
+    here already follows.
     """
     headers = {"Authorization": authorization}
     object_types = sorted(_referenced_object_types(definition))
     actions = sorted(_referenced_actions(definition))
     components = sorted(_referenced_components(definition))
+    tools = sorted(_referenced_tools(definition))
 
     for object_type in object_types:
         response = await http.get(f"{knowledge_url}/ontology/{object_type}", headers=headers)
@@ -122,6 +187,24 @@ async def _validate_definition(
                 raise InvalidApplicationDefinition(
                     f"form field {field.get('name')!r} has invalid type {field.get('type')!r}"
                 )
+
+    for agent_app in _agent_app_surfaces(definition):
+        if not agent_app.get("systemPrompt"):
+            raise InvalidApplicationDefinition("agentApp surface requires a non-empty systemPrompt")
+        budget = agent_app.get("budget", {})
+        if not isinstance(budget, dict) or not set(budget.keys()) <= _VALID_BUDGET_KEYS:
+            raise InvalidApplicationDefinition(f"agentApp budget may only declare {sorted(_VALID_BUDGET_KEYS)}")
+        for key, value in budget.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise InvalidApplicationDefinition(f"agentApp budget.{key} must be a positive integer")
+
+    if tools:
+        response = await http.get(f"{intelligence_url}/tools", headers=headers)
+        response.raise_for_status()
+        available_tool_names = {t["name"] for t in response.json()}
+        unknown_tools = [t for t in tools if t not in available_tool_names]
+        if unknown_tools:
+            raise InvalidApplicationDefinition(f"unknown tool(s) declared: {unknown_tools}")
 
     return {"objectTypes": object_types, "actions": actions}
 
@@ -174,10 +257,12 @@ async def create_or_update_draft(
     name: str,
     definition: dict,
     knowledge_url: str,
+    intelligence_url: str,
     authorization: str,
 ) -> dict:
     dependencies = await _validate_definition(
-        pool, http, knowledge_url=knowledge_url, authorization=authorization, definition=definition
+        pool, http, knowledge_url=knowledge_url, intelligence_url=intelligence_url,
+        authorization=authorization, definition=definition,
     )
     existing = await get_application(pool, tenant_id=tenant_id, name=name)
 
@@ -208,7 +293,14 @@ async def create_or_update_draft(
 
 
 async def promote(
-    pool: asyncpg.Pool, http: httpx.AsyncClient, *, tenant_id: str, name: str, knowledge_url: str, authorization: str
+    pool: asyncpg.Pool,
+    http: httpx.AsyncClient,
+    *,
+    tenant_id: str,
+    name: str,
+    knowledge_url: str,
+    intelligence_url: str,
+    authorization: str,
 ) -> dict:
     application = await get_application(pool, tenant_id=tenant_id, name=name)
     if application is None:
@@ -220,7 +312,8 @@ async def promote(
     # ontology may have changed (an ObjectType/Action deprecated) since
     # the draft was written.
     await _validate_definition(
-        pool, http, knowledge_url=knowledge_url, authorization=authorization, definition=application["definition"]
+        pool, http, knowledge_url=knowledge_url, intelligence_url=intelligence_url,
+        authorization=authorization, definition=application["definition"],
     )
 
     await pool.execute(
@@ -235,6 +328,34 @@ def resolve_object_app_object_type(application: dict) -> Optional[str]:
         if surface.get("type") == "objectApp":
             return surface["objectType"]
     return None
+
+
+def resolve_analytics_object_type(application: dict) -> Optional[str]:
+    """The **analytics** surface: a lightweight Contour/Code
+    Workbook equivalent — ad-hoc pivot/aggregate exploration, scoped to
+    one declared ObjectType per surface (`_referenced_object_types`
+    already picks this up generically via its `objectType` key, same as
+    `objectApp`, so dependency validation covers it for free). Unlike
+    `objectApp`'s single fixed read path, an analytics surface doesn't
+    pre-declare *which* query — `main.py`'s execute endpoint accepts any
+    `ExecutionRequest`-shaped body at request time, bounded only to this
+    declared ObjectType (and whatever Knowledge's own PDP allows for a
+    `join` target).
+    """
+    for surface in application["definition"].get("surfaces", []):
+        if surface.get("type") == "analytics":
+            return surface["objectType"]
+    return None
+
+
+def resolve_agent_app_config(application: dict) -> Optional[dict]:
+    """The declared `tools`/`systemPrompt`/`budget` an `agentApp` surface
+    compiles into a session — already validated (real tool names, real
+    budget shape) at draft/promote time, so `main.py`'s "run" endpoints
+    can pass this straight through to Intelligence's `POST /sessions`.
+    """
+    surfaces = _agent_app_surfaces(application["definition"])
+    return surfaces[0] if surfaces else None
 
 
 def is_action_declared(application: dict, object_type: str, local_action_name: str) -> bool:

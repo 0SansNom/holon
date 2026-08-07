@@ -5,9 +5,12 @@ import { useAuthStore } from "../../store/auth";
 
 const NAV_ITEMS = [
   { to: "/objects", icon: "cube" as const, label: "Objects" },
+  { to: "/sources", icon: "data-connection" as const, label: "Sources" },
+  { to: "/ontology", icon: "diagram-tree" as const, label: "Ontology" },
   { to: "/applications", icon: "application" as const, label: "Applications" },
   { to: "/search", icon: "search" as const, label: "Search" },
   { to: "/glossary", icon: "book" as const, label: "Glossary" },
+  { to: "/admin", icon: "shield" as const, label: "Admin" },
 ] as const;
 
 export function Shell() {

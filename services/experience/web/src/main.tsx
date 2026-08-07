@@ -12,7 +12,7 @@ const queryClient = new QueryClient({
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <div className="bp5-dark" style={{ height: "100%" }}>
+      <div style={{ height: "100%" }}>
         <RouterProvider router={router} />
       </div>
     </QueryClientProvider>
