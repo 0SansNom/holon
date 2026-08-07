@@ -1,11 +1,12 @@
 from . import outbox
 from . import event_catalog  # noqa: F401 — importing registers all payload schemas
 from . import registry
-from .resource import Classification, most_restrictive
+from .resource import Classification, most_restrictive, union_markings
 from .urn import URN, InvalidURNError, build as build_urn, parse as parse_urn
 from .events import EventActor, EventConsumer, EventEnvelope, EventProducer
 from .auth import Principal, decode_token, issue_token, make_principal_dependency, require_tenant_match
 from .db import create_pool
+from .errors import install_error_handlers
 from .observability import (
     CircuitBreaker,
     CircuitBreakerOpenError,
@@ -22,6 +23,7 @@ __all__ = [
     "registry",
     "Classification",
     "most_restrictive",
+    "union_markings",
     "URN",
     "InvalidURNError",
     "build_urn",
@@ -37,6 +39,7 @@ __all__ = [
     "require_tenant_match",
     "PermissionClient",
     "create_pool",
+    "install_error_handlers",
     "CircuitBreaker",
     "CircuitBreakerOpenError",
     "configure_json_logging",
