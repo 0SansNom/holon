@@ -79,6 +79,27 @@ class AnthropicClient:
 
 
 def build_llm_client() -> LLMClient:
+    """Single-provider today, deliberately — not an oversight.
+
+    Extension point for a second provider, captured here so a future
+    session doesn't have to re-derive it: read a `HOLON_LLM_PROVIDER` env
+    var (default `"anthropic"`) and dispatch through a small registry,
+    e.g. `{"anthropic": AnthropicClient}[provider](api_key, model)`. This
+    is safe to add without touching any caller — `LLMClient` (a plain
+    Protocol) and `LLMResponse` (a plain dataclass) already don't leak
+    any Anthropic-specific types, and the only 3 files that import
+    `LLMClient` (`context_builder.py`, `evaluation.py`, `agent_runtime.py`)
+    use it purely for typing, never `AnthropicClient` directly. The one
+    real piece of work a new provider needs to do itself: `messages`/
+    `tools` here are implicitly shaped like Anthropic's Messages API
+    (`system` as a separate param, `tool_use` content blocks) — a
+    provider with a different wire format (e.g. OpenAI's chat format)
+    translates to/from that shape inside its own `complete()`, not here.
+
+    Not implemented now because there's no second vendor account/API key
+    in this environment to actually test against — shipping untested
+    provider code would be worse than not shipping it.
+    """
     api_key = os.environ["ANTHROPIC_API_KEY"]
     model = os.environ.get("HOLON_LLM_MODEL", "claude-sonnet-5")
     return AnthropicClient(api_key, model)
