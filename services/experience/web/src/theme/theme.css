@@ -3,22 +3,23 @@
 @import "@blueprintjs/select/lib/css/blueprint-select.css";
 @import "@blueprintjs/table/lib/css/table.css";
 
-/* A Palantir-Foundry-inspired dark palette layered on top of Blueprint's
-   own dark theme tokens — deep graphite/navy backgrounds, a single sharp
-   accent, monospace for URNs/IDs/technical values (the exact things this
-   product treats as first-class: URNs, plan hashes, classifications). */
+/* A clean, modern enterprise light palette — soft neutral grays, a
+   single sharp blue accent, monospace for URNs/IDs/technical values
+   (the exact things this product treats as first-class: URNs, plan
+   hashes, classifications). Mirrors the palette introduced for the
+   Lineage page's local light theme; now the app-wide default. */
 :root {
-  --hl-bg-app: #0b0e14;
-  --hl-bg-panel: #12161f;
-  --hl-bg-panel-raised: #171c27;
-  --hl-border: #262c3a;
-  --hl-text: #d7dae0;
-  --hl-text-muted: #838c9e;
-  --hl-accent: #2d72d2;
-  --hl-accent-soft: rgba(45, 114, 210, 0.15);
-  --hl-danger: #cd4246;
-  --hl-warning: #d9822b;
-  --hl-success: #29a634;
+  --hl-bg-app: #f6f7f9;
+  --hl-bg-panel: #ffffff;
+  --hl-bg-panel-raised: #f0f2f5;
+  --hl-border: #e1e4ea;
+  --hl-text: #1c2127;
+  --hl-text-muted: #5f6b7a;
+  --hl-accent: #2d63c8;
+  --hl-accent-soft: rgba(45, 99, 200, 0.08);
+  --hl-danger: #b23a48;
+  --hl-warning: #a15c00;
+  --hl-success: #237c3f;
   --hl-mono: "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
 }
 
@@ -87,7 +88,7 @@ body,
 
 .hl-nav-item.active {
   background: var(--hl-accent-soft);
-  color: #8abbff;
+  color: var(--hl-accent);
 }
 
 .hl-main {
@@ -129,18 +130,18 @@ body,
 }
 
 .hl-classification-public {
-  background: rgba(41, 166, 52, 0.15);
-  color: #72ca7a;
+  background: rgba(35, 124, 63, 0.1);
+  color: #237c3f;
 }
 
 .hl-classification-internal {
-  background: rgba(217, 130, 43, 0.15);
-  color: #f0b168;
+  background: rgba(161, 92, 0, 0.1);
+  color: #a15c00;
 }
 
 .hl-classification-confidential {
-  background: rgba(205, 66, 70, 0.15);
-  color: #f28f92;
+  background: rgba(178, 58, 72, 0.1);
+  color: #b23a48;
 }
 
 .hl-masked-field {
@@ -162,4 +163,5 @@ body,
   border: 1px solid var(--hl-border);
   border-radius: 8px;
   padding: 32px;
+  box-shadow: 0 1px 3px rgba(16, 22, 34, 0.08);
 }

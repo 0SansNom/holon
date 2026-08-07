@@ -7,6 +7,7 @@ serves `index.html` for any other path and lets the SPA's router take over.
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,11 +22,14 @@ from holon_common import (
     CircuitBreaker,
     CircuitBreakerOpenError,
     Principal,
+    build_urn,
     configure_json_logging,
     create_pool,
+    install_error_handlers,
     instrument_cors,
     instrument_metrics,
     instrument_tracing,
+    issue_token,
     make_principal_dependency,
 )
 
@@ -36,11 +40,28 @@ configure_json_logging(SERVICE_NAME)
 
 IDENTITY_URL = os.environ["HOLON_IDENTITY_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
+INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET = os.environ["HOLON_JWT_SECRET"]
 DB_URL = os.environ["HOLON_DB_URL"]
 OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+
+# the single seeded agent identity every `agentApp` session runs
+# under (same URN Identity's seed data and Intelligence's own
+# `AGENT_URN` already use) — a human principal never holds this
+# identity's credentials directly, so Experience mints a short-lived
+# token for it on the caller's behalf, same trust level every other
+# `HOLON_JWT_SECRET`-holding service already extends itself (Knowledge's
+# `_identity_validation_token`, Connectivity's `_function_invocation_token`).
+AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
+
+
+def _agent_app_session_token(on_behalf_of_urn: str) -> str:
+    principal = Principal(
+        urn=AGENT_URN, type="agent", tenant_id=TENANT_ID, display_name="Ingest Bot", on_behalf_of=on_behalf_of_urn,
+    )
+    return issue_token(principal, JWT_SECRET, ttl_seconds=300)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -72,6 +93,7 @@ app = FastAPI(title="Holon — Experience Platform", lifespan=lifespan)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET)
 
 
@@ -113,7 +135,37 @@ async def _get_json(url: str, *, authorization: Optional[str] = None) -> tuple[i
         upstream = await app.state.breaker.call(_do)
     except CircuitBreakerOpenError:
         return 503, {"detail": "upstream temporarily unavailable"}
-    return upstream.status_code, upstream.json()
+    try:
+        return upstream.status_code, upstream.json()
+    except ValueError:
+        # An upstream error response isn't guaranteed to be JSON (e.g. a
+        # plain-text 500 from an unhandled exception) — parsing it as
+        # JSON must not itself become an unhandled crash here.
+        return upstream.status_code, {"detail": upstream.text}
+
+
+async def _post_json(url: str, *, authorization: Optional[str] = None, json: Optional[dict] = None) -> tuple[int, Any]:
+    """`_get_json`'s POST counterpart — needed wherever this service must
+    read the upstream *response body* itself rather than just relay it
+    (platform's agent-session creation needs the new session's own `urn`
+    back, to record who's allowed to drive it).
+    """
+    headers = {"Authorization": authorization} if authorization else {}
+
+    async def _do() -> httpx.Response:
+        return await app.state.client.post(url, headers=headers, json=json)
+
+    try:
+        upstream = await app.state.breaker.call(_do)
+    except CircuitBreakerOpenError:
+        return 503, {"detail": "upstream temporarily unavailable"}
+    try:
+        return upstream.status_code, upstream.json()
+    except ValueError:
+        # An upstream error response isn't guaranteed to be JSON (e.g. a
+        # plain-text 500 from an unhandled exception) — parsing it as
+        # JSON must not itself become an unhandled crash here.
+        return upstream.status_code, {"detail": upstream.text}
 
 
 @app.get("/health")
@@ -215,6 +267,7 @@ async def create_or_update_application(
             name=name,
             definition=body.definition,
             knowledge_url=KNOWLEDGE_URL,
+            intelligence_url=INTELLIGENCE_URL,
             authorization=authorization,
         )
     except application_builder.InvalidApplicationDefinition as exc:
@@ -250,6 +303,7 @@ async def promote_application(
             tenant_id=principal.tenant_id,
             name=name,
             knowledge_url=KNOWLEDGE_URL,
+            intelligence_url=INTELLIGENCE_URL,
             authorization=authorization,
         )
     except application_builder.InvalidApplicationDefinition as exc:
@@ -336,7 +390,12 @@ async def application_dashboard(
             f"{KNOWLEDGE_URL}/objects/{widget['objectType']}", authorization=authorization
         )
         if status_code != 200:
-            raise HTTPException(status_code=status_code, detail=body)
+            # `body` is whatever `_get_json` got back from upstream — usually
+            # already a flat `{"detail": "..."}`, but proxying it verbatim as
+            # `detail=body` would nest it (`{"detail": {"detail": "..."}}`)
+            # instead of matching every other error response's flat shape.
+            detail = body["detail"] if isinstance(body, dict) and "detail" in body else str(body)
+            raise HTTPException(status_code=status_code, detail=detail)
         rows = body if isinstance(body, list) else []
         if widget["component"] == "kpi":
             widgets_out.append({"label": widget.get("label"), "component": "kpi", "value": len(rows)})
@@ -355,6 +414,55 @@ async def application_dashboard(
                 }
             )
     return {"applicationName": name, "widgets": widgets_out}
+
+
+@app.post("/api/applications/{name}/analytics/execute")
+async def application_analytics_execute(
+    name: str, http_request: Request, principal: Principal = Depends(current_principal)
+) -> Response:
+    """The **analytics** surface: a lightweight Contour/Code
+    Workbook equivalent — ad-hoc pivot/aggregate/join exploration, unlike
+    every other surface's fixed read path. Bounded to the one ObjectType
+    the surface declared: the request body's `object_type` must match it
+    exactly, the same enforcement style `is_action_declared` already uses
+    for forms/objectApp actions. Everything else (which operation, which
+    property to group by, which RelationType to join) is genuinely ad-hoc,
+    proxied straight through to Knowledge's real `/execute` — this
+    endpoint's only job is scoping, not reimplementing Knowledge's own
+    validation.
+    """
+    application = await _get_application_or_404(name, principal.tenant_id)
+    object_type = application_builder.resolve_analytics_object_type(application)
+    if object_type is None:
+        raise HTTPException(status_code=400, detail=f"application {name!r} declares no analytics surface")
+
+    body = await http_request.json()
+    if body.get("object_type") != object_type:
+        raise HTTPException(
+            status_code=403,
+            detail=f"application {name!r}'s analytics surface is scoped to {object_type!r}, not {body.get('object_type')!r}",
+        )
+    return await _proxy(
+        "POST", f"{KNOWLEDGE_URL}/execute", authorization=http_request.headers.get("authorization"), json=body
+    )
+
+
+@app.post("/api/applications/{name}/analytics/{plan_hash}/replay")
+async def application_analytics_replay(
+    name: str, plan_hash: str, http_request: Request, principal: Principal = Depends(current_principal)
+) -> Response:
+    """Replay is a pure pass-through — Knowledge's own `/execute/{plan_hash}/replay`
+    already re-authorizes against whatever ObjectType(s) the frozen plan
+    actually touches (including a `join` plan's target), so there's
+    nothing left for this scoping check to add beyond confirming the
+    application really does have an analytics surface at all.
+    """
+    application = await _get_application_or_404(name, principal.tenant_id)
+    if application_builder.resolve_analytics_object_type(application) is None:
+        raise HTTPException(status_code=400, detail=f"application {name!r} declares no analytics surface")
+    return await _proxy(
+        "POST", f"{KNOWLEDGE_URL}/execute/{plan_hash}/replay", authorization=http_request.headers.get("authorization")
+    )
 
 
 @app.get("/api/applications/{name}/form")
@@ -391,6 +499,67 @@ async def submit_application_form(
         f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{local_action_name}",
         authorization=http_request.headers.get("authorization"),
         json=submitted,
+    )
+
+
+@app.post("/api/applications/{name}/agent-sessions")
+async def create_application_agent_session(name: str, principal: Principal = Depends(current_principal)) -> Response:
+    """The **agent app** surface: compiles the surface's
+    declared `tools`/`systemPrompt`/`budget` into a real Intelligence
+    session, opened under the shared `ingest-bot` agent identity
+    `on_behalf_of` the calling principal — the same delegation model
+    `agent_runtime`'s own module docstring already establishes (effective
+    rights are the *intersection* of the agent's and the mandant's, never
+    an escalation). `record_agent_app_session` is what lets the turn
+    endpoint below tell this caller's session apart from anyone else's,
+    since every agentApp session shares one underlying agent identity.
+    """
+    application = await _get_application_or_404(name, principal.tenant_id)
+    agent_app = application_builder.resolve_agent_app_config(application)
+    if agent_app is None:
+        raise HTTPException(status_code=400, detail=f"application {name!r} declares no agentApp surface")
+
+    token = _agent_app_session_token(principal.urn)
+    status_code, body = await _post_json(
+        f"{INTELLIGENCE_URL}/sessions",
+        authorization=f"Bearer {token}",
+        json={
+            "allowed_tools": agent_app.get("tools"),
+            "system_prompt": agent_app.get("systemPrompt"),
+            "budget": agent_app.get("budget"),
+        },
+    )
+    if status_code == 200:
+        await application_builder.record_agent_app_session(
+            app.state.pool,
+            session_urn=body["urn"],
+            tenant_id=principal.tenant_id,
+            application_name=name,
+            created_by_urn=principal.urn,
+        )
+    return Response(content=json.dumps(body).encode(), status_code=status_code, media_type="application/json")
+
+
+@app.post("/api/applications/{name}/agent-sessions/{session_urn:path}/turns")
+async def run_application_agent_session_turn(
+    name: str, session_urn: str, http_request: Request, principal: Principal = Depends(current_principal)
+) -> Response:
+    """Every turn is proxied, never handed off — the calling principal
+    can't call Intelligence directly (it doesn't hold the shared agent
+    identity's credentials), and this is also the choke point that
+    enforces only the principal who *launched* this specific session may
+    drive it, checked against `agent_app_session` rather than trusting
+    the shared agent identity alone to tell callers apart.
+    """
+    await _get_application_or_404(name, principal.tenant_id)
+    owner_urn = await application_builder.get_agent_app_session_owner(app.state.pool, session_urn)
+    if owner_urn is None or owner_urn != principal.urn:
+        raise HTTPException(status_code=404, detail=f"no agent session {session_urn!r} found for this application")
+
+    token = _agent_app_session_token(principal.urn)
+    body = await http_request.json()
+    return await _proxy(
+        "POST", f"{INTELLIGENCE_URL}/sessions/{session_urn}/turns", authorization=f"Bearer {token}", json=body
     )
 
 

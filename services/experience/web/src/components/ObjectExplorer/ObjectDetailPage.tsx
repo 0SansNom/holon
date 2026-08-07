@@ -1,14 +1,25 @@
-import { useState } from "react";
-import { useParams, Link } from "@tanstack/react-router";
-import { Button, Dialog, DialogBody, DialogFooter, H3, InputGroup, Spinner, Tag, Callout } from "@blueprintjs/core";
-import { useActions, useObject, useInvokeAction } from "../../api/hooks";
+import { useMemo, useState } from "react";
+import { useParams, useNavigate, Link } from "@tanstack/react-router";
+import { Button, ButtonGroup, Dialog, DialogBody, DialogFooter, H3, InputGroup, Spinner, Tag, Callout } from "@blueprintjs/core";
+import { useActions, useObject, useObjectType, useInvokeAction, useRelationTypes } from "../../api/hooks";
+import { camelToSnake, FormattedValue } from "../common/PropertyFormat";
+import { PageBreadcrumbs } from "../common/PageBreadcrumbs";
+import type { PropertyFormatRule } from "../../api/knowledge";
 
 const METADATA_KEYS = new Set(["materializedAt", "sourceLagSeconds", "degraded", "_maskedFields"]);
 
+function urnShortName(urn: string): string {
+  const parts = urn.split(":");
+  return parts[parts.length - 1] ?? urn;
+}
+
 export function ObjectDetailPage() {
   const { type, id } = useParams({ from: "/shell/objects/$type/$id" });
+  const navigate = useNavigate();
   const { data: object, isLoading, error } = useObject(type, id);
+  const { data: objectType } = useObjectType(type);
   const { data: actions } = useActions();
+  const { data: relationTypes } = useRelationTypes();
   const invokeAction = useInvokeAction(type);
 
   const [activeAction, setActiveAction] = useState<string | null>(null);
@@ -17,6 +28,24 @@ export function ObjectDetailPage() {
 
   const relevantActions = (actions ?? []).filter((a) => a.target_object_type === type);
   const maskedFields = (object?._maskedFields as string[] | undefined) ?? [];
+
+  // Foreign-key fields (e.g. an Order's customer_id) are otherwise dead
+  // text — the RelationType metadata already knows they point at another
+  // ObjectType's instance, so surface that as a real link instead of
+  // requiring a manual detour through the Objects list to find it.
+  const fkFieldTargets = useMemo(() => {
+    const map = new Map<string, string>();
+    (relationTypes ?? [])
+      .filter((r) => urnShortName(r.source_object_type_urn) === type)
+      .forEach((r) => map.set(camelToSnake(r.source_property), urnShortName(r.target_object_type_urn)));
+    return map;
+  }, [relationTypes, type]);
+
+  const formatsBySourceKey = useMemo(() => {
+    const map = new Map<string, PropertyFormatRule>();
+    Object.entries(objectType?.property_formats ?? {}).forEach(([property, rule]) => map.set(camelToSnake(property), rule));
+    return map;
+  }, [objectType]);
 
   async function submitAction() {
     if (!activeAction) return;
@@ -42,12 +71,29 @@ export function ObjectDetailPage() {
 
   return (
     <div>
-      <H3>
-        {type} / {id}
-      </H3>
-      <Link to="/lineage/$urn" params={{ urn: `hl:acme:demo:object-type:${type}` }} style={{ color: "#8abbff", fontSize: 13 }}>
-        View ObjectType lineage →
-      </Link>
+      <PageBreadcrumbs
+        items={[
+          { label: "Objects", to: "/objects" },
+          { label: type, to: "/objects/$type", params: { type } },
+          { label: String(id) },
+        ]}
+      />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+        <H3 style={{ margin: 0 }}>
+          {type} / {id}
+        </H3>
+        <ButtonGroup>
+          <Button
+            icon="diagram-tree"
+            onClick={() => void navigate({ to: "/lineage/$urn", params: { urn: `hl:acme:demo:object-type:${type}` } })}
+          >
+            Lineage
+          </Button>
+          <Button icon="graph" onClick={() => void navigate({ to: "/objects/$type/$id/graph", params: { type, id } })}>
+            Related instances
+          </Button>
+        </ButtonGroup>
+      </div>
 
       {result && (
         <Callout intent={result.ok ? "success" : "danger"} style={{ marginTop: 16 }}>
@@ -60,18 +106,30 @@ export function ObjectDetailPage() {
           <tbody>
             {Object.entries(object)
               .filter(([key]) => !METADATA_KEYS.has(key))
-              .map(([key, value]) => (
-                <tr key={key} style={{ borderBottom: "1px solid var(--hl-border)" }}>
-                  <td style={{ padding: "8px 12px", color: "var(--hl-text-muted)", width: 200 }}>{key}</td>
-                  <td style={{ padding: "8px 12px" }}>
-                    {maskedFields.includes(key) ? (
-                      <span className="hl-masked-field">forbidden — masked by permission</span>
-                    ) : (
-                      <span className="hl-mono">{value === null ? "—" : String(value)}</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              .map(([key, value]) => {
+                const fkTargetType = fkFieldTargets.get(key);
+                return (
+                  <tr key={key} style={{ borderBottom: "1px solid var(--hl-border)" }}>
+                    <td style={{ padding: "8px 12px", color: "var(--hl-text-muted)", width: 200 }}>{key}</td>
+                    <td style={{ padding: "8px 12px" }}>
+                      {maskedFields.includes(key) ? (
+                        <span className="hl-masked-field">forbidden — masked by permission</span>
+                      ) : value !== null && fkTargetType ? (
+                        <Link
+                          to="/objects/$type/$id"
+                          params={{ type: fkTargetType, id: String(value) }}
+                          className="hl-mono"
+                          style={{ color: "var(--hl-accent)" }}
+                        >
+                          {String(value)} → {fkTargetType}
+                        </Link>
+                      ) : (
+                        <FormattedValue rule={formatsBySourceKey.get(key)} value={value} />
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
           </tbody>
         </table>
       </div>

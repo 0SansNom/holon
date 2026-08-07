@@ -30,4 +30,5 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 export const api = {
   get: <T>(url: string) => request<T>("GET", url),
   post: <T>(url: string, body?: unknown) => request<T>("POST", url, body ?? {}),
+  delete: <T>(url: string) => request<T>("DELETE", url),
 };

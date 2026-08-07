@@ -19,12 +19,27 @@ export function ObjectTypeListPage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
         {data?.map((ot) => (
           <Link key={ot.urn} to="/objects/$type" params={{ type: ot.name }} style={{ textDecoration: "none" }}>
-            <Card interactive style={{ height: "100%" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 8 }}>
-                <strong style={{ color: "var(--hl-text)" }}>{ot.name}</strong>
-                <ClassificationBadge classification={ot.classification} />
+            <Card interactive style={{ height: "100%", minWidth: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: 8, marginBottom: 8 }}>
+                <strong
+                  style={{
+                    color: "var(--hl-text)",
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={ot.name}
+                >
+                  {ot.name}
+                </strong>
+                <div style={{ flexShrink: 0 }}>
+                  <ClassificationBadge classification={ot.classification} />
+                </div>
               </div>
-              <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0 }}>{ot.description}</p>
+              <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0, overflowWrap: "break-word" }}>
+                {ot.description}
+              </p>
               <div className="hl-mono" style={{ fontSize: 11, color: "var(--hl-text-muted)", marginTop: 10 }}>
                 v{ot.version} · {Object.keys(ot.property_mapping).length} properties
               </div>
