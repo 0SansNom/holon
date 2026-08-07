@@ -53,6 +53,22 @@ jobs:
           grep '^POSTGRES_PASSWORD=' .env >> "$GITHUB_ENV"
           grep '^OPENSEARCH_ADMIN_PASSWORD=' .env >> "$GITHUB_ENV"
 
+      # experience's docker-compose bind-mount (./services/experience/app:/app/app,
+      # there so Python edits hot-reload locally) overlays the image's own
+      # `npm run build` output at app/static with whatever's on the *host*
+      # filesystem at that path. app/static is git-ignored (it's a build
+      # artifact) and this repo has never been built here before, so
+      # without this step the mount presents an empty directory, GET /
+      # 500s with "File at path .../index.html does not exist", and the
+      # one test that loads the SPA (test_dashboard_only_talks_to_the_knowledge_api)
+      # fails — confirmed as the actual, deterministic cause of the last
+      # few CI failures, not flakiness.
+      - name: Build the frontend
+        run: |
+          cd services/experience/web
+          npm ci
+          npm run build
+
       - name: Start the stack
         run: make up
 
