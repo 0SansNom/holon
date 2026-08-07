@@ -1,5 +1,5 @@
-"""End-to-end verification of the third connector — a generic REST source
-(§9.1) — and the `ProductReview` ObjectType/relation it feeds. Black-box
+"""End-to-end verification of the third connector — a generic REST source —
+and the `ProductReview` ObjectType/relation it feeds. Black-box
 over HTTP, same style as the other test modules. Requires the stack
 running (`make up`).
 """
@@ -12,31 +12,15 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-CONNECTIVITY = "http://localhost:8002"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 WORKSPACE_ID = "demo"
 
 # Mirrors docker/reviews-api/reviews.json — order 1 has exactly one review,
 # order 3 (Customer 1's "Custom Automation Software") has none.
 ORDER_WITH_REVIEW = 1
 ORDER_WITHOUT_REVIEW = 3
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -52,21 +36,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def kenji_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:kenji")
-
-
-@pytest.fixture(scope="session")
-def alice_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:alice")
 
 
 @pytest.fixture(scope="session")
@@ -87,8 +56,8 @@ def test_rest_connector_is_a_third_distinct_connector(jdoe_token: str, reviews_s
 
 
 def test_product_review_classification_is_public(jdoe_token: str, reviews_synced: dict) -> None:
-    # Classification is recomputed asynchronously by the catalog consumer
-    # (R1.5) — poll rather than assume it already converged by the time
+    # Classification is recomputed asynchronously by the catalog consumer —
+    # poll rather than assume it already converged by the time
     # this test runs, same convergence race as the catalog itself.
     deadline = time.monotonic() + 30
     object_type: dict = {}
@@ -116,7 +85,7 @@ def test_relation_traversal_for_unreviewed_order_is_empty(jdoe_token: str, revie
 
 def test_abac_only_restricts_confidential_data_not_public_data(kenji_token: str, reviews_synced: dict) -> None:
     """kenji (non-EU country) gets confidential fields masked on
-    Customer/Order elsewhere in this build (R8.7) — but ProductReview has
+    Customer/Order elsewhere in this build — but ProductReview has
     no confidential column at all, so there's nothing to mask; every
     field comes back intact. Proves ABAC's country restriction is
     conditional on what's actually confidential, not a blanket hurdle.

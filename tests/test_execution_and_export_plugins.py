@@ -11,11 +11,9 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from conftest import IDENTITY, KNOWLEDGE
 
-IDENTITY = "http://localhost:8001"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 PLUGINS_DIR = Path(__file__).resolve().parent.parent / "services" / "knowledge" / "app" / "plugins"
 
 
@@ -47,16 +45,6 @@ def _token_for(principal_urn: str) -> str:
             return body["access_token"]
         time.sleep(1.5)
     pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def jdoe_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:jdoe")
-
-
-@pytest.fixture(scope="session")
-def kenji_token() -> str:
-    return _token_for(f"hl:{TENANT_ID}:global:user:kenji")
 
 
 def _write_adapter_conflict_plugin(module_name: str, class_name: str, adapter_object_type: str) -> Path:

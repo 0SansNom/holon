@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import JAEGER, PROMETHEUS
 
 SERVICES = {
     "identity": "http://localhost:8001",
@@ -19,8 +20,6 @@ SERVICES = {
     "experience": "http://localhost:8004",
     "automation": "http://localhost:8005",
 }
-PROMETHEUS = "http://localhost:9090"
-JAEGER = "http://localhost:16686"
 
 
 def _get(url: str):

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import asyncpg
+from conftest import TENANT_ID
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 
@@ -27,7 +28,6 @@ KAFKA_BOOTSTRAP = "localhost:19092"  # the OUTSIDE listener — see docker-compo
 # worked by coincidence locally. Default matches .env.example's dev
 # convenience value for a plain `pytest tests/` run against `make up`.
 CONNECTIVITY_DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_connectivity"
-TENANT_ID = "acme"
 
 
 async def _insert_poison_row(marker: str) -> None:

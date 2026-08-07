@@ -1,4 +1,4 @@
-"""Agent delegation — R8.8: "Un agent est un Principal avec identité
+"""Agent delegation: "Un agent est un Principal avec identité
 propre... ses droits effectifs sont l'intersection de ses droits propres
 et de ceux de son mandant. Il ne peut jamais dépasser son mandant."
 
@@ -22,27 +22,12 @@ import urllib.error
 import urllib.request
 
 import pytest
+from conftest import IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
-IDENTITY = "http://localhost:8001"
-KNOWLEDGE = "http://localhost:8003"
 
-TENANT_ID = "acme"
 JDOE_URN = f"hl:{TENANT_ID}:global:user:jdoe"
 AGENT_URN = f"hl:{TENANT_ID}:global:agent:ingest-bot"
 ADMIN_URN = f"hl:{TENANT_ID}:global:user:msmith"
-
-
-def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
 
 
 def _token_for(principal_urn: str) -> str:
@@ -60,11 +45,10 @@ def _token_for(principal_urn: str) -> str:
 
 
 def _poll_until(predicate, *, timeout: float = 10.0) -> bool:
-    """R8.2's decision cache means a revoke/grant isn't visible on the
+    """Decision cache means a revoke/grant isn't visible on the
     literal next request anymore — it propagates via
     `identity.permission.revoked` (revokes) or the cache's own 5s TTL
-    (grants, not event-invalidated) — both comfortably inside R8.5's 60s
-    budget. Poll for convergence rather than asserting immediately, same
+    (grants, not event-invalidated). Poll for convergence rather than asserting immediately, same
     idiom used throughout this suite for other genuinely-async effects.
     """
     deadline = time.monotonic() + timeout
@@ -123,7 +107,7 @@ def test_agent_cannot_exceed_its_mandant(agent_token: str, admin_token: str, jdo
     try:
         assert _poll_until(
             lambda: _request("GET", f"{KNOWLEDGE}/objects/Customer", token=agent_token)[0] == 403
-        ), "agent denial never propagated within R8.5's budget"
+        ), "agent denial never propagated within budget"
         status, body = _request("GET", f"{KNOWLEDGE}/objects/Customer", token=agent_token)
         assert status == 403, body
         assert "on behalf of" in body["detail"], body
