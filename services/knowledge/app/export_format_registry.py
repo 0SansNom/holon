@@ -15,9 +15,7 @@ Enforced format-name-ownership guard: a plugin can't
 register itself as `json` (the built-in, always-available format) or a
 name another active export-format plugin already owns.
 
-Isolation ("sandbox"): same honest scope as the connector plugin
-type — `serialize()` is application code in this same process, not a
-genuinely separate sandboxed subprocess per plugin; what's real is that
+Isolation ("sandbox"): `serialize()` is application code in this same process;
 it only ever receives already-fetched, already-masked rows, never a
 database connection of its own.
 """

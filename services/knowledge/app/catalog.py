@@ -13,6 +13,7 @@ classification a computed fact instead of a hardcoded one.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 
 import asyncpg
@@ -230,16 +231,50 @@ async def _catalogue_sync(conn: asyncpg.Connection, tenant_id: str, workspace_id
         payload["location"],
     )
 
-    spec = DATASET_OBJECT_TYPES.get(dataset_name)
-    if spec is None:
-        # A Connector *plugin* (`plugin_registry.py`) can sync a dataset Knowledge has no
-        # ontology mapping for — a real, expected state, not a bug.
-        logger.info("dataset %r synced with no ObjectType mapping — catalogued, not yet an ObjectType", dataset_name)
-        return
+    #  (Pipeline/Transform DAG): a pipeline TransformStep's output
+    # names the input DatasetVersion it was computed from
+    # (`source_dataset_version_urn`) — every ordinary connector sync
+    # omits this, since it has no upstream dataset, only a source system.
+    # Recording this edge here, in the *same* consumer path every sync
+    # already goes through, is what makes the DAG's lineage genuinely
+    # automatic (captured from execution) rather than hand-declared —
+    # the same principle this module's own docstring already states for
+    # `maps_to` edges below, just one more `relation`.
+    source_dataset_version_urn = payload.get("source_dataset_version_urn")
+    if source_dataset_version_urn:
+        await lineage.record_edge(
+            conn, tenant_id, source_dataset_version_urn, payload["dataset_version_urn"], "derived_from"
+        )
 
-    object_type_urn = spec["object_type_urn"](tenant_id, workspace_id)
-    property_mapping = spec["property_mapping"]
-    column_classification = spec["column_classification"]
+    spec = DATASET_OBJECT_TYPES.get(dataset_name)
+    if spec is not None:
+        object_type_urn = spec["object_type_urn"](tenant_id, workspace_id)
+        property_mapping = spec["property_mapping"]
+        column_classification = spec["column_classification"]
+    else:
+        # Not one of the six boot-known types — check the *dynamic*
+        # registry next (`ontology.create_object_type`, the self-serve
+        # path: map an already-synced Dataset to an ObjectType by name).
+        # A Connector plugin can also sync a dataset with no ObjectType
+        # mapping at all yet — an expected, honestly-logged state either
+        # way, not an error.
+        dynamic_type = await ontology.get_object_type_by_dataset(conn, tenant_id, payload["dataset_urn"])
+        if dynamic_type is None:
+            logger.info("dataset %r synced with no ObjectType mapping — catalogued, not yet an ObjectType", dataset_name)
+            return
+        object_type_urn = dynamic_type["urn"]
+        property_mapping = dynamic_type["property_mapping"]
+        # The admin's own declared classification (`ontology.create_object_type`'s
+        # `column_classification` arg, persisted on `object_type` — the
+        # self-serve equivalent of a `CUSTOMERS_COLUMN_CLASSIFICATION`-style
+        # constant). A column the admin never classified still defaults
+        # to internal, not silently public — same fallback the loop below
+        # already applies to any *individual* missing column via
+        # `.get(..., Classification.INTERNAL)`.
+        column_classification = {
+            col: Classification(value)
+            for col, value in (dynamic_type.get("column_classification") or {}).items()
+        }
 
     await lineage.record_edge(conn, tenant_id, payload["dataset_version_urn"], object_type_urn, "maps_to")
 
@@ -254,15 +289,32 @@ async def _catalogue_sync(conn: asyncpg.Connection, tenant_id: str, workspace_id
     # their raw source column names verbatim — `property_mapping`'s
     # camelCase keys are used for lineage tracking only, never applied as
     # runtime row keys.
+    # `column_classification` can be sparse (a self-serve type's admin
+    # may not have classified every column, or none at all) — resolve
+    # every *mapped* column's effective value up front, defaulting
+    # unclassified ones to internal, so both the per-property write below
+    # and the `most_restrictive` aggregate see the same complete set
+    # rather than `most_restrictive` ever being called with zero values.
+    effective_classification = {
+        source_col: column_classification.get(source_col, Classification.INTERNAL)
+        for source_col in property_mapping.values()
+    }
+
     for prop_name, source_col in property_mapping.items():
-        col_cls = column_classification.get(source_col, Classification.INTERNAL)
+        col_cls = effective_classification[source_col]
         await lineage.record_edge(
             conn, tenant_id, payload["dataset_version_urn"], object_type_urn, "maps_to",
             source_column=source_col, target_property=prop_name,
         )
         await ontology.upsert_property_classification(conn, object_type_urn, source_col, col_cls.value)
 
-    overall_classification = most_restrictive(*column_classification.values())
+    # `property_mapping` itself being empty (a self-serve type created
+    # with every property name blanked out) is the one case
+    # `effective_classification` can still end up empty despite the
+    # default above — `most_restrictive()` requires at least one value.
+    overall_classification = (
+        most_restrictive(*effective_classification.values()) if effective_classification else Classification.INTERNAL
+    )
     await conn.execute(
         "UPDATE object_type SET classification = $1 WHERE urn = $2",
         overall_classification.value,
@@ -295,27 +347,38 @@ async def _materialize_sync(
     """
     dataset_name = payload["dataset_name"]
     spec = DATASET_OBJECT_TYPES.get(dataset_name)
-    if spec is None:
-        return
-    rows = await asyncio.to_thread(spec["fetch_all"], **iceberg_config)
+    if spec is not None:
+        object_type_name = spec["object_type_name"]
+        object_type_urn = spec["object_type_urn"](tenant_id, workspace_id)
+        property_mapping = spec["property_mapping"]
+        fetch_all = spec["fetch_all"]
+    else:
+        dynamic_type = await ontology.get_object_type_by_dataset(pool, tenant_id, payload["dataset_urn"])
+        if dynamic_type is None:
+            return
+        object_type_name = dynamic_type["name"]
+        object_type_urn = dynamic_type["urn"]
+        property_mapping = dynamic_type["property_mapping"]
+        fetch_all = functools.partial(resolver.fetch_generic, dataset_name)
+
+    rows = await asyncio.to_thread(fetch_all, **iceberg_config)
     async with pool.acquire() as conn, conn.transaction():
         await serving_store.materialize(
             conn,
-            object_type=spec["object_type_name"],
+            object_type=object_type_name,
             tenant_id=tenant_id,
             snapshot_id=payload["snapshot_id"],
             rows=rows,
         )
 
-    object_type_urn = spec["object_type_urn"](tenant_id, workspace_id)
     object_type = await ontology.get_object_type(pool, object_type_urn)
     await search.index_rows(
         opensearch_url,
         opensearch_password,
-        object_type_name=spec["object_type_name"],
+        object_type_name=object_type_name,
         tenant_id=tenant_id,
         classification=object_type["classification"],
-        property_mapping=spec["property_mapping"],
+        property_mapping=property_mapping,
         rows=rows,
         allowed_countries=allowed_countries,
     )

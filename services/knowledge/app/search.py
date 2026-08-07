@@ -109,22 +109,46 @@ async def index_rows(
         response.raise_for_status()
 
 
-async def search(base_url: str, password: str, *, principal: Principal, query_text: str) -> dict[str, Any]:
-    query = {
+async def search(
+    base_url: str,
+    password: str,
+    *,
+    principal: Principal,
+    query_text: str,
+    object_type: Optional[str] = None,
+    from_: int = 0,
+    size: int = 20,
+) -> dict[str, Any]:
+    """`object_type` narrows via `post_filter`, not `query.bool.filter` —
+    a `post_filter` only narrows the *hits*, not the aggregation below, so
+    facet counts stay stable (every ObjectType's true count for this query
+    text) no matter which facet the caller currently has selected. Doing
+    it the other way would collapse every non-selected facet's count to 0
+    the moment one is picked, defeating the point of showing them at all.
+    """
+    query: dict[str, Any] = {
         "query": {
             "bool": {
                 "must": [{"simple_query_string": {"query": query_text, "fields": ["text"]}}],
                 "filter": [{"terms": {"entitlement_tokens": _principal_tokens(principal)}}],
             }
-        }
+        },
+        "aggs": {"object_types": {"terms": {"field": "object_type", "size": 50}}},
+        "from": from_,
+        "size": size,
     }
+    if object_type:
+        query["post_filter"] = {"term": {"object_type": object_type}}
+
     async with httpx.AsyncClient(auth=("admin", password), timeout=10.0) as client:
         response = await client.post(f"{base_url}/{INDEX_NAME}/_search", json=query)
         response.raise_for_status()
         body = response.json()
 
     hits = body["hits"]["hits"]
+    facet_buckets = body["aggregations"]["object_types"]["buckets"]
     return {
         "total": body["hits"]["total"]["value"],
         "results": [hit["_source"] for hit in hits],
+        "facets": {bucket["key"]: bucket["doc_count"] for bucket in facet_buckets},
     }
