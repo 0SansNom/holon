@@ -18,9 +18,8 @@ announce it via the *same* `connectivity.sync.completed` event every
 other connector uses (`record_sync`, injected by `main.py` so this module
 never needs its own DB/outbox wiring). Everything downstream
 (cataloguing, serving store, search, execution) needs zero changes: only
-the ingestion trigger is new, not the pipeline. Deliberately a simple
-micro-batch, not a true per-event exactly-once system — stated honestly,
-a further step if this build ever needs it.
+the ingestion trigger is new, not the pipeline. Processes events as
+periodic micro-batches.
 """
 
 from __future__ import annotations
