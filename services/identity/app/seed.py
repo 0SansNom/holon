@@ -10,6 +10,7 @@ the principal who can approve high-risk Actions — while jdoe stays `editor`-on
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import asyncpg
 
@@ -41,6 +42,17 @@ CREATE TABLE IF NOT EXISTS principal (
 -- additive migrations for databases seeded before these columns existed
 ALTER TABLE principal ADD COLUMN IF NOT EXISTS country TEXT;
 ALTER TABLE principal ADD COLUMN IF NOT EXISTS client_secret TEXT NOT NULL DEFAULT 'unset';
+
+-- Org/Space/Project hierarchy — one tier below Workspace,
+-- created at runtime via governance (unlike tenant/workspace, which are
+-- fixed at bootstrap in this build).
+CREATE TABLE IF NOT EXISTS project (
+    urn TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -71,7 +83,12 @@ def workspace_urn(tenant_id: str, workspace_id: str) -> str:
     return build_urn(tenant_id, "global", "workspace", workspace_id)
 
 
+def project_urn(tenant_id: str, workspace_id: str, name: str) -> str:
+    return build_urn(tenant_id, workspace_id, "project", name)
+
+
 VALID_WORKSPACE_RELATIONS = {"viewer", "editor", "admin"}
+VALID_PROJECT_RELATIONS = {"viewer", "editor", "admin"}
 
 
 def seed_principals(tenant_id: str) -> list[Principal]:
@@ -155,6 +172,25 @@ async def ensure_seeded(conn: asyncpg.Connection, tenant_id: str, workspace_id: 
             principal.country,
             client_secret_for(local_name),
         )
+
+
+async def create_project(pool: asyncpg.Pool, *, tenant_id: str, workspace_id: str, name: str) -> dict:
+    urn = project_urn(tenant_id, workspace_id, name)
+    await pool.execute(
+        "INSERT INTO project (urn, tenant_id, workspace_id, name) VALUES ($1, $2, $3, $4)",
+        urn, tenant_id, workspace_id, name,
+    )
+    return await get_project(pool, urn)
+
+
+async def get_project(pool: asyncpg.Pool, urn: str) -> Optional[dict]:
+    row = await pool.fetchrow("SELECT * FROM project WHERE urn = $1", urn)
+    return dict(row) if row else None
+
+
+async def list_projects(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
+    rows = await pool.fetch("SELECT * FROM project WHERE tenant_id = $1 ORDER BY name", tenant_id)
+    return [dict(row) for row in rows]
 
 
 async def ensure_authz_seeded(client: PermissionClient, schema_path: str, tenant_id: str, workspace_id: str) -> None:

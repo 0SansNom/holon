@@ -103,6 +103,58 @@ async def _notify_source_system(
     await breaker.call(_do)
 
 
+async def _fetch_writeback_dataset(
+    client: httpx.AsyncClient, *, tenant_id: str, action_name: str, knowledge_url: str, jwt_secret: str
+) -> Optional[str]:
+    """The generic counterpart to `WORKFLOW_DEFINITIONS`'s static
+    membership check — a declarative Action Type names its writeback
+    target by `dataset_name` (`ontology/action_types.py`'s
+    `writeback_dataset` column), read here via the same already-public
+    `GET /actions/{name}` every other Action-metadata reader uses
+    (`actions.py`'s `_get_action_definition` is what actually resolves
+    it server-side) rather than duplicating a second registry here the
+    way `WORKFLOW_DEFINITIONS` itself already duplicates Knowledge's
+    `WORKFLOW_DELEGATED_ACTIONS`.
+    """
+    token = issue_token(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    response = await client.get(f"{knowledge_url}/actions/{action_name}", headers={"Authorization": f"Bearer {token}"})
+    response.raise_for_status()
+    return response.json().get("writeback_dataset")
+
+
+async def _notify_generic_write_target(
+    client: httpx.AsyncClient,
+    breaker: CircuitBreaker,
+    *,
+    tenant_id: str,
+    dataset_name: str,
+    instance_id: str,
+    edits: dict,
+    connectivity_url: str,
+    jwt_secret: str,
+) -> None:
+    """The generic counterpart to `_notify_source_system` — any
+    declarative Action Type with a `writeback_dataset` goes through
+    Connectivity's one generic `POST /source/{dataset_name}/{instance_id}
+    /write` instead of a bespoke per-action endpoint. `edits` is exactly
+    the `{property: value}` dict Knowledge's `approve_action` published
+    on the triggering event — this function never needs to know what
+    the properties *mean*, only to forward them.
+    """
+    token = issue_token(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
+
+    async def _do() -> httpx.Response:
+        response = await client.post(
+            f"{connectivity_url}/source/{dataset_name}/{instance_id}/write",
+            json={"edits": edits},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        return response
+
+    await breaker.call(_do)
+
+
 async def _request_compensation(
     client: httpx.AsyncClient,
     breaker: CircuitBreaker,
@@ -161,23 +213,39 @@ async def _run_workflow(
     approval_id: int,
     action_name: str,
     instance_urn: str,
-    customer_id: int,
-    reason: str,
+    customer_id: Optional[int] = None,
+    reason: str = "",
+    dataset_name: Optional[str] = None,
+    instance_id: Optional[str] = None,
+    edits: Optional[dict] = None,
     connectivity_url: str,
     knowledge_url: str,
     jwt_secret: str,
 ) -> None:
+    """`dataset_name`/`instance_id`/`edits` are only ever set by
+    `consume_events`'s declarative-writeback branch — the pre-existing
+    `Customer.closeAccount` call site keeps passing `customer_id`/`reason`
+    exactly as before, so `dataset_name is None` below resolves to the
+    original hardcoded call unchanged.
+    """
     execution_id = await pool.fetchval(
         "INSERT INTO workflow_execution (tenant_id, approval_id, action_name, status) VALUES ($1, $2, $3, 'running') RETURNING id",
         tenant_id, approval_id, action_name,
     )
 
     try:
-        await _notify_source_system(
-            client, connectivity_breaker,
-            tenant_id=tenant_id, customer_id=customer_id, reason=reason,
-            connectivity_url=connectivity_url, jwt_secret=jwt_secret,
-        )
+        if dataset_name is not None:
+            await _notify_generic_write_target(
+                client, connectivity_breaker,
+                tenant_id=tenant_id, dataset_name=dataset_name, instance_id=instance_id, edits=edits or {},
+                connectivity_url=connectivity_url, jwt_secret=jwt_secret,
+            )
+        else:
+            await _notify_source_system(
+                client, connectivity_breaker,
+                tenant_id=tenant_id, customer_id=customer_id, reason=reason,
+                connectivity_url=connectivity_url, jwt_secret=jwt_secret,
+            )
     except (httpx.HTTPError, CircuitBreakerOpenError) as exc:
         error = str(exc)
         await pool.execute(
@@ -243,10 +311,42 @@ async def consume_events(
                     continue
                 action_name = event.payload["action_name"]
                 approval_id = event.payload.get("approval_id")
-                if action_name not in WORKFLOW_DEFINITIONS or approval_id is None:
+                if approval_id is None:
+                    continue
+                instance_urn = event.payload["instance_urn"]
+
+                if action_name in WORKFLOW_DEFINITIONS:
+                    await _run_workflow(
+                        pool, client, connectivity_breaker, knowledge_breaker,
+                        tenant_id=event.tenant_id,
+                        workspace_id=workspace_id,
+                        approval_id=approval_id,
+                        action_name=action_name,
+                        instance_urn=instance_urn,
+                        customer_id=_customer_id_from_instance_urn(instance_urn),
+                        reason=event.payload.get("reason", ""),
+                        connectivity_url=connectivity_url,
+                        knowledge_url=knowledge_url,
+                        jwt_secret=jwt_secret,
+                    )
+                    await consumer.commit()
                     continue
 
-                instance_urn = event.payload["instance_urn"]
+                # Declarative Action Type path: `edits` is only ever set
+                # on this event when Knowledge's `approve_action` found a
+                # `writeback_dataset` — same signal `WORKFLOW_DEFINITIONS`
+                # membership is for the hardcoded case above.
+                edits = event.payload.get("edits")
+                if edits is None:
+                    continue
+                writeback_dataset = await _fetch_writeback_dataset(
+                    client, tenant_id=event.tenant_id, action_name=action_name,
+                    knowledge_url=knowledge_url, jwt_secret=jwt_secret,
+                )
+                if writeback_dataset is None:
+                    continue
+                _, _, local = instance_urn.rpartition(":")
+                _, _, instance_id = local.rpartition("/")
                 await _run_workflow(
                     pool, client, connectivity_breaker, knowledge_breaker,
                     tenant_id=event.tenant_id,
@@ -254,8 +354,9 @@ async def consume_events(
                     approval_id=approval_id,
                     action_name=action_name,
                     instance_urn=instance_urn,
-                    customer_id=_customer_id_from_instance_urn(instance_urn),
-                    reason=event.payload.get("reason", ""),
+                    dataset_name=writeback_dataset,
+                    instance_id=instance_id,
+                    edits=edits,
                     connectivity_url=connectivity_url,
                     knowledge_url=knowledge_url,
                     jwt_secret=jwt_secret,
