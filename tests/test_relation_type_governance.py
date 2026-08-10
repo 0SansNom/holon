@@ -62,6 +62,7 @@ def test_admin_can_register_a_new_relation_type(jdoe_token: str, msmith_token: s
             "source_object_type": "SupportTicket",
             "target_object_type": "Order",
             "source_property": "orderId",
+            "target_property": "supportTickets",
             "cardinality": "many_to_one",
         },
     )
@@ -87,6 +88,7 @@ def test_editor_cannot_register_a_relation_type(jdoe_token: str) -> None:
             "source_object_type": "Order",
             "target_object_type": "Customer",
             "source_property": "customerId",
+            "target_property": "shouldNotExist",
             "cardinality": "many_to_one",
         },
     )
@@ -106,6 +108,7 @@ def test_nonexistent_target_object_type_is_rejected(msmith_token: str) -> None:
             "source_object_type": "Order",
             "target_object_type": "NoSuchObjectType",
             "source_property": "somePropertyId",
+            "target_property": "orders",
             "cardinality": "many_to_one",
         },
     )
@@ -123,6 +126,7 @@ def test_invalid_cardinality_is_rejected(msmith_token: str) -> None:
             "source_object_type": "Order",
             "target_object_type": "Customer",
             "source_property": "customerId",
+            "target_property": "orders",
             "cardinality": "sideways",
         },
     )
@@ -140,6 +144,7 @@ def test_duplicate_name_is_rejected(msmith_token: str) -> None:
             "source_object_type": "Order",
             "target_object_type": "Customer",
             "source_property": "customerId",
+            "target_property": "orders",
             "cardinality": "many_to_one",
         },
     )

@@ -149,6 +149,12 @@ async def run_gold_set(
     return {
         "metrics": metrics,
         "results": results,
+        # `gold_set_size` is deliberately small (~14 questions) — enough to
+        # catch a real regression, not a statistically meaningful sample.
+        # Surfaced in the response itself so a caller reading `exactitude`/
+        # `groundedness_rate` in isolation doesn't mistake a starter set's
+        # numbers for a validated benchmark.
+        "disclaimer": "Starter gold set — a small, hand-curated sample for regression-catching, not a statistically representative benchmark.",
     }
 
 

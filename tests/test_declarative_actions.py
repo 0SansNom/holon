@@ -101,7 +101,7 @@ def test_action_type_without_any_edits_is_400(msmith_token: str) -> None:
         },
     )
     assert status == 400, body
-    assert "at least one edit" in body["detail"], body
+    assert "exactly one of edits or edit_function" in body["detail"], body
 
 
 def test_action_type_with_an_unknown_risk_level_is_400(msmith_token: str) -> None:
