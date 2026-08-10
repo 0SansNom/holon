@@ -1,193 +1,198 @@
 import { useState } from "react";
-import { Button, Callout, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, InputGroup, Spinner, Tag } from "@blueprintjs/core";
-import Editor from "@monaco-editor/react";
-import { useActionTypes, useCreateActionType, useObjectTypes } from "../../api/hooks";
-import { ApiError } from "../../api/client";
-
-const RISK_LEVELS = ["low", "high"] as const;
-const DEFAULT_EDITS = '[\n  { "property": "reviewStatus", "source": "literal", "value": "reviewed" }\n]';
-const DEFAULT_PARAMETERS = "[]";
-const DEFAULT_CRITERIA = "[]";
+import { useActionTypes, useCreateActionType, useUpdateActionType, useObjectTypes, useInterfaces } from "../../api/hooks";
+import type { ActionType } from "../../api/knowledge";
+import { CardGrid, EmptyState } from "../common/ListPrimitives";
+import { RegistryDialog } from "../common/RegistryDialog";
+import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
+import { useAsyncAction } from "../../hooks/useAsyncAction";
+import { BranchesDialog } from "./BranchesDialog";
+import { OntologyTabHeader } from "./OntologyTabLayout";
+import { ActionTypeCard } from "./ActionTypeCard";
+import { ActionTypeFormFields } from "./ActionTypeFormFields";
+import {
+  DEFAULT_ACTION_TYPE_FORM,
+  actionTypeFormFromRecord,
+  isActionTypeCreateValid,
+  parseActionTypeJsonFields,
+  type ActionTypeFormState,
+} from "./actionTypeForm";
 
 export function ActionTypesTab() {
-  const { data, isLoading } = useActionTypes();
-  const { data: objectTypes = [] } = useObjectTypes();
+  const { data } = useActionTypes();
+  const { data: objectTypes } = useObjectTypes();
+  const { data: interfaces } = useInterfaces();
   const createActionType = useCreateActionType();
+  const updateActionType = useUpdateActionType();
+
   const [creating, setCreating] = useState(false);
-  const [name, setName] = useState("");
-  const [targetObjectType, setTargetObjectType] = useState("");
-  const [requiredPermission, setRequiredPermission] = useState("write");
-  const [riskLevel, setRiskLevel] = useState<string>("low");
-  const [description, setDescription] = useState("");
-  const [parametersJson, setParametersJson] = useState(DEFAULT_PARAMETERS);
-  const [editsJson, setEditsJson] = useState(DEFAULT_EDITS);
-  const [criteriaJson, setCriteriaJson] = useState(DEFAULT_CRITERIA);
-  const [error, setError] = useState<string | null>(null);
+  const [createForm, setCreateForm] = useState<ActionTypeFormState>(DEFAULT_ACTION_TYPE_FORM);
+  const [editing, setEditing] = useState<ActionType | null>(null);
+  const [editForm, setEditForm] = useState<ActionTypeFormState>(DEFAULT_ACTION_TYPE_FORM);
+  const [branching, setBranching] = useState<ActionType | null>(null);
 
-  function reset() {
-    setName("");
-    setTargetObjectType("");
-    setRequiredPermission("write");
-    setRiskLevel("low");
-    setDescription("");
-    setParametersJson(DEFAULT_PARAMETERS);
-    setEditsJson(DEFAULT_EDITS);
-    setCriteriaJson(DEFAULT_CRITERIA);
-    setError(null);
+  usePaletteCreateIntent("create-action-type", setCreating);
+
+  function resetCreate() {
+    setCreateForm(DEFAULT_ACTION_TYPE_FORM);
   }
 
-  async function create() {
-    setError(null);
-    let parameters, edits, submission_criteria;
-    try {
-      parameters = JSON.parse(parametersJson);
-      edits = JSON.parse(editsJson);
-      submission_criteria = JSON.parse(criteriaJson);
-    } catch {
-      setError("Parameters/Edits/Submission criteria must each be valid JSON.");
-      return;
-    }
-    try {
-      await createActionType.mutateAsync({
-        name: `${targetObjectType}.${name}`,
-        target_object_type: targetObjectType,
-        required_permission: requiredPermission,
-        risk_level: riskLevel as "low" | "high",
-        description,
-        parameters,
-        edits,
-        submission_criteria,
-      });
-      setCreating(false);
-      reset();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Create failed");
-    }
+  function closeCreate() {
+    setCreating(false);
+    resetCreate();
   }
 
-  if (isLoading) return <Spinner />;
+  function patchCreate(patch: Partial<ActionTypeFormState>) {
+    setCreateForm((prev) => ({ ...prev, ...patch }));
+  }
+
+  function patchEdit(patch: Partial<ActionTypeFormState>) {
+    setEditForm((prev) => ({ ...prev, ...patch }));
+  }
+
+  const {
+    submit: submitCreate,
+    error: createError,
+    isPending: createPending,
+  } = useAsyncAction(async () => {
+    const parsed = parseActionTypeJsonFields(createForm);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const target = createForm.targetKind === "object_type" ? createForm.targetObjectType : createForm.targetInterface;
+    await createActionType.mutateAsync({
+      name: `${target}.${createForm.localName}`,
+      target_object_type: createForm.targetKind === "object_type" ? createForm.targetObjectType : undefined,
+      target_interface: createForm.targetKind === "interface" ? createForm.targetInterface : undefined,
+      required_permission: createForm.requiredPermission,
+      risk_level: createForm.riskLevel as "low" | "high",
+      description: createForm.description,
+      parameters: parsed.parameters,
+      edits: parsed.edits,
+      submission_criteria: parsed.submission_criteria,
+      edit_function: createForm.editsKind === "function" ? createForm.editFunctionName : undefined,
+      sections: parsed.sections,
+    });
+    closeCreate();
+  }, { successMessage: `Action type "${createForm.targetKind === "object_type" ? createForm.targetObjectType : createForm.targetInterface}.${createForm.localName}" created` });
+
+  function openEdit(at: ActionType) {
+    setEditing(at);
+    setEditForm(actionTypeFormFromRecord(at));
+  }
+
+  const {
+    submit: submitEdit,
+    error: editError,
+    isPending: editPending,
+  } = useAsyncAction(async () => {
+    if (!editing) return;
+    const parsed = parseActionTypeJsonFields(editForm);
+    if (!parsed.ok) throw new Error(parsed.error);
+    await updateActionType.mutateAsync({
+      name: editing.name,
+      body: {
+        name: editing.name,
+        target_object_type: editing.target_object_type ?? undefined,
+        target_interface: editing.target_interface ?? undefined,
+        required_permission: editForm.requiredPermission,
+        risk_level: editForm.riskLevel as "low" | "high",
+        description: editForm.description,
+        parameters: parsed.parameters,
+        edits: parsed.edits,
+        submission_criteria: parsed.submission_criteria,
+        function_side_effect: editForm.functionSideEffect,
+        writeback_dataset: editForm.writebackDataset,
+        edit_function: editForm.editsKind === "function" ? editForm.editFunctionName : undefined,
+        sections: parsed.sections,
+      },
+    });
+    setEditing(null);
+  }, { successMessage: `"${editing?.name ?? "Action type"}" saved` });
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0, maxWidth: 560 }}>
-          The no-code counterpart to writing a Python Action handler — named parameters, declarative edits, and
-          submission criteria, no code to write or deploy. A <code>high</code> risk Action requires human approval
-          before it applies.
-        </p>
-        <Button intent="primary" icon="add" onClick={() => setCreating(true)}>
-          New action type
-        </Button>
-      </div>
+      <OntologyTabHeader
+        description={
+          <>
+            The no-code counterpart to writing a Python Action handler — named parameters, declarative edits, and
+            submission criteria, no code to write or deploy. A <code>high</code> risk Action requires human approval
+            before it applies.
+          </>
+        }
+        createLabel="New action type"
+        onCreate={() => setCreating(true)}
+      />
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-        {data?.map((at) => (
-          <Card key={at.name}>
-            <strong
-              style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-              title={at.name}
-            >
-              {at.name}
-            </strong>
-            <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Tag minimal>{at.target_object_type}</Tag>
-              <Tag minimal intent={at.risk_level === "high" ? "warning" : "none"}>
-                {at.risk_level} risk
-              </Tag>
-              {at.writeback_dataset && (
-                <Tag minimal icon="cloud-upload">
-                  writes back
-                </Tag>
-              )}
-            </div>
-            {at.description && (
-              <p style={{ fontSize: 12, color: "var(--hl-text-muted)", marginTop: 8, marginBottom: 0 }}>{at.description}</p>
-            )}
-          </Card>
+      <CardGrid minWidth={260}>
+        {data.map((at) => (
+          <ActionTypeCard key={at.name} actionType={at} onEdit={() => openEdit(at)} onBranch={() => setBranching(at)} />
         ))}
-        {data?.length === 0 && <p style={{ color: "var(--hl-text-muted)" }}>No action types yet.</p>}
-      </div>
+        {data.length === 0 && (
+          <EmptyState actionLabel="New action type" onAction={() => setCreating(true)}>
+            No action types yet.
+          </EmptyState>
+        )}
+      </CardGrid>
 
-      <Dialog
+      <RegistryDialog
         isOpen={creating}
-        onClose={() => {
-          setCreating(false);
-          reset();
-        }}
         title="New action type"
         style={{ width: 560 }}
+        onClose={closeCreate}
+        error={createError}
+        isPending={createPending}
+        submitLabel="Create"
+        submitDisabled={!isActionTypeCreateValid(createForm)}
+        onSubmit={() => submitCreate(undefined)}
       >
-        <DialogBody>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Target ObjectType</label>
-              <HTMLSelect fill value={targetObjectType} onChange={(e) => setTargetObjectType(e.target.value)}>
-                <option value="">Select…</option>
-                {objectTypes.map((ot) => (
-                  <option key={ot.name} value={ot.name}>
-                    {ot.name}
-                  </option>
-                ))}
-              </HTMLSelect>
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Local name</label>
-              <InputGroup placeholder="setPriority" value={name} onChange={(e) => setName(e.target.value)} />
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Required permission</label>
-              <InputGroup value={requiredPermission} onChange={(e) => setRequiredPermission(e.target.value)} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Risk level</label>
-              <HTMLSelect fill value={riskLevel} onChange={(e) => setRiskLevel(e.target.value)} options={[...RISK_LEVELS]} />
-            </div>
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Description</label>
-            <InputGroup placeholder="What invoking this Action does" value={description} onChange={(e) => setDescription(e.target.value)} />
-          </div>
-
-          <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-            Parameters <span className="hl-mono" style={{ color: "var(--hl-text-muted)" }}>[{"{"}name, value_type, required{"}"}, ...]</span>
-          </label>
-          <div className="hl-panel" style={{ padding: 0, overflow: "hidden", marginBottom: 12 }}>
-            <Editor height="90px" defaultLanguage="json" theme="vs-dark" value={parametersJson} onChange={(v) => setParametersJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
-          </div>
-          <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-            Edits <span className="hl-mono" style={{ color: "var(--hl-text-muted)" }}>[{"{"}property, source, value|parameter_name{"}"}, ...]</span>
-          </label>
-          <div className="hl-panel" style={{ padding: 0, overflow: "hidden", marginBottom: 12 }}>
-            <Editor height="90px" defaultLanguage="json" theme="vs-dark" value={editsJson} onChange={(v) => setEditsJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
-          </div>
-          <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-            Submission criteria <span className="hl-mono" style={{ color: "var(--hl-text-muted)" }}>[{"{"}property, operator, value{"}"}, ...]</span>
-          </label>
-          <div className="hl-panel" style={{ padding: 0, overflow: "hidden" }}>
-            <Editor height="70px" defaultLanguage="json" theme="vs-dark" value={criteriaJson} onChange={(v) => setCriteriaJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
-          </div>
-
-          {error && (
-            <Callout intent="danger" style={{ marginTop: 12 }}>
-              {error}
-            </Callout>
-          )}
-        </DialogBody>
-        <DialogFooter
-          actions={
-            <Button
-              intent="primary"
-              disabled={!name || !targetObjectType || !description}
-              loading={createActionType.isPending}
-              onClick={() => void create()}
-            >
-              Create
-            </Button>
-          }
+        <ActionTypeFormFields
+          mode="create"
+          value={createForm}
+          onChange={patchCreate}
+          objectTypes={objectTypes}
+          interfaces={interfaces}
         />
-      </Dialog>
+      </RegistryDialog>
+
+      <RegistryDialog
+        isOpen={editing !== null}
+        title={`Edit ${editing?.name ?? ""}`}
+        style={{ width: 560 }}
+        onClose={() => setEditing(null)}
+        error={editError}
+        isPending={editPending}
+        submitLabel="Save"
+        onSubmit={() => submitEdit(undefined)}
+      >
+        <ActionTypeFormFields
+          mode="edit"
+          value={editForm}
+          onChange={patchEdit}
+          objectTypes={objectTypes}
+          interfaces={interfaces}
+          fixedName={editing?.name}
+        />
+      </RegistryDialog>
+
+      {branching && (
+        <BranchesDialog
+          kind="action_type"
+          resourceName={branching.name}
+          currentDefinition={{
+            target_object_type: branching.target_object_type,
+            target_interface: branching.target_interface,
+            required_permission: branching.required_permission,
+            risk_level: branching.risk_level,
+            description: branching.description,
+            parameters: branching.parameters,
+            edits: branching.edits,
+            submission_criteria: branching.submission_criteria,
+            function_side_effect: branching.function_side_effect,
+            writeback_dataset: branching.writeback_dataset,
+            edit_function: branching.edit_function,
+            sections: branching.sections,
+          }}
+          onClose={() => setBranching(null)}
+        />
+      )}
     </div>
   );
 }

@@ -26,11 +26,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from holon_common import Principal
+from holon_common import Principal, build_urn
 
 from ... import export_format_registry, ontology, resolver
 from ... import core
-from ...actions import get_account_status, get_credit_holds
+from ...actions import get_account_status, get_credit_holds, list_instance_timeline
+from .generic import _merge_declarative_edits
 
 router = APIRouter()
 
@@ -97,6 +98,7 @@ async def export_objects(
 async def list_customers(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     await core._authorize_object_type(principal, core.CUSTOMER_OBJECT_TYPE_URN, "read")
     rows = await core._resolve_many("Customer", principal.tenant_id, resolver.fetch_customers, principal=principal)
+    rows = await _merge_declarative_edits(rows, "Customer", principal.tenant_id)
     return await _merge_action_overlays(rows)
 
 
@@ -119,6 +121,7 @@ async def get_customer(
     # past snapshot would mix two different points in time into one answer.
     if as_of is not None:
         return row
+    row = (await _merge_declarative_edits([row], "Customer", principal.tenant_id))[0]
     return (await _merge_action_overlays([row]))[0]
 
 
@@ -154,7 +157,8 @@ async def get_customer_tickets(customer_id: int, principal: Principal = Depends(
 @router.get("/objects/Order")
 async def list_orders(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     await core._authorize_object_type(principal, core.ORDER_OBJECT_TYPE_URN, "read")
-    return await core._resolve_many("Order", principal.tenant_id, resolver.fetch_orders, principal=principal)
+    rows = await core._resolve_many("Order", principal.tenant_id, resolver.fetch_orders, principal=principal)
+    return await _merge_declarative_edits(rows, "Order", principal.tenant_id)
 
 
 @router.get("/objects/Order/{order_id}")
@@ -168,7 +172,9 @@ async def get_order(
         if as_of is not None:
             detail += f" as of {as_of.isoformat()} (no history recorded yet at that time)"
         raise HTTPException(status_code=404, detail=detail)
-    return row
+    if as_of is not None:
+        return row
+    return (await _merge_declarative_edits([row], "Order", principal.tenant_id))[0]
 
 
 @router.get("/objects/Order/{order_id}/reviews")
@@ -189,7 +195,8 @@ async def get_order_reviews(order_id: int, principal: Principal = Depends(core.c
 @router.get("/objects/ProductReview")
 async def list_reviews(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     await core._authorize_object_type(principal, core.PRODUCT_REVIEW_OBJECT_TYPE_URN, "read")
-    return await core._resolve_many("ProductReview", principal.tenant_id, resolver.fetch_reviews, principal=principal)
+    rows = await core._resolve_many("ProductReview", principal.tenant_id, resolver.fetch_reviews, principal=principal)
+    return await _merge_declarative_edits(rows, "ProductReview", principal.tenant_id)
 
 
 @router.get("/objects/ProductReview/{review_id}")
@@ -198,13 +205,14 @@ async def get_review(review_id: int, principal: Principal = Depends(core.current
     row = await core._resolve_one("ProductReview", principal.tenant_id, review_id, resolver.fetch_reviews, "review_id", principal=principal)
     if row is None:
         raise HTTPException(status_code=404, detail=f"ProductReview/{review_id} not found")
-    return row
+    return (await _merge_declarative_edits([row], "ProductReview", principal.tenant_id))[0]
 
 
 @router.get("/objects/SupportTicket")
 async def list_support_tickets(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     await core._authorize_object_type(principal, core.SUPPORT_TICKET_OBJECT_TYPE_URN, "read")
-    return await core._resolve_many("SupportTicket", principal.tenant_id, resolver.fetch_support_tickets, principal=principal)
+    rows = await core._resolve_many("SupportTicket", principal.tenant_id, resolver.fetch_support_tickets, principal=principal)
+    return await _merge_declarative_edits(rows, "SupportTicket", principal.tenant_id)
 
 
 @router.get("/objects/SupportTicket/{ticket_id}")
@@ -213,13 +221,14 @@ async def get_support_ticket(ticket_id: int, principal: Principal = Depends(core
     row = await core._resolve_one("SupportTicket", principal.tenant_id, ticket_id, resolver.fetch_support_tickets, "ticket_id", principal=principal)
     if row is None:
         raise HTTPException(status_code=404, detail=f"SupportTicket/{ticket_id} not found")
-    return row
+    return (await _merge_declarative_edits([row], "SupportTicket", principal.tenant_id))[0]
 
 
 @router.get("/objects/Supplier")
 async def list_suppliers(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     await core._authorize_object_type(principal, core.SUPPLIER_OBJECT_TYPE_URN, "read")
-    return await core._resolve_many("Supplier", principal.tenant_id, resolver.fetch_suppliers, principal=principal)
+    rows = await core._resolve_many("Supplier", principal.tenant_id, resolver.fetch_suppliers, principal=principal)
+    return await _merge_declarative_edits(rows, "Supplier", principal.tenant_id)
 
 
 @router.get("/objects/Supplier/{supplier_id}")
@@ -228,13 +237,14 @@ async def get_supplier(supplier_id: int, principal: Principal = Depends(core.cur
     row = await core._resolve_one("Supplier", principal.tenant_id, supplier_id, resolver.fetch_suppliers, "supplier_id", principal=principal)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Supplier/{supplier_id} not found")
-    return row
+    return (await _merge_declarative_edits([row], "Supplier", principal.tenant_id))[0]
 
 
 @router.get("/objects/InventoryLevel")
 async def list_inventory_levels(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     await core._authorize_object_type(principal, core.INVENTORY_LEVEL_OBJECT_TYPE_URN, "read")
-    return await core._resolve_many("InventoryLevel", principal.tenant_id, resolver.fetch_inventory_levels, principal=principal)
+    rows = await core._resolve_many("InventoryLevel", principal.tenant_id, resolver.fetch_inventory_levels, principal=principal)
+    return await _merge_declarative_edits(rows, "InventoryLevel", principal.tenant_id)
 
 
 @router.get("/objects/InventoryLevel/{sku}")
@@ -243,17 +253,25 @@ async def get_inventory_level(sku: str, principal: Principal = Depends(core.curr
     row = await core._resolve_one("InventoryLevel", principal.tenant_id, sku, resolver.fetch_inventory_levels, "sku", principal=principal)
     if row is None:
         raise HTTPException(status_code=404, detail=f"InventoryLevel/{sku} not found")
-    return row
+    return (await _merge_declarative_edits([row], "InventoryLevel", principal.tenant_id))[0]
+
+
+_INT_KEYED_SEEDED_TYPES = {"Customer", "Order", "SupportTicket", "ProductReview", "Supplier"}
 
 
 def _coerce_instance_id(object_type: str, instance_id: str):
     """Unlike every typed route above (which lets FastAPI coerce
-    `customer_id: int` etc. straight from the path), this one endpoint's
-    `instance_id` path param must serve 5 int-keyed types and 1
-    string-keyed type (`InventoryLevel`/SKU) — no single Python type
-    annotation covers both, so the coercion happens here instead.
+    `customer_id: int` etc. straight from the path), the graph/links
+    endpoints' `instance_id` path param must serve 5 int-keyed seeded
+    types, 1 string-keyed one (`InventoryLevel`/SKU), and any self-serve
+    ObjectType (id type unknown ahead of time) — no single Python type
+    annotation covers all three, so the coercion happens here instead.
+    Only the 5 known int-keyed types are forced; everything else (SKU and
+    self-serve ids alike) passes through as a raw string, the same
+    try-int-then-string-fallback `resolver.fetch_generic` already applies
+    on its own end.
     """
-    if object_type == "InventoryLevel":
+    if object_type not in _INT_KEYED_SEEDED_TYPES:
         return instance_id
     try:
         return int(instance_id)
@@ -276,21 +294,18 @@ def _to_node(object_type: str, instance_id, row: dict, *, hop: int) -> dict:
 async def _traverse_neighborhood(
     object_type: str, instance_id, root_row: dict, hops: int, principal: Principal,
 ) -> dict:
-    """N-hop instance-neighborhood BFS over the seeded (and any
-    dynamically-created) RelationTypes — Vertex-style link analysis, a
-    different granularity entirely from the schema/dataset-level
-    `/lineage` endpoint (`routers/execute.py`), which has no notion of a
-    specific instance.
+    """N-hop instance-neighborhood BFS over every RelationType (seeded
+    and self-serve alike, via `_resolve_relation_neighbors`) — Vertex-
+    style link analysis, a different granularity entirely from the
+    schema/dataset-level `/lineage` endpoint (`routers/execute.py`),
+    which has no notion of a specific instance.
 
     Edges always follow the RelationType's own `source_object_type` ->
     `target_object_type` direction, regardless of which direction BFS
     discovered them from; `direction` records *how* the edge was found
-    (`toward_one`: the current row's own FK value points at its one
-    parent, cheap/PK-indexed; `toward_many`: fan out to every row whose
-    FK column matches the current instance, via the same generic
-    `filter_column` `_resolve_many` already exposes — not indexed on
-    that column today, the real reason `hops`/`MAX_NODES` are both
-    hard-capped rather than left open).
+    (`toward_one`/`toward_many`, see `_resolve_relation_neighbors`) — not
+    indexed on the fan-out column today, the real reason `hops`/
+    `MAX_NODES` are both hard-capped rather than left open.
 
     A node `_resolve_one` can't return (marking-denied/missing) is
     simply omitted, never aborts the rest of the traversal — the BFS
@@ -298,19 +313,8 @@ async def _traverse_neighborhood(
     itself already applies to a federated-fallback miss.
     """
     relation_types = await ontology.list_relation_types(core.pool, principal.tenant_id)
-    urn_to_name = {urn: name for name, urn in core.OBJECT_TYPE_URNS.items()}
     authorized_types = {object_type}
     property_mapping_cache: dict[str, dict] = {}
-
-    async def storage_column(source_object_type_urn: str, source_property: str) -> Optional[str]:
-        mapping = property_mapping_cache.get(source_object_type_urn)
-        if mapping is None:
-            source_object_type = await ontology.get_object_type(core.pool, source_object_type_urn)
-            if source_object_type is None:
-                return None
-            mapping = source_object_type["property_mapping"]
-            property_mapping_cache[source_object_type_urn] = mapping
-        return mapping.get(source_property)
 
     def node_id(ot: str, iid) -> str:
         return f"{ot}:{iid}"
@@ -325,46 +329,13 @@ async def _traverse_neighborhood(
         next_frontier = []
         for current_type, current_id, current_row in frontier:
             for relation in relation_types:
-                source_name = urn_to_name.get(relation["source_object_type_urn"])
-                target_name = urn_to_name.get(relation["target_object_type_urn"])
-                # A relation touching an ObjectType outside the 6 this
-                # endpoint knows how to fetch/authorize is a silent
-                # no-op here, never a crash — same tolerance
-                # `list_interface_objects` already shows for a registry
-                # that can outgrow what one call site hardcodes.
-                if source_name is None or target_name is None:
+                result = await core._resolve_relation_neighbors(
+                    relation, current_type, current_id, current_row, principal,
+                    authorized_types=authorized_types, property_mapping_cache=property_mapping_cache,
+                )
+                if result is None:
                     continue
-
-                col = await storage_column(relation["source_object_type_urn"], relation["source_property"])
-                if col is None:
-                    continue
-
-                if current_type == source_name:
-                    fk_value = current_row.get(col)
-                    if fk_value is None:
-                        continue
-                    neighbor_type = target_name
-                    if neighbor_type not in authorized_types:
-                        await core._authorize_object_type(principal, core.OBJECT_TYPE_URNS[neighbor_type], "read")
-                        authorized_types.add(neighbor_type)
-                    neighbor_row = await core._resolve_one(
-                        neighbor_type, principal.tenant_id, fk_value,
-                        core.FETCH_FNS[neighbor_type], core.ID_KWARGS[neighbor_type], principal=principal,
-                    )
-                    neighbor_rows = [neighbor_row] if neighbor_row is not None else []
-                    direction = "toward_one"
-                elif current_type == target_name:
-                    neighbor_type = source_name
-                    if neighbor_type not in authorized_types:
-                        await core._authorize_object_type(principal, core.OBJECT_TYPE_URNS[neighbor_type], "read")
-                        authorized_types.add(neighbor_type)
-                    neighbor_rows = await core._resolve_many(
-                        neighbor_type, principal.tenant_id, core.FETCH_FNS[neighbor_type], principal=principal,
-                        filter_column=col, filter_kwarg=col, filter_value=current_id,
-                    )
-                    direction = "toward_many"
-                else:
-                    continue
+                neighbor_type, neighbor_rows, direction = result
 
                 for neighbor_row in neighbor_rows:
                     if len(nodes) >= MAX_NODES:
@@ -402,16 +373,84 @@ async def get_object_graph(
     service already applies to bad-but-not-malicious input.
     """
     hops = max(1, min(hops, MAX_HOPS))
-    if object_type not in core.OBJECT_TYPE_URNS:
+    handle = await core._type_handle(object_type)
+    if handle is None:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType {object_type!r}")
-    await core._authorize_object_type(principal, core.OBJECT_TYPE_URNS[object_type], "read")
+    await core._authorize_object_type(principal, handle["urn"], "read")
 
     typed_id = _coerce_instance_id(object_type, instance_id)
     root_row = await core._resolve_one(
-        object_type, principal.tenant_id, typed_id,
-        core.FETCH_FNS[object_type], core.ID_KWARGS[object_type], principal=principal,
+        object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
     )
     if root_row is None:
         raise HTTPException(status_code=404, detail=f"{object_type}/{instance_id} not found")
 
     return await _traverse_neighborhood(object_type, root_row["id"], root_row, hops, principal)
+
+
+@router.get("/objects/{object_type}/{instance_id}/links/{link_name}")
+async def get_object_link(
+    object_type: str, instance_id: str, link_name: str, principal: Principal = Depends(core.current_principal),
+) -> dict:
+    """The named single-link accessor — Foundry's real `customer.orders`/
+    `order.customer` access pattern, distinct from `get_object_graph`'s
+    N-hop visualization: exactly one RelationType's related instance(s),
+    addressed by name instead of walked (`core._find_relation_by_link_name`
+    resolves `link_name`). Works for any ObjectType via `core._type_handle`,
+    same as the graph endpoint above.
+    """
+    handle = await core._type_handle(object_type)
+    if handle is None:
+        raise HTTPException(status_code=404, detail=f"unknown ObjectType {object_type!r}")
+    await core._authorize_object_type(principal, handle["urn"], "read")
+
+    typed_id = _coerce_instance_id(object_type, instance_id)
+    current_row = await core._resolve_one(
+        object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
+    )
+    if current_row is None:
+        raise HTTPException(status_code=404, detail=f"{object_type}/{instance_id} not found")
+
+    relation_types = await ontology.list_relation_types(core.pool, principal.tenant_id)
+    matched = core._find_relation_by_link_name(relation_types, object_type, link_name)
+    if matched is None:
+        raise HTTPException(status_code=404, detail=f"unknown link {link_name!r} on {object_type!r}")
+
+    result = await core._resolve_relation_neighbors(
+        matched, object_type, current_row["id"], current_row, principal,
+        authorized_types={object_type}, property_mapping_cache={},
+    )
+    if result is None:
+        return {"relation": matched["name"], "direction": None, "cardinality": matched["cardinality"], "items": []}
+    _neighbor_type, neighbor_rows, direction = result
+    return {"relation": matched["name"], "direction": direction, "cardinality": matched["cardinality"], "items": neighbor_rows}
+
+
+@router.get("/objects/{object_type}/{instance_id}/timeline")
+async def get_object_timeline(
+    object_type: str, instance_id: str, principal: Principal = Depends(core.current_principal),
+) -> list[dict]:
+    """The real event history for one instance — every Action actually
+    applied (`action_invocation`) merged with the request/decision
+    lifecycle of every high-risk proposal (`action_approval`), via
+    `actions.list_instance_timeline`. Nothing new is captured for this;
+    both tables are already written from the single shared `_apply_now`/
+    `approve_action` code path (`actions/__init__.py`) regardless of
+    which endpoint or Action Type triggered them. Works for any
+    ObjectType via `core._type_handle`, same as the graph/links endpoints
+    above.
+    """
+    handle = await core._type_handle(object_type)
+    if handle is None:
+        raise HTTPException(status_code=404, detail=f"unknown ObjectType {object_type!r}")
+    await core._authorize_object_type(principal, handle["urn"], "read")
+
+    typed_id = _coerce_instance_id(object_type, instance_id)
+    current_row = await core._resolve_one(
+        object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
+    )
+    if current_row is None:
+        raise HTTPException(status_code=404, detail=f"{object_type}/{instance_id} not found")
+
+    instance_urn = build_urn(principal.tenant_id, core.WORKSPACE_ID, "instance", f"{object_type}/{instance_id}")
+    return await list_instance_timeline(core.pool, principal.tenant_id, instance_urn)

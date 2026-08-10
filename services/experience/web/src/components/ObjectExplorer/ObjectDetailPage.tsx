@@ -1,38 +1,51 @@
 import { useMemo, useState } from "react";
-import { useParams, useNavigate, Link } from "@tanstack/react-router";
-import { Button, ButtonGroup, Dialog, DialogBody, DialogFooter, H3, InputGroup, Spinner, Tag, Callout } from "@blueprintjs/core";
-import { useActions, useObject, useObjectType, useInvokeAction, useRelationTypes } from "../../api/hooks";
-import { camelToSnake, FormattedValue } from "../common/PropertyFormat";
-import { PageBreadcrumbs } from "../common/PageBreadcrumbs";
-import type { PropertyFormatRule } from "../../api/knowledge";
-
-const METADATA_KEYS = new Set(["materializedAt", "sourceLagSeconds", "degraded", "_maskedFields"]);
-
-function urnShortName(urn: string): string {
-  const parts = urn.split(":");
-  return parts[parts.length - 1] ?? urn;
-}
+import { useParams, useNavigate } from "@tanstack/react-router";
+import { Button, ButtonGroup, Callout } from "@blueprintjs/core";
+import {
+  useActions,
+  useObject,
+  useObjectType,
+  useInvokeAction,
+  useRelationTypes,
+  usePrincipals,
+  useObjectTimeline,
+  useRevertActionInvocation,
+} from "../../api/hooks";
+import { getErrorMessage } from "../../api/client";
+import { camelToSnake } from "../common/propertyFormatUtils";
+import { DetailPage } from "../common/PageLayout";
+import type { PropertyFormatRule, ConditionalFormatRule } from "../../api/knowledge";
+import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
+import { urnShortName, type RelatedLink } from "./objectExplorerUtils";
+import { RelatedLinkPanel } from "./RelatedLinkPanel";
+import { ObjectPropertiesTable } from "./ObjectPropertiesTable";
+import { ObjectActionsBar } from "./ObjectActionsBar";
+import { ObjectTimelinePanel } from "./ObjectTimelinePanel";
+import { ActionInvokeDialog } from "./ActionInvokeDialog";
 
 export function ObjectDetailPage() {
   const { type, id } = useParams({ from: "/shell/objects/$type/$id" });
   const navigate = useNavigate();
-  const { data: object, isLoading, error } = useObject(type, id);
+  const { data: object } = useObject(type, id);
   const { data: objectType } = useObjectType(type);
   const { data: actions } = useActions();
   const { data: relationTypes } = useRelationTypes();
+  const { data: principals } = usePrincipals();
+  const { data: timeline } = useObjectTimeline(type, id);
   const invokeAction = useInvokeAction(type);
+  const revertInvocation = useRevertActionInvocation(type, id);
 
-  const [activeAction, setActiveAction] = useState<string | null>(null);
+  const [activeActionName, setActiveActionName] = useState<string | null>(null);
   const [reason, setReason] = useState("");
+  const [actionParameters, setActionParameters] = useState<Record<string, unknown>>({});
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  const relevantActions = (actions ?? []).filter((a) => a.target_object_type === type);
+  const relevantActions = (actions ?? []).filter(
+    (a) => a.target_object_type === type || (a.target_interface && (objectType?.implements ?? []).includes(a.target_interface)),
+  );
+  const activeAction = relevantActions.find((a) => a.name === activeActionName);
   const maskedFields = (object?._maskedFields as string[] | undefined) ?? [];
 
-  // Foreign-key fields (e.g. an Order's customer_id) are otherwise dead
-  // text — the RelationType metadata already knows they point at another
-  // ObjectType's instance, so surface that as a real link instead of
-  // requiring a manual detour through the Objects list to find it.
   const fkFieldTargets = useMemo(() => {
     const map = new Map<string, string>();
     (relationTypes ?? [])
@@ -41,51 +54,89 @@ export function ObjectDetailPage() {
     return map;
   }, [relationTypes, type]);
 
+  const relatedLinks = useMemo<RelatedLink[]>(() => {
+    const links: RelatedLink[] = [];
+    (relationTypes ?? []).forEach((r) => {
+      const sourceType = urnShortName(r.source_object_type_urn);
+      const targetType = urnShortName(r.target_object_type_urn);
+      if (sourceType === type) {
+        const localName = r.name.includes(".") ? r.name.split(".").slice(1).join(".") : r.name;
+        links.push({ linkName: localName, label: `${localName} → ${targetType}`, relatedType: targetType });
+      }
+      if (targetType === type && r.target_property) {
+        links.push({ linkName: r.target_property, label: `${r.target_property} ← ${sourceType}`, relatedType: sourceType });
+      }
+    });
+    return links;
+  }, [relationTypes, type]);
+
   const formatsBySourceKey = useMemo(() => {
     const map = new Map<string, PropertyFormatRule>();
     Object.entries(objectType?.property_formats ?? {}).forEach(([property, rule]) => map.set(camelToSnake(property), rule));
     return map;
   }, [objectType]);
 
-  async function submitAction() {
-    if (!activeAction) return;
+  const conditionalFormatsBySourceKey = useMemo(() => {
+    const map = new Map<string, ConditionalFormatRule[]>();
+    Object.entries(objectType?.conditional_formats ?? {}).forEach(([property, rules]) => map.set(camelToSnake(property), rules));
+    return map;
+  }, [objectType]);
+
+  const principalsByUrn = useMemo(() => {
+    const map = new Map<string, string>();
+    (principals ?? []).forEach((p) => map.set(p.urn, p.display_name));
+    return map;
+  }, [principals]);
+
+  const nextRevertibleId = useMemo(() => {
+    const latestEditBearing = (timeline ?? []).find((e) => e.kind === "invoked" && e.has_edits && !e.reverted);
+    return latestEditBearing?.revertible ? latestEditBearing.id : null;
+  }, [timeline]);
+
+  async function revertInvocationById(invocationId: number) {
     try {
-      const localName = activeAction.split(".")[1];
-      const response = await invokeAction.mutateAsync({ id, actionName: localName, reason });
+      await revertInvocation.mutateAsync(invocationId);
+      setResult({ ok: true, message: "Reverted." });
+    } catch (err) {
+      setResult({ ok: false, message: getErrorMessage(err) });
+    }
+  }
+
+  async function submitAction() {
+    if (!activeActionName) return;
+    try {
+      const action = relevantActions.find((a) => a.name === activeActionName);
+      const actionName = action?.parameters !== undefined ? activeActionName : activeActionName.split(".")[1];
+      const response = await invokeAction.mutateAsync({ id, actionName, reason, parameters: actionParameters });
       const status = (response as { status?: string }).status;
       setResult({
         ok: true,
         message: status === "pending" ? "Submitted for approval (high-risk Action)." : "Applied immediately.",
       });
     } catch (err) {
-      setResult({ ok: false, message: err instanceof Error ? err.message : "Action failed" });
+      setResult({ ok: false, message: getErrorMessage(err) });
     } finally {
-      setActiveAction(null);
+      setActiveActionName(null);
       setReason("");
+      setActionParameters({});
     }
   }
 
-  if (isLoading) return <Spinner />;
-  if (error) return <p style={{ color: "var(--hl-danger)" }}>{(error as Error).message}</p>;
   if (!object) return null;
 
   return (
-    <div>
-      <PageBreadcrumbs
-        items={[
-          { label: "Objects", to: "/objects" },
-          { label: type, to: "/objects/$type", params: { type } },
-          { label: String(id) },
-        ]}
-      />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
-        <H3 style={{ margin: 0 }}>
-          {type} / {id}
-        </H3>
+    <DetailPage
+      breadcrumbs={[
+        { label: "Objects", to: "/objects" },
+        { label: type, to: "/objects/$type", params: { type } },
+        { label: String(id) },
+      ]}
+      title={`${type} / ${id}`}
+      actions={
         <ButtonGroup>
           <Button
             icon="diagram-tree"
-            onClick={() => void navigate({ to: "/lineage/$urn", params: { urn: `hl:acme:demo:object-type:${type}` } })}
+            onClick={() => void navigate({ to: "/lineage/$urn", params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` } })}
           >
             Lineage
           </Button>
@@ -93,82 +144,60 @@ export function ObjectDetailPage() {
             Related instances
           </Button>
         </ButtonGroup>
-      </div>
-
+      }
+    >
       {result && (
-        <Callout intent={result.ok ? "success" : "danger"} style={{ marginTop: 16 }}>
+        <Callout intent={result.ok ? "success" : "danger"} className="hl-mt-md">
           {result.message}
         </Callout>
       )}
 
-      <div className="hl-panel" style={{ marginTop: 16 }}>
-        <table style={{ width: "100%", fontSize: 13 }}>
-          <tbody>
-            {Object.entries(object)
-              .filter(([key]) => !METADATA_KEYS.has(key))
-              .map(([key, value]) => {
-                const fkTargetType = fkFieldTargets.get(key);
-                return (
-                  <tr key={key} style={{ borderBottom: "1px solid var(--hl-border)" }}>
-                    <td style={{ padding: "8px 12px", color: "var(--hl-text-muted)", width: 200 }}>{key}</td>
-                    <td style={{ padding: "8px 12px" }}>
-                      {maskedFields.includes(key) ? (
-                        <span className="hl-masked-field">forbidden — masked by permission</span>
-                      ) : value !== null && fkTargetType ? (
-                        <Link
-                          to="/objects/$type/$id"
-                          params={{ type: fkTargetType, id: String(value) }}
-                          className="hl-mono"
-                          style={{ color: "var(--hl-accent)" }}
-                        >
-                          {String(value)} → {fkTargetType}
-                        </Link>
-                      ) : (
-                        <FormattedValue rule={formatsBySourceKey.get(key)} value={value} />
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-          </tbody>
-        </table>
-      </div>
+      <ObjectPropertiesTable
+        object={object}
+        maskedFields={maskedFields}
+        fkFieldTargets={fkFieldTargets}
+        formatsBySourceKey={formatsBySourceKey}
+        conditionalFormatsBySourceKey={conditionalFormatsBySourceKey}
+        principalsByUrn={principalsByUrn}
+      />
 
-      {relevantActions.length > 0 && (
-        <div style={{ marginTop: 20 }}>
-          <h4 style={{ fontSize: 13, color: "var(--hl-text-muted)", textTransform: "uppercase", letterSpacing: "0.03em" }}>
-            Actions
-          </h4>
-          <div style={{ display: "flex", gap: 8 }}>
-            {relevantActions.map((a) => (
-              <Button key={a.name} intent={a.risk_level === "high" ? "danger" : "primary"} onClick={() => setActiveAction(a.name)}>
-                {a.name.split(".")[1]}
-                <Tag minimal style={{ marginLeft: 8 }}>
-                  {a.risk_level}
-                </Tag>
-              </Button>
-            ))}
-          </div>
+      <ObjectActionsBar
+        actions={relevantActions}
+        onSelect={(actionName) => {
+          setActiveActionName(actionName);
+          setActionParameters({});
+        }}
+      />
+
+      {relatedLinks.length > 0 && (
+        <div className="hl-section">
+          <h4 className="hl-section-title">Related objects</h4>
+          {relatedLinks.map((link, i) => (
+            <RelatedLinkPanel key={`${link.linkName}-${i}`} type={type} id={String(id)} link={link} />
+          ))}
         </div>
       )}
 
-      <Dialog isOpen={activeAction !== null} onClose={() => setActiveAction(null)} title={activeAction ?? ""}>
-        <DialogBody>
-          <p style={{ fontSize: 13, color: "var(--hl-text-muted)" }}>
-            {relevantActions.find((a) => a.name === activeAction)?.risk_level === "high"
-              ? "This is a high-risk Action — it will create a pending approval, not apply immediately."
-              : "This Action applies immediately."}
-          </p>
-          <InputGroup placeholder="Reason" value={reason} onChange={(e) => setReason(e.target.value)} />
-        </DialogBody>
-        <DialogFooter
-          actions={
-            <Button intent="primary" loading={invokeAction.isPending} onClick={() => void submitAction()}>
-              Submit
-            </Button>
-          }
+      {timeline && (
+        <ObjectTimelinePanel
+          timeline={timeline}
+          principalsByUrn={principalsByUrn}
+          nextRevertibleId={nextRevertibleId}
+          reverting={revertInvocation.isPending}
+          onRevert={(invocationId) => void revertInvocationById(invocationId)}
         />
-      </Dialog>
-    </div>
+      )}
+
+      <ActionInvokeDialog
+        action={activeAction}
+        reason={reason}
+        parameters={actionParameters}
+        loading={invokeAction.isPending}
+        onReasonChange={setReason}
+        onParametersChange={setActionParameters}
+        onClose={() => setActiveActionName(null)}
+        onSubmit={() => void submitAction()}
+      />
+    </DetailPage>
   );
 }
