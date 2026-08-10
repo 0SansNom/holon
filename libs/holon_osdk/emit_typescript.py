@@ -26,6 +26,24 @@ _BASE_TYPE_TO_TS = {
     "timestamp": "string",
 }
 
+# ObjectType names are user-chosen ontology strings, not reserved for this
+# generator's benefit — an `interface {ObjectTypeName} {...}` that happens
+# to share a name with one of TS's own global generic utility types
+# shadows it for the rest of the *whole generated file*, breaking every
+# other, unrelated `Record<...>`/`Array<...>` usage with a confusing
+# "Type 'Record' is not generic" error far from the actual cause. Struct
+# interface names (`_struct_interface_name`) are always namespaced with
+# the property name and never hit this.
+_RESERVED_TS_GLOBALS = {
+    "Array", "Record", "Map", "Set", "Promise", "Date", "Object", "String",
+    "Number", "Boolean", "Function", "Symbol", "RegExp", "Error", "JSON",
+    "Math", "WeakMap", "WeakSet",
+}
+
+
+def _safe_interface_name(name: str) -> str:
+    return f"{name}_" if name in _RESERVED_TS_GLOBALS else name
+
 
 def _struct_interface_name(object_type_name: str, property_name: str) -> str:
     return f"{object_type_name}_{property_name[0].upper()}{property_name[1:]}"
@@ -48,6 +66,10 @@ def _ts_type_for(
     if prop.kind == "struct":
         return struct_interface_name
     if prop.kind == "array":
+        # `_emit_object_type` special-cases array-of-struct before ever
+        # reaching here (it needs to emit a *named* nested interface, not
+        # just a type string) — this branch only ever sees a
+        # value_type/shared_property_type element in practice.
         return f"Array<{_ts_type_for(prop.element, value_types, shared_property_types)}>"
     raise ValueError(f"unknown property_types kind: {prop.kind!r}")
 
@@ -75,14 +97,21 @@ def _emit_object_type(
         if prop is None:
             field_lines.append(f"  {property_name}?: unknown;")
             continue
-        if prop.kind == "struct":
+        # A struct can appear as a top-level property or as an array's
+        # element (a struct reducer's source column, e.g.
+        # `TestPriorityTarget.segment`) — both need the same named nested
+        # interface, since `_ts_type_for`'s `struct` case has no name of
+        # its own to fall back on.
+        struct_element = prop if prop.kind == "struct" else (prop.element if prop.kind == "array" and prop.element.kind == "struct" else None)
+        if struct_element is not None:
             interface_name = _struct_interface_name(object_type.name, property_name)
             nested_fields = "\n".join(
                 f"{_field_doc(leaf, shared_property_types)}  {name}: {_ts_type_for(leaf, value_types, shared_property_types)};"
-                for name, leaf in prop.properties.items()
+                for name, leaf in struct_element.properties.items()
             )
             struct_interfaces.append(f"export interface {interface_name} {{\n{nested_fields}\n}}\n")
-            field_lines.append(f"  {property_name}?: {interface_name};")
+            ts_type = interface_name if prop.kind == "struct" else f"Array<{interface_name}>"
+            field_lines.append(f"  {property_name}?: {ts_type};")
         else:
             field_lines.append(
                 f"{_field_doc(prop, shared_property_types)}  {property_name}?: {_ts_type_for(prop, value_types, shared_property_types)};"
@@ -90,7 +119,7 @@ def _emit_object_type(
 
     body = "\n".join(field_lines)
     doc = f"/** {object_type.description} */\n" if object_type.description else ""
-    interface_def = f"{doc}export interface {object_type.name} {{\n{body}\n}}\n"
+    interface_def = f"{doc}export interface {_safe_interface_name(object_type.name)} {{\n{body}\n}}\n"
     return "\n".join(struct_interfaces) + interface_def
 
 
