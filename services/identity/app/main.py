@@ -16,8 +16,8 @@ import uuid
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException, Response
+from pydantic import BaseModel, Field
 
 from holon_common import (
     EventActor,
@@ -26,6 +26,7 @@ from holon_common import (
     PermissionClient,
     Principal,
     build_urn,
+    clear_session_cookie,
     configure_json_logging,
     create_pool,
     install_error_handlers,
@@ -36,6 +37,7 @@ from holon_common import (
     make_principal_dependency,
     outbox,
     retry_with_backoff,
+    set_session_cookie,
 )
 
 from .seed import (
@@ -96,7 +98,7 @@ instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
-current_principal = make_principal_dependency(JWT_SECRET)
+current_principal = make_principal_dependency(JWT_SECRET, expected_tenant_id=TENANT_ID)
 
 
 class TokenRequest(BaseModel):
@@ -118,6 +120,15 @@ async def _fetch_principal(pool: asyncpg.Pool, urn: str) -> Principal | None:
     return _principal_from_row(row) if row else None
 
 
+async def _require_grant_target(urn: str) -> Principal:
+    target = await _fetch_principal(app.state.pool, urn)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"unknown principal: {urn}")
+    if target.tenant_id != TENANT_ID:
+        raise HTTPException(status_code=400, detail="principal belongs to another tenant")
+    return target
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -135,7 +146,14 @@ async def ready() -> dict:
 
 
 @app.get("/principals", response_model=list[Principal])
-async def list_principals() -> list[Principal]:
+async def list_principals(principal: Principal = Depends(current_principal)) -> list[Principal]:
+    """Authenticated-only: the response carries every principal's
+    `country`/`on_behalf_of` for the whole tenant — not something to
+    serve anonymously. Any valid token suffices (the UI resolves display
+    names through this on many screens, including for viewer-tier
+    principals); workspace-tier scoping, if ever wanted, is a policy
+    decision on top of this, not part of plugging the anonymous hole.
+    """
     rows = await app.state.pool.fetch("SELECT * FROM principal ORDER BY urn")
     return [_principal_from_row(row) for row in rows]
 
@@ -143,12 +161,39 @@ async def list_principals() -> list[Principal]:
 @app.post("/token")
 async def mint_token(request: TokenRequest) -> dict:
     """`client_secret` verifies principal identity prior to issuing bearer tokens.
+
+    Unchanged, on purpose — this is the CLI/script/service-to-service
+    path (`scripts/demo.py`, `HolonClient.token_for`, every test
+    fixture, internal service-account minting), none of which have a
+    cookie jar. `/login` below is the browser's own path.
     """
     row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", request.principal_urn)
     if row is None or not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
     principal = _principal_from_row(row)
     return {"access_token": issue_token(principal, JWT_SECRET), "token_type": "bearer"}
+
+
+@app.post("/login")
+async def login(request: TokenRequest, response: Response) -> dict:
+    """The browser's sign-in path — same credential check as `/token`,
+    but the issued JWT is set as an HttpOnly cookie instead of ever
+    appearing in a response body, so it's never reachable from page JS
+    (defeats XSS-based token theft, `localStorage`'s weakness — see
+    `holon_common.auth`'s `set_session_cookie`/module docstring).
+    """
+    row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", request.principal_urn)
+    if row is None or not secrets.compare_digest(row["client_secret"], request.client_secret):
+        raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
+    principal = _principal_from_row(row)
+    set_session_cookie(response, issue_token(principal, JWT_SECRET))
+    return {"status": "ok"}
+
+
+@app.post("/logout")
+async def logout(response: Response) -> dict:
+    clear_session_cookie(response)
+    return {"status": "ok"}
 
 
 @app.get("/whoami", response_model=Principal)
@@ -170,6 +215,41 @@ async def _authorize_governance_action(principal: Principal) -> None:
         raise HTTPException(status_code=403, detail=decision.reason)
 
 
+async def _access_listing(resource_type: str, resource_urn: str, valid_relations: set[str]) -> list[dict]:
+    """The read side of ReBAC governance: enumerate a resource's direct
+    grants. SpiceDB object IDs store URNs with ':' swapped for '_', a
+    transform that is not naively reversible, so subject IDs are mapped
+    back through the principal table — which also enriches each entry
+    with the display fields an admin UI needs. A subject with no
+    principal row is an orphaned tuple (grant endpoints never validated
+    the target against the principal table); it is reported with null
+    display fields rather than silently dropped, so admins can still see
+    it — and revoke it, since the raw subject id contains no ':' and is
+    therefore round-trip safe as a `principal_urn`.
+    """
+    relationships = await app.state.authz.read_relationships(resource_type=resource_type, resource_urn=resource_urn)
+    rows = await app.state.pool.fetch("SELECT * FROM principal")
+    by_object_id = {r["urn"].replace(":", "_"): r for r in rows}
+
+    grants = []
+    for rel in relationships:
+        relation = rel.get("relation", "")
+        subject = rel.get("subject", {}).get("object", {})
+        if relation not in valid_relations or subject.get("objectType") != "principal":
+            continue  # parent_tenant/parent_workspace edges are hierarchy, not access grants
+        subject_id = subject.get("objectId", "")
+        row = by_object_id.get(subject_id)
+        grants.append(
+            {
+                "principal_urn": row["urn"] if row else subject_id,
+                "display_name": row["display_name"] if row else None,
+                "type": row["type"] if row else None,
+                "relation": relation,
+            }
+        )
+    return sorted(grants, key=lambda g: (g["principal_urn"], g["relation"]))
+
+
 def _validate_relation(relation: str) -> None:
     if relation not in VALID_WORKSPACE_RELATIONS:
         raise HTTPException(
@@ -178,17 +258,60 @@ def _validate_relation(relation: str) -> None:
         )
 
 
+async def _enqueue_permission_event(
+    *,
+    event_type: str,
+    target_principal_urn: str,
+    resource_type: str,
+    resource_urn: str,
+    relation: str,
+    actor: Principal,
+) -> None:
+    event_id = uuid.uuid4().hex
+    event = EventEnvelope(
+        event_id=event_id,
+        event_type=event_type,
+        tenant_id=TENANT_ID,
+        workspace_id=WORKSPACE_ID,
+        aggregate_type="Principal",
+        aggregate_id=target_principal_urn,
+        correlation_id=event_id,
+        partition_key=f"{TENANT_ID}/{target_principal_urn}",
+        producer="identity-platform@0.1.0",
+        actor=EventActor(type=actor.type, urn=actor.urn, on_behalf_of=actor.on_behalf_of),
+        payload={
+            "principal_urn": target_principal_urn,
+            "resource_type": resource_type,
+            "resource_urn": resource_urn,
+            "relation": relation,
+        },
+    )
+    async with app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            await outbox.enqueue(conn, event)
+
+
 @app.post("/principals/{principal_urn:path}/access/grant")
 async def grant_access(
     principal_urn: str, request: AccessRequest, principal: Principal = Depends(current_principal)
 ) -> dict:
     await _authorize_governance_action(principal)
     _validate_relation(request.relation)
+    await _require_grant_target(principal_urn)
+    w_urn = workspace_urn(TENANT_ID, WORKSPACE_ID)
     await app.state.authz.write_relationship(
         resource_type="workspace",
-        resource_urn=workspace_urn(TENANT_ID, WORKSPACE_ID),
+        resource_urn=w_urn,
         relation=request.relation,
         subject_urn=principal_urn,
+    )
+    await _enqueue_permission_event(
+        event_type="identity.permission.granted",
+        target_principal_urn=principal_urn,
+        resource_type="workspace",
+        resource_urn=w_urn,
+        relation=request.relation,
+        actor=principal,
     )
     return {"status": "granted", "principalUrn": principal_urn, "relation": request.relation}
 
@@ -211,34 +334,35 @@ async def revoke_access(
         subject_urn=principal_urn,
     )
 
-    event_id = uuid.uuid4().hex
-    event = EventEnvelope(
-        event_id=event_id,
+    await _enqueue_permission_event(
         event_type="identity.permission.revoked",
-        tenant_id=TENANT_ID,
-        workspace_id=WORKSPACE_ID,
-        aggregate_type="Principal",
-        aggregate_id=principal_urn,
-        correlation_id=event_id,
-        partition_key=f"{TENANT_ID}/{principal_urn}",
-        producer="identity-platform@0.1.0",
-        actor=EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of),
-        payload={
-            "principal_urn": principal_urn,
-            "resource_type": "workspace",
-            "resource_urn": w_urn,
-            "relation": request.relation,
-        },
+        target_principal_urn=principal_urn,
+        resource_type="workspace",
+        resource_urn=w_urn,
+        relation=request.relation,
+        actor=principal,
     )
-    async with app.state.pool.acquire() as conn:
-        async with conn.transaction():
-            await outbox.enqueue(conn, event)
 
     return {"status": "revoked", "principalUrn": principal_urn, "relation": request.relation}
 
 
+@app.get("/access")
+async def list_workspace_access(principal: Principal = Depends(current_principal)) -> list[dict]:
+    """Who currently holds viewer/editor/admin on the workspace. Same
+    governance gate as the mutations (`approve`) — the membership list is
+    itself sensitive.
+    """
+    await _authorize_governance_action(principal)
+    return await _access_listing("workspace", workspace_urn(TENANT_ID, WORKSPACE_ID), VALID_WORKSPACE_RELATIONS)
+
+
 class CreateProjectRequest(BaseModel):
-    name: str
+    name: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        description="URL-safe project name",
+    )
 
 
 @app.post("/projects", status_code=201)
@@ -305,8 +429,17 @@ async def grant_project_access(
 ) -> dict:
     p_urn = await _authorize_project_governance(principal, name)
     _validate_project_relation(request.relation)
+    await _require_grant_target(principal_urn)
     await app.state.authz.write_relationship(
         resource_type="project", resource_urn=p_urn, relation=request.relation, subject_urn=principal_urn,
+    )
+    await _enqueue_permission_event(
+        event_type="identity.permission.granted",
+        target_principal_urn=principal_urn,
+        resource_type="project",
+        resource_urn=p_urn,
+        relation=request.relation,
+        actor=principal,
     )
     return {"status": "granted", "principalUrn": principal_urn, "project": name, "relation": request.relation}
 
@@ -321,22 +454,25 @@ async def revoke_project_access(
         resource_type="project", resource_urn=p_urn, relation=request.relation, subject_urn=principal_urn,
     )
 
-    event_id = uuid.uuid4().hex
-    event = EventEnvelope(
-        event_id=event_id,
+    await _enqueue_permission_event(
         event_type="identity.permission.revoked",
-        tenant_id=TENANT_ID,
-        workspace_id=WORKSPACE_ID,
-        aggregate_type="Principal",
-        aggregate_id=principal_urn,
-        correlation_id=event_id,
-        partition_key=f"{TENANT_ID}/{principal_urn}",
-        producer="identity-platform@0.1.0",
-        actor=EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of),
-        payload={"principal_urn": principal_urn, "resource_type": "project", "resource_urn": p_urn, "relation": request.relation},
+        target_principal_urn=principal_urn,
+        resource_type="project",
+        resource_urn=p_urn,
+        relation=request.relation,
+        actor=principal,
     )
-    async with app.state.pool.acquire() as conn:
-        async with conn.transaction():
-            await outbox.enqueue(conn, event)
 
     return {"status": "revoked", "principalUrn": principal_urn, "project": name, "relation": request.relation}
+
+
+@app.get("/projects/{name}/access")
+async def list_project_access(name: str, principal: Principal = Depends(current_principal)) -> list[dict]:
+    """Who currently holds viewer/editor/admin on the project — direct
+    grants only, exactly like the workspace listing; the workspace-tier
+    cascade stays visible through `GET /access`, not duplicated here.
+    `_authorize_project_governance` supplies both the 404 (unknown
+    project) and the 403 (caller lacks project `approve`).
+    """
+    p_urn = await _authorize_project_governance(principal, name)
+    return await _access_listing("project", p_urn, VALID_PROJECT_RELATIONS)

@@ -15,3 +15,6 @@ services/experience/app/static/
 /nova-foundry-architecture.md
 /nova-foundry-phase3.md
 /docs/adr/
+
+# Local AI-assistant tooling state, not project content
+.claude/
