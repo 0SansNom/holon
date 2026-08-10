@@ -1,16 +1,20 @@
 import { IDENTITY_URL } from "./config";
 import { api } from "./client";
 
-interface TokenResponse {
-  access_token: string;
-}
-
-export async function mintToken(principalUrn: string, clientSecret: string): Promise<string> {
-  const response = await api.post<TokenResponse>(`${IDENTITY_URL}/token`, {
+// The browser's sign-in/out path — `POST /login` sets the `holon_session`
+// HttpOnly cookie server-side and returns no token in the body (see
+// `services/identity/app/main.py`'s `/login`); `POST /token` still exists
+// for CLI/script/service-to-service use but is deliberately not called
+// from the frontend anymore.
+export async function login(principalUrn: string, clientSecret: string): Promise<void> {
+  await api.post<{ status: string }>(`${IDENTITY_URL}/login`, {
     principal_urn: principalUrn,
     client_secret: clientSecret,
   });
-  return response.access_token;
+}
+
+export async function logout(): Promise<void> {
+  await api.post<{ status: string }>(`${IDENTITY_URL}/logout`);
 }
 
 export interface IdentityPrincipal {
@@ -34,6 +38,8 @@ export type AccessRelation = "viewer" | "editor" | "admin";
 
 export const identityApi = {
   listPrincipals: () => api.get<IdentityPrincipal[]>(`${IDENTITY_URL}/principals`),
+
+  whoami: () => api.get<IdentityPrincipal>(`${IDENTITY_URL}/whoami`),
 
   listProjects: () => api.get<Project[]>(`${IDENTITY_URL}/projects`),
   createProject: (name: string) => api.post<Project>(`${IDENTITY_URL}/projects`, { name }),

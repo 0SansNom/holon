@@ -14,37 +14,18 @@ function PaletteChip({ id, kind, label, icon }: { id: string; kind: "kpi" | "tab
         touchAction: "none",
       }}
     >
-      <Card style={{ padding: "8px 12px", marginBottom: 8, cursor: "grab", display: "flex", alignItems: "center", gap: 8 }}>
+      <Card className="hl-palette-chip">
         <Icon icon={icon} size={14} />
-        <span style={{ fontSize: 12 }}>{label}</span>
+        <span className="hl-palette-chip-label">{label}</span>
       </Card>
     </div>
   );
 }
 
-// The one genuinely drag-and-drop part of the Builder (`@dnd-kit`,
-// installed since the project's start but unused until Phase G): these
-// two chips are draggable onto the dashboard canvas below, and the
-// widgets they produce there are themselves sortable. Object App/Agent
-// App get plain toggle+form sections instead, deliberately — a
-// definition can only meaningfully carry *one* of each (Knowledge/
-// Experience both resolve the *first* matching surface), so there's
-// nothing to drag-and-drop reorder there; dashboard widgets are the
-// one genuinely multi-item, reorderable case in this schema.
 export function WidgetPalette() {
   return (
     <div>
-      <div
-        style={{
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: "0.03em",
-          color: "var(--hl-text-muted)",
-          marginBottom: 8,
-        }}
-      >
-        Drag onto Dashboard
-      </div>
+      <div className="hl-section-title hl-mb-sm">Drag onto Dashboard</div>
       <PaletteChip id="palette-kpi" kind="kpi" label="KPI widget" icon="numerical" />
       <PaletteChip id="palette-table" kind="table" label="Table widget" icon="th" />
     </div>

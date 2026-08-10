@@ -21,6 +21,7 @@ same values it already assigns to `app.state.*` for its own internal use
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -115,6 +116,132 @@ async def _object_type_urn_for(object_type: str) -> str:
     if row is None:
         raise KeyError(object_type)
     return urn
+
+
+async def _type_handle(object_type: str) -> Optional[dict]:
+    """Generalizes `OBJECT_TYPE_URNS`/`FETCH_FNS`/`ID_KWARGS`'s
+    hardcoded-six lookup to any ObjectType, self-serve included — built
+    on `_object_type_urn_for`'s own fallback. Used wherever a caller
+    needs to fetch an *arbitrary* neighbor type (instance-graph BFS,
+    single-link traversal), not just one of the six with a hand-written
+    `fetch_*` function. Returns `None` for an unknown name rather than
+    raising, since both call sites already tolerate a not-found neighbor
+    as a skip, not an error.
+    """
+    try:
+        urn = await _object_type_urn_for(object_type)
+    except KeyError:
+        return None
+    if object_type in FETCH_FNS:
+        return {"urn": urn, "fetch_fn": FETCH_FNS[object_type], "id_kwarg": ID_KWARGS[object_type]}
+    definition = await ontology.get_object_type(pool, urn)
+    if definition is None:
+        return None
+    dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
+    return {"urn": urn, "fetch_fn": functools.partial(resolver.fetch_generic, dataset_name), "id_kwarg": "id_value"}
+
+
+def _fk_filtered_fetch(fetch_fn, filter_column: str):
+    """Adapts a self-serve `fetch_generic` partial (which only
+    understands `filter_column`/`filter_value`) to `_resolve_many`'s
+    calling convention — `fetch_fn(**{filter_kwarg: filter_value}, **iceberg_config)`,
+    the exact shape every hardcoded `fetch_*` function already declares
+    its own FK kwarg in (e.g. `fetch_orders`'s `customer_id`), which is
+    why a hardcoded `fetch_fn` needs no adapter and is passed through
+    `_resolve_relation_neighbors` unchanged.
+    """
+    def _call(**kwargs):
+        filter_value = kwargs.pop(filter_column, None)
+        return fetch_fn(filter_column=filter_column, filter_value=filter_value, **kwargs)
+    return _call
+
+
+async def _resolve_relation_neighbors(
+    relation: dict, current_type: str, current_id, current_row: dict, principal: Principal,
+    *, authorized_types: set[str], property_mapping_cache: dict[str, dict],
+) -> Optional[tuple[str, list[dict], str]]:
+    """Applies one RelationType to one instance, in whichever direction
+    `current_type` sits on — `toward_one` if it's the relation's source
+    (follow the FK to the single target, cheap/PK-indexed) or
+    `toward_many` if it's the target (fan out to every source row whose
+    FK matches, via `_resolve_many`'s own `filter_column`). The
+    single-relation building block the instance-graph BFS
+    (`routers/objects/seeded.py`'s `_traverse_neighborhood`), the named
+    single-link endpoint (`get_object_link`), and a `link_aggregate`
+    derived property (`_apply_derived_properties` below) all share, so
+    FK/direction resolution is never duplicated. Works for any
+    ObjectType, seeded or self-serve, via `_type_handle`. Returns
+    `(neighbor_type, neighbor_rows, direction)`, or `None` if this
+    relation doesn't touch `current_type`, its FK column can't be
+    resolved, or the neighbor type itself no longer exists.
+    """
+    source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
+    target_name = relation["target_object_type_urn"].rsplit(":", 1)[-1]
+    if current_type not in (source_name, target_name):
+        return None
+
+    mapping = property_mapping_cache.get(relation["source_object_type_urn"])
+    if mapping is None:
+        source_definition = await ontology.get_object_type(pool, relation["source_object_type_urn"])
+        if source_definition is None:
+            return None
+        mapping = source_definition["property_mapping"]
+        property_mapping_cache[relation["source_object_type_urn"]] = mapping
+    col = mapping.get(relation["source_property"])
+    if col is None:
+        return None
+
+    if current_type == source_name:
+        neighbor_type = target_name
+        handle = await _type_handle(neighbor_type)
+        if handle is None:
+            return None
+        fk_value = current_row.get(col)
+        if fk_value is None:
+            return None
+        if neighbor_type not in authorized_types:
+            await _authorize_object_type(principal, handle["urn"], "read")
+            authorized_types.add(neighbor_type)
+        neighbor_row = await _resolve_one(
+            neighbor_type, principal.tenant_id, fk_value, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
+        )
+        return neighbor_type, ([neighbor_row] if neighbor_row is not None else []), "toward_one"
+
+    neighbor_type = source_name
+    handle = await _type_handle(neighbor_type)
+    if handle is None:
+        return None
+    if neighbor_type not in authorized_types:
+        await _authorize_object_type(principal, handle["urn"], "read")
+        authorized_types.add(neighbor_type)
+    fetch_fn = handle["fetch_fn"] if neighbor_type in FETCH_FNS else _fk_filtered_fetch(handle["fetch_fn"], col)
+    neighbor_rows = await _resolve_many(
+        neighbor_type, principal.tenant_id, fetch_fn, principal=principal,
+        filter_column=col, filter_kwarg=col, filter_value=current_id,
+    )
+    return neighbor_type, neighbor_rows, "toward_many"
+
+
+def _find_relation_by_link_name(relation_types: list[dict], object_type: str, link_name: str) -> Optional[dict]:
+    """`link_name` matches either a relation's forward accessor name
+    (this type is the source — the local part of `name`, e.g.
+    `Order.customer`'s `customer`; `name` itself is a dotted, globally-
+    unique registry identifier, not a bare accessor, the same
+    `Registry.localName` split every other dotted name in this build
+    already uses) or its reverse `target_property` (this type is the
+    target) — whichever resolves first. Shared by `get_object_link` and
+    a `link_aggregate` derived property's `relation` reference, both a
+    pure structural lookup with no traversal involved.
+    """
+    for relation in relation_types:
+        source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
+        target_name = relation["target_object_type_urn"].rsplit(":", 1)[-1]
+        local_name = relation["name"].split(".", 1)[-1]
+        if source_name == object_type and local_name == link_name:
+            return relation
+        if target_name == object_type and relation.get("target_property") == link_name:
+            return relation
+    return None
 
 
 allowed_countries: set = set()
@@ -224,17 +351,128 @@ async def _mask_confidential_properties(
     return masked_rows
 
 
-async def _apply_derived_properties(object_type_urn: str, rows: list[dict]) -> list[dict]:
-    """Read-time Function invocation. Runs on already-masked
-    rows, translated to *ontology* property names via `property_mapping`
+_ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max"}
+
+
+async def _compute_link_aggregate(
+    rule: dict, object_type_name: str, row: dict, principal: Principal,
+    *, relation_types: list[dict], authorized_types: set[str], property_mapping_cache: dict[str, dict],
+    neighbor_property_mapping_cache: dict[str, dict],
+) -> Optional[Any]:
+    """A Foundry-style reducer: `count`/`sum`/`avg`/`min`/`max` over the
+    related instances a RelationType's `link_name` resolves to, reusing
+    the exact traversal `_resolve_relation_neighbors` already gives the
+    instance-graph BFS and the single-link endpoint — no separate fetch
+    path for this third consumer. Returns `None` (property skipped, same
+    "degrade, don't fail the read" contract the Function path already
+    has) if the relation, neighbor type, or aggregated property can't be
+    resolved.
+    """
+    relation = _find_relation_by_link_name(relation_types, object_type_name, rule.get("relation"))
+    if relation is None or "id" not in row:
+        return None
+    result = await _resolve_relation_neighbors(
+        relation, object_type_name, row["id"], row, principal,
+        authorized_types=authorized_types, property_mapping_cache=property_mapping_cache,
+    )
+    if result is None:
+        return None
+    neighbor_type, neighbor_rows, _direction = result
+
+    aggregate = rule.get("aggregate")
+    if aggregate == "count":
+        return len(neighbor_rows)
+
+    neighbor_property = rule.get("property")
+    neighbor_mapping = neighbor_property_mapping_cache.get(neighbor_type)
+    if neighbor_mapping is None:
+        neighbor_handle = await _type_handle(neighbor_type)
+        if neighbor_handle is None:
+            return None
+        neighbor_definition = await ontology.get_object_type(pool, neighbor_handle["urn"])
+        if neighbor_definition is None:
+            return None
+        neighbor_mapping = neighbor_definition["property_mapping"]
+        neighbor_property_mapping_cache[neighbor_type] = neighbor_mapping
+    neighbor_column = neighbor_mapping.get(neighbor_property)
+    if neighbor_column is None:
+        return None
+
+    raw_values = [neighbor_row.get(neighbor_column) for neighbor_row in neighbor_rows]
+    values = [float(v) for v in raw_values if v is not None]
+    if not values:
+        return None
+    if aggregate == "sum":
+        return sum(values)
+    if aggregate == "avg":
+        return sum(values) / len(values)
+    if aggregate == "min":
+        return min(values)
+    if aggregate == "max":
+        return max(values)
+    return None
+
+
+def _reduce_array(values: list, reducer: str, by: Optional[str]) -> Optional[Any]:
+    """The struct-reducer's actual reduction — `first`/`last` are
+    positional; `latest`/`max` and `earliest`/`min` compare either the
+    raw element (`by` is `None`, a scalar array) or one of its fields
+    (`by` set, a struct array). A `TypeError` from comparing
+    incompatible/missing values propagates to the caller, which already
+    treats a failure here as "skip this property for this row", not a
+    crash — same contract every other derived-property path already has.
+    """
+    if reducer == "first":
+        return values[0]
+    if reducer == "last":
+        return values[-1]
+    key = (lambda v: v.get(by)) if by else (lambda v: v)
+    if reducer in ("latest", "max"):
+        return max(values, key=key)
+    if reducer in ("earliest", "min"):
+        return min(values, key=key)
+    return None
+
+
+def _compute_struct_reducer(rule: dict, object_type: dict, row: dict) -> Optional[Any]:
+    """Foundry's other real "derived property" reducer — this one over
+    one of *this* ObjectType's own array properties (struct array or
+    scalar array), rather than a linked type's. The array value is
+    already a parsed Python list by the time this runs: `_mask_and_derive`
+    always runs `_coerce_property_types` before `_apply_derived_properties`,
+    so a `struct`/`array`-kind property's JSON text is already real
+    nested data here, not a string to re-parse.
+    """
+    array_property = rule.get("property")
+    column = (object_type.get("property_mapping") or {}).get(array_property)
+    if column is None:
+        return None
+    array_value = row.get(column)
+    if not isinstance(array_value, list) or not array_value:
+        return None
+    return _reduce_array(array_value, rule.get("reducer"), rule.get("by"))
+
+
+async def _apply_derived_properties(object_type_urn: str, rows: list[dict], principal: Principal) -> list[dict]:
+    """Read-time computation of every `derived_properties` entry — a
+    plain string is a Function plugin invocation (the original,
+    unchanged shape); a `{"kind": "link_aggregate", ...}` dict is a
+    reducer over a RelationType (`_compute_link_aggregate`); a
+    `{"kind": "struct_reducer", ...}` dict is a reducer over one of this
+    ObjectType's own array properties (`_compute_struct_reducer`) —
+    Foundry's other two real "derived property" mechanisms. All three
+    translate their inputs to *ontology* property names via `property_mapping`
     (not the raw source-column keys `resolver.py`/`serving_store.py`
-    return — a Function is an ontology-level concept, it shouldn't need
-    to know storage column names). If a required input was masked to
-    `None` by `_mask_confidential_properties`, the derived
-    property is skipped entirely rather than computed from a missing
-    value — never a misleading default silently leaking a shape of the
-    masked data. Plugin lookups happen once per declared derived
-    property, not once per row.
+    return — an ontology-level concept shouldn't need to know storage
+    column names, except `struct_reducer`, which reads its own array
+    property's already-parsed value directly off the row).
+    If a Function's required input was masked to `None` by
+    `_mask_confidential_properties`, that derived property is skipped
+    entirely rather than computed from a missing value — never a
+    misleading default silently leaking a shape of the masked data.
+    Plugin lookups happen once per declared derived property, not once
+    per row; a `link_aggregate`'s RelationType registry is likewise
+    fetched at most once per call, not once per row.
     """
     if not rows:
         return rows
@@ -243,12 +481,26 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict]) -> l
     if not derived:
         return rows
     property_mapping = object_type["property_mapping"]
+    object_type_name = object_type_urn.rsplit(":", 1)[-1]
+
+    function_entries = {name: value for name, value in derived.items() if isinstance(value, str)}
+    link_aggregate_entries = {
+        name: value for name, value in derived.items() if isinstance(value, dict) and value.get("kind") == "link_aggregate"
+    }
+    struct_reducer_entries = {
+        name: value for name, value in derived.items() if isinstance(value, dict) and value.get("kind") == "struct_reducer"
+    }
 
     resolved: dict[str, tuple[dict, Any]] = {}
-    for property_name, function_name in derived.items():
+    for property_name, function_name in function_entries.items():
         registration = await function_registry.find_active_function_by_name(pool, function_name)
         if registration is not None:
             resolved[property_name] = (registration, function_registry.load_function_plugin(registration["manifest"]))
+
+    relation_types = await ontology.list_relation_types(pool, principal.tenant_id) if link_aggregate_entries else []
+    authorized_types = {object_type_name}
+    property_mapping_cache: dict[str, dict] = {}
+    neighbor_property_mapping_cache: dict[str, dict] = {}
 
     result_rows = []
     for row in rows:
@@ -272,6 +524,33 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict]) -> l
                 continue
             if isinstance(output, dict) and property_name in output:
                 row[property_name] = output[property_name]
+        for property_name, rule in link_aggregate_entries.items():
+            try:
+                value = await _compute_link_aggregate(
+                    rule, object_type_name, row, principal,
+                    relation_types=relation_types, authorized_types=authorized_types,
+                    property_mapping_cache=property_mapping_cache,
+                    neighbor_property_mapping_cache=neighbor_property_mapping_cache,
+                )
+            except Exception:
+                logger.exception(
+                    "derived property %r (link_aggregate over %r) failed for %s, skipping it for this row",
+                    property_name, rule.get("relation"), object_type_urn,
+                )
+                continue
+            if value is not None:
+                row[property_name] = value
+        for property_name, rule in struct_reducer_entries.items():
+            try:
+                value = _compute_struct_reducer(rule, object_type, row)
+            except Exception:
+                logger.exception(
+                    "derived property %r (struct_reducer over %r) failed for %s, skipping it for this row",
+                    property_name, rule.get("property"), object_type_urn,
+                )
+                continue
+            if value is not None:
+                row[property_name] = value
         result_rows.append(row)
     return result_rows
 
@@ -343,7 +622,7 @@ async def _mask_and_derive(object_type_urn: str, principal: Principal, rows: lis
     """
     masked = await _mask_confidential_properties(object_type_urn, principal, rows)
     coerced = await _coerce_property_types(object_type_urn, masked)
-    return await _apply_derived_properties(object_type_urn, coerced)
+    return await _apply_derived_properties(object_type_urn, coerced, principal)
 
 
 async def _filter_by_instance_markings(

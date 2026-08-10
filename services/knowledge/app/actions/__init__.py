@@ -56,7 +56,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import asyncpg
 
@@ -79,7 +79,9 @@ from .declarative import (
     _get_unmasked_instance,
     _object_type_and_instance_id_from_instance_urn,
     _OPERATORS,
+    _write_instance_edits,
     request_generic_action,
+    revert_declarative_action,
 )
 from .hardcoded import (
     _apply_close_account,
@@ -95,11 +97,13 @@ from .hardcoded import (
     WORKFLOW_ENGINE_URN_NAME,
     _APPLY_FUNCTIONS,
 )
+from .timeline import list_instance_timeline
 
 __all__ = [
     "ensure_schema",
     "request_action",
     "request_generic_action",
+    "revert_declarative_action",
     "approve_action",
     "reject_action",
     "compensate_from_workflow_engine",
@@ -107,6 +111,7 @@ __all__ = [
     "sweep_expired_approvals_forever",
     "get_approval",
     "list_approvals",
+    "list_instance_timeline",
     "get_credit_holds",
     "get_account_status",
     "register_apply_function",
@@ -127,6 +132,18 @@ CREATE TABLE IF NOT EXISTS action_invocation (
     reason TEXT NOT NULL,
     invoked_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Undo/revert support — additive, declarative-Action-only (the two
+-- hardcoded Actions insert NULL for both, same "old and new coexist"
+-- precedent `object_instance_edit`'s own docstring already established).
+-- `edits` is `{property: newValue}` (already computed by
+-- `_apply_declarative_edits`, just persisted here too now); `prior_values`
+-- is `{property: {"existed": bool, "value": ...}}` — `existed` disambiguates
+-- "this property was never set before" from "it was explicitly set to
+-- JSON null", which a bare value could never do on its own.
+ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS edits JSONB;
+ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS prior_values JSONB;
+ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS reverted_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS customer_credit_hold (
     customer_id INTEGER PRIMARY KEY,
@@ -213,13 +230,14 @@ async def _get_action_definition(pool: asyncpg.Pool, tenant_id: str, action_name
     the declarative `action_type` registry (`ontology/action_types.py`)
     for any other name, adapted into the same shape (`target_object_type`/
     `required_permission`/`risk_level`/`description`/`function_side_effect`)
-    so every existing reader of `ACTION_DEFINITIONS[...]`
-    (`ontology/publishing.py`'s `_validate_implements`, `GET /actions`,
-    the agent tool-compiler) goes through this one lookup instead of
-    being rewritten per call site. `_declarative` carries the full
-    registry row (parameters/edits/submission_criteria) for the apply
-    path below — never read by anything that only needs the adapted
-    shape.
+    so readers that only need the adapted shape (`GET /actions`, the
+    agent tool-compiler, apply paths) go through this one lookup.
+    Publish-time interface checks (`_validate_implements`) resolve the
+    same registries independently via `_actions_available_on_object_type`
+    — they need the full set of OT-/interface-targeted actions, not a
+    single-name lookup. `_declarative` carries the full registry row
+    (parameters/edits/submission_criteria) for the apply path below —
+    never read by anything that only needs the adapted shape.
     """
     if action_name in ACTION_DEFINITIONS:
         return ACTION_DEFINITIONS[action_name]
@@ -231,15 +249,21 @@ async def _get_action_definition(pool: asyncpg.Pool, tenant_id: str, action_name
         return None
     return {
         "target_object_type": action_type["target_object_type"],
+        "target_interface": action_type.get("target_interface"),
         "required_permission": action_type["required_permission"],
         "risk_level": action_type["risk_level"],
         "description": action_type["description"],
         "function_side_effect": action_type.get("function_side_effect"),
         "writeback_dataset": action_type.get("writeback_dataset"),
-        # Public schema exposes `parameters` so callers (including the OSDK
-        # codegen generator) can discover parameter definitions for validation
-        # and typing. `edits` and `submission_criteria` remain internal to `_declarative`.
+        "edit_function": action_type.get("edit_function"),
+        # Public schema exposes `parameters`/`edits` so callers (including
+        # the OSDK codegen generator, and the frontend's Actions-on-
+        # interfaces relevance filter and inline-edit eligibility
+        # inference) can discover them without a second, per-action fetch
+        # of the full registry row. `submission_criteria` stays internal
+        # to `_declarative` — nothing outside the apply path needs it.
         "parameters": action_type["parameters"],
+        "edits": action_type["edits"],
         "_declarative": action_type,
     }
 
@@ -351,6 +375,90 @@ async def _invoke_function_side_effect(
         )
 
 
+async def _resolve_function_backed_edits(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    action_name: str,
+    definition: dict,
+    object_type: str,
+    instance_id: str,
+    parameters: dict[str, Any],
+) -> dict:
+    """A function-backed Action Type (`edit_function` instead of a static
+    `edits` list) has the named Function plugin's return value BECOME the
+    applied edits — dynamic logic (e.g. a discount derived from a
+    Customer's lifetime-value model) rather than a fixed declaration.
+    Unlike `_invoke_function_side_effect` this *raises* rather than
+    logging-and-skipping: the edits ARE the action, it cannot proceed
+    without them. Deliberately called *before* `_apply_now`/
+    `approve_action` open their DB transaction — a plugin call may do
+    real I/O (the real example plugin, `plugins/customer_value_model_
+    function.py`, calls out to Intelligence over HTTP) and must never
+    happen while holding a transaction/row lock, the same "don't hold a
+    lock across a plugin's own I/O" concern `_invoke_function_side_effect`
+    already avoids by running strictly after its own transaction — here
+    the result is load-bearing, so it has to run first instead, but the
+    transaction still never wraps it.
+    """
+    from .. import function_registry, ontology
+
+    action_type = definition["_declarative"]
+    function_name = action_type["edit_function"]
+    registration = await function_registry.find_active_function_by_name(pool, function_name)
+    if registration is None:
+        raise ValueError(f"{action_name}'s edit_function {function_name!r} is not a registered, active Function plugin")
+
+    object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
+    object_type_def = await ontology.get_object_type(pool, object_type_urn)
+    if object_type_def is None:
+        raise LookupError(f"{object_type} not found")
+    instance_row = await _get_unmasked_instance(pool, object_type, tenant_id, workspace_id, instance_id)
+    if instance_row is None:
+        raise LookupError(f"{object_type}/{instance_id} not found")
+
+    translated = {camel: instance_row.get(source_col) for camel, source_col in object_type_def["property_mapping"].items()}
+    plugin = function_registry.load_function_plugin(registration["manifest"])
+    # Parameters override translated instance fields on a name collision
+    # — merged into one dict first, since unpacking two dicts with
+    # overlapping keys directly into a call (`f(**a, **b)`) raises
+    # `TypeError: got multiple values for keyword argument`.
+    output = await plugin.call(**{**translated, **parameters})
+    if not isinstance(output, dict) or not output:
+        raise ValueError(
+            f"{action_name}'s edit_function {function_name!r} must return a non-empty {{property: value}} "
+            f"dict of edits, got {output!r}"
+        )
+
+    # Same property-control + interface-scope restrictions
+    # `declarative.request_generic_action` already applies to a static
+    # `edits` list — necessarily deferred here to *after* the call, since
+    # a function's output can't be known before it actually runs.
+    target_interface = action_type.get("target_interface")
+    if target_interface:
+        interface = await ontology.get_interface_type(pool, tenant_id, target_interface)
+        allowed_properties = set((interface or {}).get("required_properties") or [])
+        for property_name in output:
+            if property_name not in allowed_properties:
+                raise ValueError(
+                    f"{action_name} is scoped to interface {target_interface!r} and cannot edit "
+                    f"{property_name!r} — only the interface's required_properties are allowed"
+                )
+
+    property_types = object_type_def.get("property_types") or {}
+    for property_name, value in output.items():
+        rule = property_types.get(property_name)
+        if rule is None:
+            continue
+        if rule.get("editable") is False:
+            raise ValueError(f"property {property_name!r} is not editable")
+        if rule.get("required") and value is None:
+            raise ValueError(f"property {property_name!r} is required and cannot be set to null")
+
+    return output
+
+
 async def _apply_now(
     pool: asyncpg.Pool,
     action_name: str,
@@ -382,22 +490,48 @@ async def _apply_now(
         payload={"action_name": action_name, "instance_urn": instance_urn, "reason": reason},
     )
     apply_fn = _APPLY_FUNCTIONS.get(action_name)
+    edits_for_invocation: Optional[dict] = None
+    prior_for_invocation: Optional[dict] = None
+
+    # Function-backed resolution happens *before* the connection/
+    # transaction is even acquired — see `_resolve_function_backed_edits`'s
+    # docstring for why a plugin call must never happen while holding a
+    # DB transaction open.
+    definition: Optional[dict] = None
+    resolved_function_edits: Optional[dict] = None
+    if apply_fn is None:
+        definition = await _get_action_definition(pool, tenant_id, action_name)
+        if definition["_declarative"].get("edit_function"):
+            resolved_function_edits = await _resolve_function_backed_edits(
+                pool, tenant_id=tenant_id, workspace_id=workspace_id, action_name=action_name,
+                definition=definition, object_type=object_type, instance_id=instance_id,
+                parameters=parameters or {},
+            )
 
     async with pool.acquire() as conn:
         async with conn.transaction():
             if apply_fn is not None:
                 result = await apply_fn(conn, tenant_id, customer_id, actor, reason, at)
             else:
-                definition = await _get_action_definition(pool, tenant_id, action_name)
                 action_urn = build_urn(tenant_id, "global", "action-type", action_name)
-                result = await _apply_declarative_edits(
-                    conn, tenant_id, object_type, instance_id, definition["_declarative"]["edits"],
-                    parameters or {}, action_urn=action_urn, actor=actor, at=at,
-                )
-            await conn.execute(
-                "INSERT INTO action_invocation (tenant_id, action_name, instance_urn, actor_urn, actor_type, reason) "
-                "VALUES ($1, $2, $3, $4, $5, $6)",
+                if resolved_function_edits is not None:
+                    result, prior = await _write_instance_edits(
+                        conn, tenant_id, object_type, instance_id, resolved_function_edits,
+                        action_urn=action_urn, actor=actor, at=at,
+                    )
+                else:
+                    result, prior = await _apply_declarative_edits(
+                        conn, tenant_id, object_type, instance_id, definition["_declarative"]["edits"],
+                        parameters or {}, action_urn=action_urn, actor=actor, at=at,
+                    )
+                edits_for_invocation = result
+                prior_for_invocation = prior
+            invocation_id = await conn.fetchval(
+                "INSERT INTO action_invocation (tenant_id, action_name, instance_urn, actor_urn, actor_type, reason, edits, prior_values) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb) RETURNING id",
                 tenant_id, action_name, instance_urn, actor.urn, actor.type, reason,
+                json.dumps(edits_for_invocation) if edits_for_invocation is not None else None,
+                json.dumps(prior_for_invocation) if prior_for_invocation is not None else None,
             )
             await outbox.enqueue(conn, event)
 
@@ -406,8 +540,8 @@ async def _apply_now(
         instance_id=instance_id if instance_id is not None else customer_id,
     )
 
-    risk_level = (await _get_action_definition(pool, tenant_id, action_name))["risk_level"]
-    return {"status": "applied", "action": action_name, "riskLevel": risk_level, **result}
+    risk_level = definition["risk_level"] if definition is not None else (await _get_action_definition(pool, tenant_id, action_name))["risk_level"]
+    return {"status": "applied", "action": action_name, "riskLevel": risk_level, "invocationId": invocation_id, **result}
 
 
 async def approve_action(
@@ -427,6 +561,31 @@ async def approve_action(
     approved on success; Automation's compensation callback flips it to
     `failed` on failure).
     """
+    preview = await pool.fetchrow("SELECT * FROM action_approval WHERE id = $1", approval_id)
+    if preview is None:
+        raise LookupError(f"approval {approval_id} not found")
+
+    # Function-backed resolution happens before the row is even locked —
+    # see `_resolve_function_backed_edits`'s docstring for why a plugin
+    # call must never happen while holding a DB transaction/row lock. The
+    # authoritative pending/expiry check still happens under the lock
+    # below (unchanged); a concurrent double-approval just means this
+    # pre-computed result is wastefully discarded when that recheck fails.
+    definition: Optional[dict] = None
+    resolved_function_edits: Optional[dict] = None
+    if preview["action_name"] not in ACTION_DEFINITIONS:
+        definition = await _get_action_definition(pool, preview["tenant_id"], preview["action_name"])
+        if definition["_declarative"].get("edit_function"):
+            preview_object_type, preview_instance_id = _object_type_and_instance_id_from_instance_urn(preview["instance_urn"])
+            preview_parameters = preview["parameters"]
+            if isinstance(preview_parameters, str):
+                preview_parameters = json.loads(preview_parameters)
+            resolved_function_edits = await _resolve_function_backed_edits(
+                pool, tenant_id=preview["tenant_id"], workspace_id=workspace_id, action_name=preview["action_name"],
+                definition=definition, object_type=preview_object_type, instance_id=preview_instance_id,
+                parameters=preview_parameters or {},
+            )
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow("SELECT * FROM action_approval WHERE id = $1 FOR UPDATE", approval_id)
@@ -445,20 +604,29 @@ async def approve_action(
 
             apply_fn = _APPLY_FUNCTIONS.get(action_name)
             writeback_edits: Optional[dict] = None
+            edits_for_invocation: Optional[dict] = None
+            prior_for_invocation: Optional[dict] = None
             if apply_fn is not None:
                 customer_id = _customer_id_from_instance_urn(instance_urn)
                 result = await apply_fn(conn, tenant_id, customer_id, decider, reason, at)
             else:
                 object_type, instance_id = _object_type_and_instance_id_from_instance_urn(instance_urn)
-                definition = await _get_action_definition(pool, tenant_id, action_name)
                 action_urn = build_urn(tenant_id, "global", "action-type", action_name)
-                parameters = row["parameters"]
-                if isinstance(parameters, str):
-                    parameters = json.loads(parameters)
-                result = await _apply_declarative_edits(
-                    conn, tenant_id, object_type, instance_id, definition["_declarative"]["edits"],
-                    parameters, action_urn=action_urn, actor=decider, at=at,
-                )
+                if resolved_function_edits is not None:
+                    result, prior = await _write_instance_edits(
+                        conn, tenant_id, object_type, instance_id, resolved_function_edits,
+                        action_urn=action_urn, actor=decider, at=at,
+                    )
+                else:
+                    parameters = row["parameters"]
+                    if isinstance(parameters, str):
+                        parameters = json.loads(parameters)
+                    result, prior = await _apply_declarative_edits(
+                        conn, tenant_id, object_type, instance_id, definition["_declarative"]["edits"],
+                        parameters, action_urn=action_urn, actor=decider, at=at,
+                    )
+                edits_for_invocation = result
+                prior_for_invocation = prior
                 # Only a declarative Action Type with a writeback target
                 # ever needs Automation to mirror anything to a source —
                 # the two hardcoded Actions keep their existing behavior
@@ -470,10 +638,12 @@ async def approve_action(
                 "UPDATE action_approval SET status = 'approved', decided_by_urn = $1, decided_at = $2, decision_note = $3 WHERE id = $4",
                 decider.urn, at, note, approval_id,
             )
-            await conn.execute(
-                "INSERT INTO action_invocation (tenant_id, action_name, instance_urn, actor_urn, actor_type, reason) "
-                "VALUES ($1, $2, $3, $4, $5, $6)",
+            invocation_id = await conn.fetchval(
+                "INSERT INTO action_invocation (tenant_id, action_name, instance_urn, actor_urn, actor_type, reason, edits, prior_values) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb) RETURNING id",
                 tenant_id, action_name, instance_urn, decider.urn, decider.type, reason,
+                json.dumps(edits_for_invocation) if edits_for_invocation is not None else None,
+                json.dumps(prior_for_invocation) if prior_for_invocation is not None else None,
             )
             event_payload = {"action_name": action_name, "instance_urn": instance_urn, "reason": reason, "approval_id": approval_id}
             if writeback_edits is not None:
@@ -493,7 +663,10 @@ async def approve_action(
     # alone would wrongly report "completed" for one of these while
     # Automation's saga is still in flight.
     saga_status = "processing" if (action_name in WORKFLOW_DELEGATED_ACTIONS or writeback_edits is not None) else "completed"
-    return {"status": "approved", "approvalId": approval_id, "action": action_name, "sagaStatus": saga_status, **result}
+    return {
+        "status": "approved", "approvalId": approval_id, "action": action_name, "sagaStatus": saga_status,
+        "invocationId": invocation_id, **result,
+    }
 
 
 async def compensate_from_workflow_engine(pool: asyncpg.Pool, *, approval_id: int, workspace_id: str, error: str) -> dict:

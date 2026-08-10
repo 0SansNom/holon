@@ -36,8 +36,18 @@ import time
 from typing import Optional
 
 import jwt
-from fastapi import Header, HTTPException, status
+from fastapi import HTTPException, Request, Response, status
 from pydantic import BaseModel
+
+# The browser-facing counterpart to the `Authorization: Bearer` header —
+# set only by Identity's `/login` (never `/token`, which stays a plain
+# body-token response for CLI/script/service-to-service callers with no
+# cookie jar). `HttpOnly` keeps it unreadable to JS entirely (the whole
+# point — defeats XSS-based token theft, `localStorage`'s weakness);
+# `Secure` + `SameSite=Strict` mean it's never even transmitted outside
+# a first-party, same-site, HTTPS(-or-localhost) request.
+COOKIE_NAME = "holon_session"
+SESSION_COOKIE_TTL_SECONDS = 3600
 
 
 class Principal(BaseModel):
@@ -49,7 +59,7 @@ class Principal(BaseModel):
     country: Optional[str] = None
 
 
-def issue_token(principal: Principal, secret: str, ttl_seconds: int = 3600) -> str:
+def issue_token(principal: Principal, secret: str, ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS) -> str:
     now = int(time.time())
     payload = {
         "sub": principal.urn,
@@ -79,21 +89,47 @@ def decode_token(token: str, secret: str) -> Principal:
     )
 
 
-def make_principal_dependency(secret: str):
+def make_principal_dependency(secret: str, *, expected_tenant_id: Optional[str] = None):
     """Builds a FastAPI dependency that resolves the current Principal from
-    the Authorization header and enforces tenant_id.
+    either the Authorization header (internal service-to-service calls,
+    CLI/script use — unchanged behavior) or the `holon_session` HttpOnly
+    cookie (browser calls, since `/login`) and enforces tenant_id. When an
+    expected tenant is supplied, tokens from any other tenant are rejected.
+    Header checked first so nothing about existing non-browser callers changes.
     """
 
-    async def dependency(authorization: str = Header(...)) -> Principal:
-        if not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Authorization: Bearer <token> header required")
-        token = authorization.removeprefix("Bearer ")
+    async def dependency(request: Request) -> Principal:
+        authorization = request.headers.get("authorization")
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization.removeprefix("Bearer ")
+        else:
+            token = request.cookies.get(COOKIE_NAME)
+        if token is None:
+            raise HTTPException(status_code=401, detail="authentication required (Authorization: Bearer <token> header or session cookie)")
         principal = decode_token(token, secret)
         if not principal.tenant_id:
             raise HTTPException(status_code=401, detail="missing tenant_id")
+        if expected_tenant_id is not None and principal.tenant_id != expected_tenant_id:
+            raise HTTPException(status_code=403, detail="access denied: tenant mismatch")
         return principal
 
     return dependency
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=SESSION_COOKIE_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key=COOKIE_NAME, path="/")
 
 
 def require_tenant_match(principal: Principal, resource_tenant_id: str) -> None:

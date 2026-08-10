@@ -3,8 +3,8 @@ use (a `write`-tier request, an `approve`-tier decision — role
 separation, not a same-URN check, same as `action_approval`), applied to
 ontology changes instead of data writes. A branch is a named pointer at
 a specific `object_type_version` row; review approval merges by calling
-`publishing.publish_object_type_version` unchanged, so every validation/
-event it already does still applies.
+`publishing._write_publish` inside the same transaction as the branch
+status update — publish and merge are now fully atomic.
 """
 
 from __future__ import annotations
@@ -13,25 +13,28 @@ from typing import Optional
 
 import asyncpg
 
-from .publishing import propose_object_type_version, publish_object_type_version
+from .object_types import get_object_type, get_object_type_version
+from .publishing import (
+    _run_publish_validations,
+    _write_publish,
+    propose_object_type_version,
+    publish_object_type_version,
+)
 
-
-def _parse_branch_row(row: asyncpg.Record) -> dict:
-    return dict(row)
 
 
 async def get_branch(pool: asyncpg.Pool, object_type_urn: str, branch_name: str) -> Optional[dict]:
     row = await pool.fetchrow(
         "SELECT * FROM ontology_branch WHERE object_type_urn = $1 AND branch_name = $2", object_type_urn, branch_name
     )
-    return _parse_branch_row(row) if row else None
+    return dict(row) if row else None
 
 
 async def list_branches(pool: asyncpg.Pool, object_type_urn: str) -> list[dict]:
     rows = await pool.fetch(
         "SELECT * FROM ontology_branch WHERE object_type_urn = $1 ORDER BY created_at DESC", object_type_urn
     )
-    return [_parse_branch_row(row) for row in rows]
+    return [dict(row) for row in rows]
 
 
 async def create_branch(
@@ -46,6 +49,9 @@ async def create_branch(
     derived_properties: Optional[dict[str, str]] = None,
     project_urn: Optional[str] = None,
     markings: Optional[list[str]] = None,
+    property_formats: Optional[dict[str, dict]] = None,
+    conditional_formats: Optional[dict[str, list]] = None,
+    property_types: Optional[dict[str, dict]] = None,
 ) -> dict:
     """Wraps `propose_object_type_version` with a human-readable name and
     an owner. The review gate below relies on role separation (branch
@@ -66,6 +72,9 @@ async def create_branch(
         derived_properties=derived_properties,
         project_urn=project_urn,
         markings=markings,
+        property_formats=property_formats,
+        conditional_formats=conditional_formats,
+        property_types=property_types,
     )
     await pool.execute(
         """
@@ -88,6 +97,9 @@ async def update_branch_draft(
     derived_properties: Optional[dict[str, str]] = None,
     project_urn: Optional[str] = None,
     markings: Optional[list[str]] = None,
+    property_formats: Optional[dict[str, dict]] = None,
+    conditional_formats: Optional[dict[str, list]] = None,
+    property_types: Optional[dict[str, dict]] = None,
 ) -> dict:
     """After a review requests changes, the branch gets a *new* draft
     version and its pointer moves forward — the same "append-only
@@ -108,6 +120,9 @@ async def update_branch_draft(
         derived_properties=derived_properties,
         project_urn=project_urn,
         markings=markings,
+        property_formats=property_formats,
+        conditional_formats=conditional_formats,
+        property_types=property_types,
     )
     await pool.execute(
         "UPDATE ontology_branch SET version = $1 WHERE id = $2", draft["version"], branch["id"],
@@ -132,12 +147,13 @@ async def review_branch(
     identity_token: Optional[str] = None,
 ) -> dict:
     """The merge gate. `decision == "approved"` publishes the branch's
-    current draft version through the *existing*, unmodified
-    `publish_object_type_version` — same `implements`/`derived_properties`
-    /`project_urn` validation, same `knowledge.objecttype.published`
-    event — and marks the branch `merged`. `"changes_requested"` just
-    records the review and leaves the branch `open` for a follow-up
-    `update_branch_draft`.
+    current draft version and marks the branch `merged` **in the same
+    transaction** — eliminating the previous split where a crash between
+    `publish_object_type_version` and `UPDATE status = 'merged'` would
+    leave the branch `open` despite the publish having already succeeded.
+    Validations still run outside the transaction (some make HTTP calls).
+    `"changes_requested"` just records the review and leaves the branch
+    `open` for a follow-up `update_branch_draft`.
     """
     if decision not in ("approved", "changes_requested"):
         raise ValueError(f"invalid decision: {decision!r} (must be 'approved' or 'changes_requested')")
@@ -147,17 +163,76 @@ async def review_branch(
     if branch["status"] != "open":
         raise ValueError(f"branch {branch_name!r} is {branch['status']}, not open")
 
-    await pool.execute(
-        "INSERT INTO ontology_review (branch_id, tenant_id, reviewer_urn, decision, note) VALUES ($1, $2, $3, $4, $5)",
-        branch["id"], branch["tenant_id"], reviewer_urn, decision, note,
-    )
     if decision == "approved":
-        await publish_object_type_version(
+        draft_version = branch["version"]
+        draft = await get_object_type_version(pool, object_type_urn, draft_version)
+        if draft is None:
+            raise ValueError(f"no version {draft_version} found for {object_type_urn}")
+        if draft["status"] == "published":
+            raise ValueError(f"version {draft_version} of {object_type_urn} is already published")
+
+        current = await get_object_type(pool, object_type_urn)
+        previous_version = current["version"] if current else None
+        if previous_version is not None and draft_version <= previous_version:
+            raise ValueError(
+                f"cannot publish version {draft_version} of {object_type_urn}: "
+                f"live is already at version {previous_version}"
+            )
+        object_type_name = current["name"] if current else object_type_urn.rsplit(":", 1)[-1]
+        implements = draft.get("implements") or []
+        derived_properties = draft.get("derived_properties") or {}
+        project_urn = draft.get("project_urn")
+        markings = draft.get("markings") or []
+        property_formats = draft.get("property_formats") or {}
+        conditional_formats = draft.get("conditional_formats") or {}
+        property_types = draft.get("property_types") or {}
+
+        # Run validations outside the transaction — some make HTTP calls
+        # (`_validate_project_scope` via httpx) and holding a DB connection
+        # open for a remote request would waste a pool slot unnecessarily.
+        await _run_publish_validations(
             pool,
-            object_type_urn=object_type_urn,
-            version=branch["version"],
+            draft=draft,
+            object_type_name=object_type_name,
+            implements=implements,
+            derived_properties=derived_properties,
+            project_urn=project_urn,
+            markings=markings,
+            property_formats=property_formats,
+            conditional_formats=conditional_formats,
+            property_types=property_types,
             identity_url=identity_url,
             identity_token=identity_token,
         )
-        await pool.execute("UPDATE ontology_branch SET status = 'merged' WHERE id = $1", branch["id"])
+
+        # Atomic: review record + publish + branch merge in one transaction.
+        # Previously split across two transactions; a crash between them left
+        # the branch `open` despite the publish having already succeeded.
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO ontology_review (branch_id, tenant_id, reviewer_urn, decision, note) VALUES ($1, $2, $3, $4, $5)",
+                branch["id"], branch["tenant_id"], reviewer_urn, decision, note,
+            )
+            await _write_publish(
+                conn,
+                object_type_urn=object_type_urn,
+                version=draft_version,
+                draft=draft,
+                current=current,
+                previous_version=previous_version,
+                implements=implements,
+                derived_properties=derived_properties,
+                project_urn=project_urn,
+                markings=markings,
+                property_formats=property_formats,
+                conditional_formats=conditional_formats,
+                property_types=property_types,
+            )
+            await conn.execute("UPDATE ontology_branch SET status = 'merged' WHERE id = $1", branch["id"])
+    else:
+        await pool.execute(
+            "INSERT INTO ontology_review (branch_id, tenant_id, reviewer_urn, decision, note) VALUES ($1, $2, $3, $4, $5)",
+            branch["id"], branch["tenant_id"], reviewer_urn, decision, note,
+        )
+
     return await get_branch(pool, object_type_urn, branch_name)

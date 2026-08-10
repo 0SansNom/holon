@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import sys
 import time
@@ -77,14 +78,23 @@ class _MetricsMiddleware(BaseHTTPMiddleware):
 
 
 def instrument_cors(app: FastAPI) -> None:
-    """Enables CORS middleware for the React SPA.
+    """Enables CORS middleware for the React SPA. `allow_credentials=True`
+    is required for the browser to send/receive the `holon_session`
+    HttpOnly cookie cross-origin (the SPA's own origin and this service
+    are different ports) — browsers reject a wildcard `allow_origins`
+    once credentials are involved, so this is a concrete list instead,
+    covering both ways this repo is actually run today: `npm run dev`
+    (`:5173`) and the docker-compose profile, where Experience serves
+    the built SPA itself (`:8004`). Override via `HOLON_CORS_ORIGINS`
+    (comma-separated) for any other deployment.
     """
     from starlette.middleware.cors import CORSMiddleware
 
+    origins = os.environ.get("HOLON_CORS_ORIGINS", "http://localhost:5173,http://localhost:8004").split(",")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
+        allow_origins=origins,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )

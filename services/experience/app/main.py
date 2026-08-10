@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from holon_common import (
     CircuitBreaker,
     CircuitBreakerOpenError,
+    InvalidURNError,
     Principal,
     build_urn,
     configure_json_logging,
@@ -31,9 +32,13 @@ from holon_common import (
     instrument_tracing,
     issue_token,
     make_principal_dependency,
+    parse_urn,
+    retry_with_backoff,
 )
+from holon_common.authz import PermissionClient
 
-from . import application_builder, ui_component_registry
+from . import application_builder, project_pins, resource_tags, ui_component_registry
+from . import collections as resource_collections
 
 SERVICE_NAME = "experience-platform"
 configure_json_logging(SERVICE_NAME)
@@ -46,6 +51,13 @@ WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET = os.environ["HOLON_JWT_SECRET"]
 DB_URL = os.environ["HOLON_DB_URL"]
 OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+
+SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
+SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
+OPA_URL = os.environ["HOLON_OPA_URL"]
+SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
+
+WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 
 # the single seeded agent identity every `agentApp` session runs
 # under (same URN Identity's seed data and Intelligence's own
@@ -83,6 +95,31 @@ async def lifespan(app: FastAPI):
     async with app.state.pool.acquire() as conn:
         await application_builder.ensure_schema(conn)
         await ui_component_registry.ensure_schema(conn)
+        await resource_tags.ensure_schema(conn)
+        await project_pins.ensure_schema(conn)
+        await resource_collections.ensure_schema(conn)
+
+    # Applications used to have zero ReBAC enforcement (any authenticated
+    # principal could read/write any application) — same hardening
+    # `object_type` already has. `write_schema` is idempotent, safe to call
+    # on every startup regardless of which service wrote it last.
+    app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
+
+    async def _seed_application_authz() -> None:
+        await app.state.authz.write_schema(Path(SPICEDB_SCHEMA_PATH).read_text())
+        backfilled = await application_builder.backfill_urns(
+            app.state.pool, tenant_id=TENANT_ID, workspace_id=WORKSPACE_ID,
+        )
+        for name in backfilled:
+            await app.state.authz.write_relationship(
+                resource_type="application",
+                resource_urn=application_builder.application_urn(TENANT_ID, WORKSPACE_ID, name),
+                relation="parent_workspace",
+                subject_type="workspace",
+                subject_urn=WORKSPACE_URN,
+            )
+
+    await retry_with_backoff(_seed_application_authz, what="experience authz seed")
 
     yield
     await app.state.pool.close()
@@ -195,15 +232,17 @@ async def config() -> dict:
 
 
 @app.post("/api/token")
-async def mint_token(request: TokenRequest) -> Response:
+async def mint_token(request: TokenRequest, principal: Principal = Depends(current_principal)) -> Response:
     """Identity's `/token` has required a `client_secret` since increment
     #13 (closing the "mint a token for any URN, no check at all" gap) —
-    this proxy never forwarded one, so the dashboard's own sign-in has been
-    broken since then. Derived here, server-side, using the same
+    this legacy proxy derives one server-side using the same
     deterministic dev-only convention every test file already computes
-    independently (`seed.client_secret_for`: `f"{local_name}-dev-secret"`)
-    — the frontend stays as simple as it was, it only ever knew a URN.
+    independently (`seed.client_secret_for`: `f"{local_name}-dev-secret"`).
+    It may only refresh the already-authenticated caller's own identity;
+    accepting an arbitrary URN here would be an impersonation endpoint.
     """
+    if request.principal_urn != principal.urn:
+        raise HTTPException(status_code=403, detail="cannot mint a token for another principal")
     local_name = request.principal_urn.rsplit(":", 1)[-1]
     client_secret = f"{local_name}-dev-secret"
     return await _proxy(
@@ -248,6 +287,93 @@ def _application_not_found(name: str) -> HTTPException:
     return HTTPException(status_code=404, detail=f"no application named {name!r}")
 
 
+async def _authorize_resource(principal: Principal, resource_type: str, urn: str, permission: str) -> None:
+    decision = await app.state.authz.authorize(
+        principal, resource_type=resource_type, resource_urn=urn, permission=permission,
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
+
+
+async def _authorize_application(principal: Principal, urn: str, permission: str) -> None:
+    await _authorize_resource(principal, "application", urn, permission)
+
+
+async def _link_application_to_project(application_urn: str, project_urn: Optional[str]) -> None:
+    """Same reconciliation `knowledge`'s `_link_object_type_to_project`
+    already does: SpiceDB relationships are additive (`OPERATION_TOUCH`),
+    so re-scoping — or clearing back to `None` — must delete any existing
+    `parent_project` edge first, since Postgres's `application.project_urn`
+    is single-valued but SpiceDB wouldn't otherwise know the old edge is
+    stale.
+    """
+    existing = await app.state.authz.read_relationships(
+        resource_type="application", resource_urn=application_urn, relation="parent_project",
+    )
+    for relationship in existing:
+        await app.state.authz.delete_relationship(
+            resource_type="application",
+            resource_urn=application_urn,
+            relation="parent_project",
+            subject_type="project",
+            subject_urn=relationship["subject"]["object"]["objectId"],
+        )
+    if project_urn is not None:
+        await app.state.authz.write_relationship(
+            resource_type="application",
+            resource_urn=application_urn,
+            relation="parent_project",
+            subject_type="project",
+            subject_urn=project_urn,
+        )
+
+
+# Resource tags/featured (`/api/resources/*` below): which SpiceDB
+# `resource_type` a URN's `hl:{tenant}:{workspace}:{type}:{id}` `type`
+# segment maps to. Only resource kinds with real ReBAC enforcement can be
+# tagged — deliberately not every URN type that merely *exists*
+# (Sources/Connections have no SpiceDB definition yet, see the plan's
+# "explicitly deferred" — tagging them would have nothing real to check).
+_RESOURCE_AUTHZ_TYPE = {
+    "object-type": "object_type",
+    "application": "application",
+}
+
+
+def _resource_authz_type(urn: str) -> str:
+    try:
+        parsed = parse_urn(urn)
+    except InvalidURNError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    resource_type = _RESOURCE_AUTHZ_TYPE.get(parsed.type)
+    if resource_type is None:
+        raise HTTPException(status_code=400, detail=f"tagging isn't supported for resource type {parsed.type!r}")
+    return resource_type
+
+
+async def _filter_readable_resource_urns(principal: Principal, resource_urns: list[str]) -> list[str]:
+    """Return only resource references the principal may read.
+
+    Collections are workspace-level containers, but their members can point
+    to independently governed resources.  An URN is metadata that can itself
+    reveal a sensitive resource name, so it receives the same per-resource
+    filtering as ``GET /api/resources``.  Invalid or unsupported legacy
+    members are withheld rather than turning a read into a 500.
+    """
+    readable = []
+    for resource_urn in resource_urns:
+        try:
+            resource_type = _resource_authz_type(resource_urn)
+        except HTTPException:
+            continue
+        decision = await app.state.authz.authorize(
+            principal, resource_type=resource_type, resource_urn=resource_urn, permission="read",
+        )
+        if decision.allowed:
+            readable.append(resource_urn)
+    return readable
+
+
 @app.post("/api/applications/{name}")
 async def create_or_update_application(
     name: str,
@@ -258,12 +384,34 @@ async def create_or_update_application(
     """Idempotent on an unpromoted draft (edits it in
     place); creates a new draft version if the latest is promoted.
     """
+    urn = application_builder.application_urn(principal.tenant_id, WORKSPACE_ID, name)
+    existing = await application_builder.get_application(app.state.pool, tenant_id=principal.tenant_id, name=name)
+    if existing is not None:
+        await _authorize_application(principal, urn, "write")
+    else:
+        # Creating a brand-new Application: there's no `parent_workspace`
+        # relation yet for `_authorize_application` to check *against* (it
+        # doesn't exist until right after this), so the gate has to be the
+        # workspace's own `write` instead — same "check the container
+        # before the thing inside it exists" shape `knowledge`'s self-serve
+        # ObjectType creation already uses (`_authorize_ontology_governance`).
+        # Without this, any authenticated principal — including one with
+        # zero workspace grants — could mint a new Application, since the
+        # relation-write below would happily grant *that* URN to the
+        # workspace regardless of who asked.
+        decision = await app.state.authz.authorize(
+            principal, resource_type="workspace", resource_urn=WORKSPACE_URN, permission="write",
+        )
+        if not decision.allowed:
+            raise HTTPException(status_code=403, detail=decision.reason)
+
     authorization = http_request.headers.get("authorization", "")
     try:
-        return await application_builder.create_or_update_draft(
+        result = await application_builder.create_or_update_draft(
             app.state.pool,
             app.state.client,
             tenant_id=principal.tenant_id,
+            workspace_id=WORKSPACE_ID,
             name=name,
             definition=body.definition,
             knowledge_url=KNOWLEDGE_URL,
@@ -273,14 +421,34 @@ async def create_or_update_application(
     except application_builder.InvalidApplicationDefinition as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if existing is None:
+        await app.state.authz.write_relationship(
+            resource_type="application", resource_urn=urn, relation="parent_workspace",
+            subject_type="workspace", subject_urn=WORKSPACE_URN,
+        )
+    return result
+
 
 @app.get("/api/applications")
 async def list_applications(principal: Principal = Depends(current_principal)) -> list[dict]:
     """A real, previously-missing gap — every prior verification already
     knew the Application's name from creating it. Returns the latest
     version of each distinct application for this tenant.
+
+    Filtered post-fetch rather than per-row-authorized: `authorize()`'s own
+    decision cache makes repeat checks for the same principal+permission
+    cheap, and the list is small at this build's scale (unlike a paged
+    object table, where per-row authz would actually matter).
     """
-    return await application_builder.list_applications(app.state.pool, tenant_id=principal.tenant_id)
+    applications = await application_builder.list_applications(app.state.pool, tenant_id=principal.tenant_id)
+    allowed = []
+    for application in applications:
+        decision = await app.state.authz.authorize(
+            principal, resource_type="application", resource_urn=application["urn"], permission="read",
+        )
+        if decision.allowed:
+            allowed.append(application)
+    return allowed
 
 
 @app.get("/api/applications/{name}")
@@ -288,13 +456,225 @@ async def get_application(name: str, principal: Principal = Depends(current_prin
     application = await application_builder.get_application(app.state.pool, tenant_id=principal.tenant_id, name=name)
     if application is None:
         raise _application_not_found(name)
+    await _authorize_application(principal, application["urn"], "read")
     return application
+
+
+class SetApplicationProjectRequest(BaseModel):
+    project_urn: Optional[str] = None
+
+
+@app.post("/api/applications/{name}/project")
+async def set_application_project(
+    name: str, body: SetApplicationProjectRequest, principal: Principal = Depends(current_principal),
+) -> dict:
+    application = await application_builder.get_application(app.state.pool, tenant_id=principal.tenant_id, name=name)
+    if application is None:
+        raise _application_not_found(name)
+    # Same bar as any other edit to this Application — no separate
+    # project-level check, mirroring how `knowledge`'s ObjectType project
+    # scoping is gated by the object_type's own `write`, not the target
+    # project's (the resource owner's call to make, not the project's to
+    # approve).
+    await _authorize_application(principal, application["urn"], "write")
+    await _link_application_to_project(application["urn"], body.project_urn)
+    return await application_builder.set_application_project(
+        app.state.pool, tenant_id=principal.tenant_id, name=name, project_urn=body.project_urn,
+    )
+
+
+class SetTagsRequest(BaseModel):
+    tags: list[str]
+
+
+@app.put("/api/resources/{urn}/tags")
+async def set_resource_tags(
+    urn: str, body: SetTagsRequest, principal: Principal = Depends(current_principal)
+) -> dict:
+    await _authorize_resource(principal, _resource_authz_type(urn), urn, "write")
+    return await resource_tags.set_tags(
+        app.state.pool, tenant_id=principal.tenant_id, resource_urn=urn, tags=body.tags, updated_by_urn=principal.urn,
+    )
+
+
+@app.post("/api/resources/{urn}/featured")
+async def feature_resource(urn: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_resource(principal, _resource_authz_type(urn), urn, "write")
+    return await resource_tags.set_featured(
+        app.state.pool, tenant_id=principal.tenant_id, resource_urn=urn, featured=True, updated_by_urn=principal.urn,
+    )
+
+
+@app.delete("/api/resources/{urn}/featured")
+async def unfeature_resource(urn: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_resource(principal, _resource_authz_type(urn), urn, "write")
+    return await resource_tags.set_featured(
+        app.state.pool, tenant_id=principal.tenant_id, resource_urn=urn, featured=False, updated_by_urn=principal.urn,
+    )
+
+
+@app.get("/api/resources")
+async def list_resources(
+    tag: Optional[str] = None, featured: Optional[bool] = None, principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    """Per-row filtered, same discipline `list_applications` already
+    applies — a URN itself can be sensitive (e.g. embeds a resource
+    name), so a tag/featured search must not surface one this principal
+    couldn't otherwise read, even though this endpoint returns no
+    resource content beyond the URN itself.
+    """
+    candidates = await resource_tags.list_matching(app.state.pool, tenant_id=principal.tenant_id, tag=tag, featured=featured)
+    allowed = []
+    for candidate in candidates:
+        resource_type = _RESOURCE_AUTHZ_TYPE.get(parse_urn(candidate["resource_urn"]).type)
+        if resource_type is None:
+            continue
+        decision = await app.state.authz.authorize(
+            principal, resource_type=resource_type, resource_urn=candidate["resource_urn"], permission="read",
+        )
+        if decision.allowed:
+            allowed.append(candidate)
+    return allowed
+
+
+async def _authorize_project(principal: Principal, project_urn: str, permission: str) -> None:
+    await _authorize_resource(principal, "project", project_urn, permission)
+
+
+@app.post("/api/projects/{project_urn}/pins/{resource_urn}")
+async def pin_resource(project_urn: str, resource_urn: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_project(principal, project_urn, "write")
+    await project_pins.pin(
+        app.state.pool, tenant_id=principal.tenant_id, project_urn=project_urn, resource_urn=resource_urn,
+        pinned_by_urn=principal.urn,
+    )
+    return {"status": "pinned", "project_urn": project_urn, "resource_urn": resource_urn}
+
+
+@app.delete("/api/projects/{project_urn}/pins/{resource_urn}")
+async def unpin_resource(project_urn: str, resource_urn: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_project(principal, project_urn, "write")
+    await project_pins.unpin(
+        app.state.pool, tenant_id=principal.tenant_id, project_urn=project_urn, resource_urn=resource_urn,
+    )
+    return {"status": "unpinned", "project_urn": project_urn, "resource_urn": resource_urn}
+
+
+@app.get("/api/projects/{project_urn}/pins")
+async def list_project_pins(project_urn: str, principal: Principal = Depends(current_principal)) -> list[dict]:
+    # Read-gated, not write — a project viewer should still see what's
+    # pinned, only curating (pin/unpin above) needs write.
+    await _authorize_project(principal, project_urn, "read")
+    return await project_pins.list_pins(app.state.pool, tenant_id=principal.tenant_id, project_urn=project_urn)
+
+
+async def _authorize_workspace(principal: Principal, permission: str) -> None:
+    await _authorize_resource(principal, "workspace", WORKSPACE_URN, permission)
+
+
+def _collection_not_found(collection_id: int) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"no collection with id {collection_id}")
+
+
+class CreateCollectionRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+@app.post("/api/collections")
+async def create_collection(body: CreateCollectionRequest, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await resource_collections.get_collection_by_name(app.state.pool, tenant_id=principal.tenant_id, name=body.name):
+        raise HTTPException(status_code=409, detail=f"a collection named {body.name!r} already exists")
+    return await resource_collections.create_collection(
+        app.state.pool, tenant_id=principal.tenant_id, name=body.name, description=body.description,
+        created_by_urn=principal.urn,
+    )
+
+
+@app.get("/api/collections")
+async def list_collections(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await resource_collections.list_collections(app.state.pool, tenant_id=principal.tenant_id)
+
+
+@app.get("/api/collections/{collection_id}")
+async def get_collection(collection_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
+    collection = await resource_collections.get_collection(app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id)
+    if collection is None:
+        raise _collection_not_found(collection_id)
+    members = await resource_collections.list_members(
+        app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id,
+    )
+    collection["members"] = await _filter_readable_resource_urns(principal, members)
+    return collection
+
+
+@app.delete("/api/collections/{collection_id}")
+async def delete_collection(collection_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    await resource_collections.delete_collection(app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id)
+    return {"status": "deleted", "id": collection_id}
+
+
+class SetCollectionMembersRequest(BaseModel):
+    resource_urns: list[str]
+
+
+@app.put("/api/collections/{collection_id}/members")
+async def set_collection_members(
+    collection_id: int, body: SetCollectionMembersRequest, principal: Principal = Depends(current_principal),
+) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await resource_collections.get_collection(app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id) is None:
+        raise _collection_not_found(collection_id)
+    members = await resource_collections.set_members(
+        app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id,
+        resource_urns=body.resource_urns, added_by_urn=principal.urn,
+    )
+    return {"id": collection_id, "members": members}
+
+
+@app.post("/api/collections/{collection_id}/members/{resource_urn}")
+async def add_collection_member(
+    collection_id: int, resource_urn: str, principal: Principal = Depends(current_principal),
+) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await resource_collections.get_collection(app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id) is None:
+        raise _collection_not_found(collection_id)
+    await resource_collections.add_member(
+        app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id, resource_urn=resource_urn,
+        added_by_urn=principal.urn,
+    )
+    return {"status": "added"}
+
+
+@app.delete("/api/collections/{collection_id}/members/{resource_urn}")
+async def remove_collection_member(
+    collection_id: int, resource_urn: str, principal: Principal = Depends(current_principal),
+) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await resource_collections.get_collection(app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id) is None:
+        raise _collection_not_found(collection_id)
+    await resource_collections.remove_member(
+        app.state.pool, tenant_id=principal.tenant_id, collection_id=collection_id, resource_urn=resource_urn,
+    )
+    return {"status": "removed"}
+
+
+@app.get("/api/resources/{urn}/collections")
+async def list_resource_collections(urn: str, principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    await _authorize_resource(principal, _resource_authz_type(urn), urn, "read")
+    return await resource_collections.list_collections_for_resource(app.state.pool, tenant_id=principal.tenant_id, resource_urn=urn)
 
 
 @app.post("/api/applications/{name}/promote")
 async def promote_application(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
+    await _get_application_or_404(name, principal, permission="write")
     authorization = http_request.headers.get("authorization", "")
     try:
         return await application_builder.promote(
@@ -310,10 +690,17 @@ async def promote_application(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-async def _get_application_or_404(name: str, tenant_id: str) -> dict:
-    application = await application_builder.get_application(app.state.pool, tenant_id=tenant_id, name=name)
+async def _get_application_or_404(name: str, principal: Principal, *, permission: str = "read") -> dict:
+    """Load an application only after enforcing its own ReBAC permission.
+
+    Knowledge separately authorizes the data and actions behind an
+    application.  This guard protects the application resource itself:
+    its routes, form schema, dashboard layout, and agent configuration.
+    """
+    application = await application_builder.get_application(app.state.pool, tenant_id=principal.tenant_id, name=name)
     if application is None:
         raise _application_not_found(name)
+    await _authorize_application(principal, application["urn"], permission)
     return application
 
 
@@ -324,7 +711,7 @@ async def application_list_data(
     """The 'object app' surface's list view: reads through Knowledge's
     permission-gated `/objects/{type}` endpoint using the caller's token.
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
@@ -337,7 +724,7 @@ async def application_list_data(
 async def application_detail_data(
     name: str, instance_id: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> Response:
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
@@ -357,8 +744,22 @@ async def application_invoke_action(
     principal: Principal = Depends(current_principal),
 ) -> Response:
     """An application can only invoke an Action it explicitly declared in `actionRefs`.
+
+    Knowledge's own two invocation shapes disagree on what belongs in the
+    URL: the two hardcoded Customer routes (`routers/actions.py`) are
+    keyed by local name, but the generic route
+    (`routers/objects/generic.py`) — every declarative Action Type,
+    which is the common case for a self-serve ObjectType — is keyed by
+    the full dotted name it's actually registered under. `parameters`
+    presence is the same is-this-declarative discriminator
+    `libs/holon_osdk/schema.py` and `ObjectDetailPage.tsx` already use
+    for the identical decision; this proxy needs to make it too, or
+    every declarative Action invoked through an Object App 404s as
+    "unknown Action Type" (confirmed: `nullifyId`, a real declarative
+    Action Type with zero parameters, hit exactly this against a
+    self-serve ObjectType before this fix).
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
@@ -366,11 +767,20 @@ async def application_invoke_action(
         raise HTTPException(
             status_code=403, detail=f"application {name!r} did not declare {object_type}.{action_name}"
         )
+
+    authorization = http_request.headers.get("authorization")
+    actions_status, actions = await _get_json(f"{KNOWLEDGE_URL}/actions", authorization=authorization)
+    full_name = f"{object_type}.{action_name}"
+    is_declarative = actions_status == 200 and any(
+        a.get("name") == full_name and "parameters" in a for a in actions
+    )
+    upstream_action_name = full_name if is_declarative else action_name
+
     body = await http_request.json()
     return await _proxy(
         "POST",
-        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{action_name}",
-        authorization=http_request.headers.get("authorization"),
+        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{upstream_action_name}",
+        authorization=authorization,
         json=body,
     )
 
@@ -382,7 +792,7 @@ async def application_dashboard(
     """The **dashboard** surface — a page of read-only widgets,
     each bound to an ObjectType.
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     authorization = http_request.headers.get("authorization")
     widgets_out = []
     for widget in application_builder.get_dashboard_widgets(application):
@@ -431,7 +841,7 @@ async def application_analytics_execute(
     endpoint's only job is scoping, not reimplementing Knowledge's own
     validation.
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_analytics_object_type(application)
     if object_type is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no analytics surface")
@@ -457,7 +867,7 @@ async def application_analytics_replay(
     nothing left for this scoping check to add beyond confirming the
     application really does have an analytics surface at all.
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     if application_builder.resolve_analytics_object_type(application) is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no analytics surface")
     return await _proxy(
@@ -469,7 +879,7 @@ async def application_analytics_replay(
 async def get_application_form(name: str, principal: Principal = Depends(current_principal)) -> dict:
     """The **form** surface — returns the declared field schema.
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     form = application_builder.get_form_surface(application)
     if form is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no form surface")
@@ -482,7 +892,7 @@ async def submit_application_form(
 ) -> Response:
     """Validates the submission against the form's declared schema (required/type).
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     form = application_builder.get_form_surface(application)
     if form is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no form surface")
@@ -514,7 +924,7 @@ async def create_application_agent_session(name: str, principal: Principal = Dep
     endpoint below tell this caller's session apart from anyone else's,
     since every agentApp session shares one underlying agent identity.
     """
-    application = await _get_application_or_404(name, principal.tenant_id)
+    application = await _get_application_or_404(name, principal)
     agent_app = application_builder.resolve_agent_app_config(application)
     if agent_app is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no agentApp surface")
@@ -551,7 +961,7 @@ async def run_application_agent_session_turn(
     drive it, checked against `agent_app_session` rather than trusting
     the shared agent identity alone to tell callers apart.
     """
-    await _get_application_or_404(name, principal.tenant_id)
+    await _get_application_or_404(name, principal)
     owner_urn = await application_builder.get_agent_app_session_owner(app.state.pool, session_urn)
     if owner_urn is None or owner_urn != principal.urn:
         raise HTTPException(status_code=404, detail=f"no agent session {session_urn!r} found for this application")
@@ -573,7 +983,12 @@ async def register_ui_component_plugin(
 ) -> dict:
     """Registers a UI component plugin. See `ui_component_registry.py`'s
     module docstring for details.
+
+    A plugin controls the iframe URL rendered in every dashboard that uses
+    its component.  It is therefore workspace-curation, not an operation
+    available to every authenticated user.
     """
+    await _authorize_workspace(principal, "write")
     try:
         return await ui_component_registry.register_ui_component_plugin(app.state.pool, entry_point=body.entry_point)
     except ui_component_registry.PluginConflictError as exc:
@@ -586,6 +1001,7 @@ def _ui_component_plugin_not_found(name: str) -> HTTPException:
 
 @app.get("/ui-component-plugins/{name}")
 async def get_ui_component_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
     registration = await ui_component_registry.get_ui_component_registration(app.state.pool, name)
     if registration is None:
         raise _ui_component_plugin_not_found(name)
@@ -594,6 +1010,7 @@ async def get_ui_component_plugin(name: str, principal: Principal = Depends(curr
 
 @app.post("/ui-component-plugins/{name}/disable")
 async def disable_ui_component_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     registration = await ui_component_registry.get_ui_component_registration(app.state.pool, name)
     if registration is None:
         raise _ui_component_plugin_not_found(name)
@@ -602,6 +1019,7 @@ async def disable_ui_component_plugin(name: str, principal: Principal = Depends(
 
 @app.post("/ui-component-plugins/{name}/enable")
 async def enable_ui_component_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     registration = await ui_component_registry.get_ui_component_registration(app.state.pool, name)
     if registration is None:
         raise _ui_component_plugin_not_found(name)

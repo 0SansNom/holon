@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { ButtonGroup, Button, H3, Spinner } from "@blueprintjs/core";
+import { ButtonGroup, Button } from "@blueprintjs/core";
 import ReactFlow, { Background, Controls, MarkerType, type Edge, type Node } from "reactflow";
 import "reactflow/dist/style.css";
 import { useObjectGraph } from "../../api/hooks";
-import { PageBreadcrumbs } from "../common/PageBreadcrumbs";
+import { DetailPage } from "../common/PageLayout";
 import type { InstanceGraphNode } from "../../api/knowledge";
 
 // Categorical accent, secondary to the node's own label (which already
@@ -31,7 +31,7 @@ function NodeCard({ objectType, label }: { objectType: string; label: string }) 
       <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", color, fontWeight: 600, marginBottom: 4 }}>
         {objectType}
       </div>
-      <div style={{ fontSize: 12.5, color: "#1c2127", fontWeight: 500 }}>{label}</div>
+      <div style={{ fontSize: 12.5, color: "var(--hl-text)", fontWeight: 500 }}>{label}</div>
     </div>
   );
 }
@@ -40,7 +40,7 @@ export function ObjectGraphPage() {
   const { type, id } = useParams({ from: "/shell/objects/$type/$id/graph" });
   const navigate = useNavigate();
   const [hops, setHops] = useState(2);
-  const { data: graph, isLoading, error } = useObjectGraph(type, id, hops);
+  const { data: graph } = useObjectGraph(type, id, hops);
 
   const { nodes, flowEdges } = useMemo(() => {
     if (!graph) return { nodes: [] as Node[], flowEdges: [] as Edge[] };
@@ -62,16 +62,16 @@ export function ObjectGraphPage() {
       target: e.target,
       label: e.relation,
       className: "hl-graph-edge",
-      labelStyle: { fill: "#5f6b7a", fontSize: 11, fontWeight: 500 },
-      labelBgStyle: { fill: "#ffffff" },
+      labelStyle: { fill: "var(--hl-text-muted)", fontSize: 11, fontWeight: 500 },
+      labelBgStyle: { fill: "var(--hl-bg-panel)" },
       labelBgPadding: [6, 3],
       labelBgBorderRadius: 6,
       style: {
-        stroke: "#c7cdd8",
+        stroke: "var(--hl-border)",
         strokeWidth: 1.5,
         strokeDasharray: e.direction === "toward_many" ? "4 4" : undefined,
       },
-      markerEnd: { type: MarkerType.ArrowClosed, color: "#c7cdd8", width: 18, height: 18 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: "var(--hl-border)", width: 18, height: 18 },
     }));
     return { nodes, flowEdges };
   }, [graph]);
@@ -83,23 +83,22 @@ export function ObjectGraphPage() {
     }
   }
 
-  if (isLoading) return <Spinner />;
-  if (error) return <p style={{ color: "var(--hl-danger)" }}>{(error as Error).message}</p>;
-
   return (
-    <div>
-      <PageBreadcrumbs
-        items={[
-          { label: "Objects", to: "/objects" },
-          { label: type, to: "/objects/$type", params: { type } },
-          { label: String(id), to: "/objects/$type/$id", params: { type, id } },
-          { label: "Graph" },
-        ]}
-      />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
-        <H3 style={{ margin: 0 }}>
-          {type} / {id} — related instances
-        </H3>
+    <DetailPage
+      breadcrumbs={[
+        { label: "Objects", to: "/objects" },
+        { label: type, to: "/objects/$type", params: { type } },
+        { label: String(id), to: "/objects/$type/$id", params: { type, id } },
+        { label: "Graph" },
+      ]}
+      title={`${type} / ${id} — related instances`}
+      description={
+        <>
+          Instance-level link analysis over the seeded RelationTypes — click a node to open that object. Dashed
+          edges are one-to-many fan-out; solid edges point at a single parent.
+        </>
+      }
+      actions={
         <ButtonGroup>
           <Button active={hops === 2} onClick={() => setHops(2)}>
             2 hops
@@ -108,11 +107,8 @@ export function ObjectGraphPage() {
             3 hops
           </Button>
         </ButtonGroup>
-      </div>
-      <p style={{ color: "var(--hl-text-muted)", marginBottom: 16, fontSize: 13 }}>
-        Instance-level link analysis over the seeded RelationTypes — click a node to open that object. Dashed
-        edges are one-to-many fan-out; solid edges point at a single parent.
-      </p>
+      }
+    >
       <style>{`
         .hl-graph-node:hover { box-shadow: 0 4px 12px rgba(16, 22, 34, 0.12) !important; transform: translateY(-1px); cursor: pointer; }
         .hl-graph-edge .react-flow__edge-path { transition: stroke 0.15s ease, stroke-width 0.15s ease; }
@@ -128,7 +124,7 @@ export function ObjectGraphPage() {
           proOptions={{ hideAttribution: true }}
           onNodeClick={onNodeClick}
         >
-          <Background color="#dfe3ea" gap={18} size={1} />
+          <Background color="var(--hl-border)" gap={18} size={1} />
           <Controls />
         </ReactFlow>
       </div>
@@ -138,22 +134,22 @@ export function ObjectGraphPage() {
         </p>
       )}
       {graph && graph.nodes.length <= 1 && (
-        <p style={{ color: "var(--hl-text-muted)", marginTop: 12 }}>No related instances found within {hops} hops.</p>
+        <p className="hl-text-muted hl-mt-md">No related instances found within {hops} hops.</p>
       )}
-    </div>
+    </DetailPage>
   );
 }
 
 function nodeStyle(isRoot: boolean, accentColor: string | undefined) {
-  const accent = accentColor ?? "#5f6b7a";
+  const accent = accentColor ?? "var(--hl-text-muted)";
   return {
-    background: isRoot ? "#eaf1fd" : "#ffffff",
-    border: `1.5px solid ${isRoot ? "#2d63c8" : "#e1e4ea"}`,
+    background: isRoot ? "var(--hl-accent-soft)" : "var(--hl-bg-panel)",
+    border: `1.5px solid ${isRoot ? "var(--hl-accent)" : "var(--hl-border)"}`,
     borderRadius: 8,
     fontSize: 12,
     padding: "8px 12px",
     minWidth: 168,
-    boxShadow: isRoot ? "0 0 0 3px #eaf1fd" : "0 1px 2px rgba(16, 22, 34, 0.06)",
+    boxShadow: isRoot ? `0 0 0 3px var(--hl-accent-soft)` : "var(--hl-shadow-sm)",
     borderLeft: `4px solid ${accent}`,
     transition: "box-shadow 0.15s ease, transform 0.15s ease",
   };

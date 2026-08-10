@@ -11,11 +11,13 @@ request/auth helper every other client in this build consolidates on)
 rather than adding `httpx`/`requests` as a new dependency just for this.
 
 Scoped to what the ontology's own `property_types` schema actually
-allows: `struct`/`array` nesting is hard-limited to exactly one level
-server-side (`ontology/publishing.py`'s `_validate_property_types`) —
-an array's `element` may only ever be a `value_type` leaf, never another
-`struct`/`array`, so this model (and both emitters) never needs to
-represent unbounded nesting.
+allows: `struct`/`array` nesting is hard-limited to one level deep
+server-side (`ontology/publishing.py`'s `_validate_property_types`),
+with a single named exception — an array's `element` may itself be a
+`struct` ("struct array", e.g. a struct reducer's source column), whose
+own fields are then leaves-only. Every other nested position stays
+restricted to `value_type`/`shared_property_type`, so this model (and
+both emitters) never needs to represent unbounded nesting.
 """
 
 from __future__ import annotations
@@ -61,8 +63,16 @@ class ObjectTypeSchema:
 @dataclass
 class ActionParameter:
     name: str
-    value_type: str
     required: bool
+    # "value_type" (default): `value_type` names a ValueType, `object_type`
+    # is None. "object_reference": the reverse — the submitted value must
+    # be a real instance id of `object_type`, structurally validated here
+    # only; neither emitter currently distinguishes the two (both just
+    # type the parameter as `Any`/`unknown`), but the schema itself needs
+    # to survive walking an ontology that has one, not crash on it.
+    kind: str = "value_type"
+    value_type: Optional[str] = None
+    object_type: Optional[str] = None
 
 
 @dataclass
@@ -161,7 +171,10 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         # value, is the real signal.
         is_declarative = "parameters" in detail
         parameters = [
-            ActionParameter(name=p["name"], value_type=p["value_type"], required=p.get("required", True))
+            ActionParameter(
+                name=p["name"], required=p.get("required", True), kind=p.get("kind", "value_type"),
+                value_type=p.get("value_type"), object_type=p.get("object_type"),
+            )
             for p in detail.get("parameters", [])
         ]
         local_name = detail["name"].split(".", 1)[-1] if "." in detail["name"] else detail["name"]

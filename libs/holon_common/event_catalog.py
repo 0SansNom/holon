@@ -96,6 +96,14 @@ class IdentityPermissionRevokedV1(_Payload):
     relation: str
 
 
+@register("identity.permission.granted", version=1)
+class IdentityPermissionGrantedV1(_Payload):
+    principal_urn: str
+    resource_type: str
+    resource_urn: str
+    relation: str
+
+
 @register("automation.workflow.completed", version=1)
 class AutomationWorkflowCompletedV1(_Payload):
     workflow_name: str

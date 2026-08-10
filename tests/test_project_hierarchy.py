@@ -103,6 +103,12 @@ def test_creating_a_duplicate_project_name_is_rejected(msmith_token: str) -> Non
     assert status == 409, body
 
 
+@pytest.mark.parametrize("name", ["", "contains/slash", "contains:colon", "-starts-with-separator"])
+def test_invalid_project_names_are_rejected(msmith_token: str, name: str) -> None:
+    status, body = _request("POST", f"{IDENTITY}/projects", token=msmith_token, body={"name": name})
+    assert status == 422, body
+
+
 def test_project_only_grant_reaches_a_project_scoped_object_type_without_any_workspace_grant(
     jdoe_token: str, msmith_token: str, alice_token: str
 ) -> None:

@@ -1,52 +1,60 @@
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Card, H3, Spinner } from "@blueprintjs/core";
-import { useObjectTypes } from "../../api/hooks";
+import { Card, HTMLSelect } from "@blueprintjs/core";
+import { useObjectTypes, useObjectTypeGroups } from "../../api/hooks";
 import { ClassificationBadge } from "../common/ClassificationBadge";
+import { CardGrid } from "../common/ListPrimitives";
+import { RegistryPage } from "../common/PageLayout";
 
 export function ObjectTypeListPage() {
-  const { data, isLoading, error } = useObjectTypes();
+  const { data } = useObjectTypes();
+  const { data: groups } = useObjectTypeGroups();
+  const [groupFilter, setGroupFilter] = useState("");
 
-  if (isLoading) return <Spinner />;
-  if (error) return <p style={{ color: "var(--hl-danger)" }}>{(error as Error).message}</p>;
+  const activeGroup = groups.find((g) => g.name === groupFilter);
+  const visibleTypes = activeGroup ? data.filter((ot) => activeGroup.object_types.includes(ot.name)) : data;
 
   return (
-    <div>
-      <H3>Ontology</H3>
-      <p style={{ color: "var(--hl-text-muted)", marginBottom: 20 }}>
-        Every ObjectType this ontology defines — instances are only ever reached through it, never a raw table or a
-        document dump.
-      </p>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-        {data?.map((ot) => (
-          <Link key={ot.urn} to="/objects/$type" params={{ type: ot.name }} style={{ textDecoration: "none" }}>
-            <Card interactive style={{ height: "100%", minWidth: 0 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: 8, marginBottom: 8 }}>
-                <strong
-                  style={{
-                    color: "var(--hl-text)",
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={ot.name}
-                >
+    <RegistryPage
+      title="Objects"
+      description={
+        <>
+          Every ObjectType this ontology defines — instances are only ever reached through it, never a raw table or a
+          document dump.
+        </>
+      }
+      trailing={
+        groups.length > 0 ? (
+          <HTMLSelect value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
+            <option value="">All groups</option>
+            {groups.map((g) => (
+              <option key={g.name} value={g.name}>
+                {g.name}
+              </option>
+            ))}
+          </HTMLSelect>
+        ) : undefined
+      }
+    >
+      {visibleTypes.length === 0 && <p className="hl-text-muted">No ObjectTypes in this group.</p>}
+      <CardGrid minWidth={260}>
+        {visibleTypes.map((ot) => (
+          <Link key={ot.urn} to="/objects/$type" params={{ type: ot.name }} className="hl-link-reset">
+            <Card interactive className="hl-h-full">
+              <div className="hl-registry-card-header">
+                <strong className="hl-registry-card-title" title={ot.name}>
                   {ot.name}
                 </strong>
-                <div style={{ flexShrink: 0 }}>
-                  <ClassificationBadge classification={ot.classification} />
-                </div>
+                <ClassificationBadge classification={ot.classification} />
               </div>
-              <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0, overflowWrap: "break-word" }}>
-                {ot.description}
-              </p>
-              <div className="hl-mono" style={{ fontSize: 11, color: "var(--hl-text-muted)", marginTop: 10 }}>
+              <p className="hl-card-desc">{ot.description}</p>
+              <div className="hl-mono hl-text-muted-sm hl-mt-sm">
                 v{ot.version} · {Object.keys(ot.property_mapping).length} properties
               </div>
             </Card>
           </Link>
         ))}
-      </div>
-    </div>
+      </CardGrid>
+    </RegistryPage>
   );
 }

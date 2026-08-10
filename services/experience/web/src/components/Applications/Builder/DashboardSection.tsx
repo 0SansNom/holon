@@ -34,8 +34,8 @@ function SortableWidgetRow({
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}
     >
-      <Card style={{ display: "flex", alignItems: "center", gap: 8, padding: 8, marginBottom: 6 }}>
-        <span {...listeners} {...attributes} style={{ cursor: "grab", touchAction: "none" }}>
+      <Card className="hl-builder-widget-card">
+        <span {...listeners} {...attributes} className="hl-drag-handle">
           <Icon icon="drag-handle-vertical" />
         </span>
         <Icon icon={widget.component === "kpi" ? "numerical" : "th"} />
@@ -55,12 +55,12 @@ function SortableWidgetRow({
           placeholder="Label"
           value={widget.label}
           onChange={(e) => onChange({ ...widget, label: e.target.value })}
-          style={{ flex: 1 }}
+          className="hl-flex-1"
         />
         <Button icon="cross" minimal small onClick={onRemove} title="Remove widget" />
       </Card>
       {!widget.objectType && (
-        <p style={{ fontSize: 11, color: "var(--hl-warning)", margin: "-4px 0 6px 32px" }}>
+        <p className="hl-builder-widget-warning">
           Select an ObjectType above, or this widget will be dropped when you save.
         </p>
       )}
@@ -82,12 +82,12 @@ export function DashboardSection({
 
   return (
     <Card>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: value.enabled ? 12 : 0 }}>
+      <div className={`hl-builder-section-header${value.enabled ? " hl-builder-section-header--expanded" : ""}`}>
         <Checkbox
           checked={value.enabled}
           label="Dashboard"
           onChange={(e) => onChange({ ...value, enabled: e.target.checked })}
-          style={{ marginBottom: 0, fontWeight: 600 }}
+          className="hl-builder-checkbox"
         />
         {value.enabled && (
           <InputGroup
@@ -95,26 +95,15 @@ export function DashboardSection({
             placeholder="/apps/name/dashboard"
             value={value.route}
             onChange={(e) => onChange({ ...value, route: e.target.value })}
-            style={{ maxWidth: 260 }}
+            className="hl-builder-route-input"
           />
         )}
       </div>
 
       {value.enabled && (
-        <div
-          ref={setNodeRef}
-          style={{
-            border: `2px dashed ${isOver ? "var(--hl-accent)" : "var(--hl-border)"}`,
-            borderRadius: 4,
-            padding: 12,
-            minHeight: 80,
-            background: isOver ? "rgba(79, 140, 255, 0.06)" : "transparent",
-          }}
-        >
+        <div ref={setNodeRef} className="hl-builder-canvas" data-over={isOver}>
           {value.widgets.length === 0 && (
-            <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0 }}>
-              Drag a KPI or Table widget from the palette here.
-            </p>
+            <p className="hl-ontology-tab-desc">Drag a KPI or Table widget from the palette here.</p>
           )}
           <SortableContext items={widgetIds} strategy={verticalListSortingStrategy}>
             {value.widgets.map((widget) => (

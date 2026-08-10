@@ -4,7 +4,15 @@ from . import registry
 from .resource import Classification, most_restrictive, union_markings
 from .urn import URN, InvalidURNError, build as build_urn, parse as parse_urn
 from .events import EventActor, EventConsumer, EventEnvelope, EventProducer
-from .auth import Principal, decode_token, issue_token, make_principal_dependency, require_tenant_match
+from .auth import (
+    Principal,
+    clear_session_cookie,
+    decode_token,
+    issue_token,
+    make_principal_dependency,
+    require_tenant_match,
+    set_session_cookie,
+)
 from .db import create_pool
 from .errors import install_error_handlers
 from .observability import (
@@ -37,6 +45,8 @@ __all__ = [
     "issue_token",
     "make_principal_dependency",
     "require_tenant_match",
+    "set_session_cookie",
+    "clear_session_cookie",
     "PermissionClient",
     "create_pool",
     "install_error_handlers",

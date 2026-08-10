@@ -52,10 +52,10 @@ def _python_type_for(
     if prop.kind == "struct":
         return struct_class_name
     if prop.kind == "array":
-        # `element` is always a `value_type`/`shared_property_type` leaf
-        # — the one-level-nesting limit `_validate_property_types`
-        # enforces server-side, so this never needs to recurse into
-        # another struct/array.
+        # `_emit_object_type` special-cases array-of-struct before ever
+        # reaching here (it needs a *named* nested dataclass, not just a
+        # type string) — this branch only ever sees a value_type/
+        # shared_property_type element in practice.
         return f"list[{_python_type_for(prop.element, value_types, shared_property_types)}]"
     raise ValueError(f"unknown property_types kind: {prop.kind!r}")
 
@@ -85,15 +85,22 @@ def _emit_object_type(
         if prop is None:
             field_lines.append(f"    {property_name}: Any = None")
             continue
-        if prop.kind == "struct":
+        # A struct can appear as a top-level property or as an array's
+        # element (a struct reducer's source column, e.g.
+        # `TestPriorityTarget.segment`) — both need the same named nested
+        # dataclass, since `_python_type_for`'s `struct` case has no name
+        # of its own to fall back on.
+        struct_element = prop if prop.kind == "struct" else (prop.element if prop.kind == "array" and prop.element.kind == "struct" else None)
+        if struct_element is not None:
             class_name = _struct_class_name(object_type.name, property_name)
             nested_fields = "\n".join(
                 f"    {name}: {_python_type_for(leaf, value_types, shared_property_types)}"
                 f"{_field_comment(leaf, shared_property_types)}"
-                for name, leaf in prop.properties.items()
+                for name, leaf in struct_element.properties.items()
             )
             struct_classes.append(f"@dataclass\nclass {class_name}:\n{nested_fields or '    pass'}\n")
-            field_lines.append(f"    {property_name}: Optional[{class_name}] = None")
+            python_type = class_name if prop.kind == "struct" else f"list[{class_name}]"
+            field_lines.append(f"    {property_name}: Optional[{python_type}] = None")
         else:
             python_type = _python_type_for(prop, value_types, shared_property_types)
             field_lines.append(f"    {property_name}: Optional[{python_type}] = None{_field_comment(prop, shared_property_types)}")

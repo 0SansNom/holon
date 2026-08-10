@@ -1,4 +1,5 @@
 import { Tag, type Intent } from "@blueprintjs/core";
+import { Link } from "@tanstack/react-router";
 import type { PropertyFormatRule } from "../../api/knowledge";
 
 // object_type.property_formats is keyed by the ontology's camelCase
@@ -6,10 +7,6 @@ import type { PropertyFormatRule } from "../../api/knowledge";
 // the raw source column name (resolver.py/serving_store.py serve rows
 // verbatim) — same conversion ObjectDetailPage.tsx already relies on for
 // foreign-key link targets.
-export function camelToSnake(s: string): string {
-  return s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
-}
-
 const BADGE_INTENT: Record<string, Intent | undefined> = {
   primary: "primary",
   success: "success",
@@ -18,6 +15,10 @@ const BADGE_INTENT: Record<string, Intent | undefined> = {
   none: undefined,
 };
 
+// The same closed vocabulary Blueprint's own `Intent` maps to CSS custom
+// properties already defined in theme.css — reused so a conditional
+// format's `color: "danger"` renders the exact same red as everywhere
+// else danger is signaled, not a second, drifting color choice.
 const CURRENCY_FORMATTERS = new Map<string, Intl.NumberFormat>();
 
 function currencyFormatter(currency: string): Intl.NumberFormat {
@@ -29,7 +30,97 @@ function currencyFormatter(currency: string): Intl.NumberFormat {
   return formatter;
 }
 
-export function FormattedValue({ rule, value }: { rule: PropertyFormatRule | undefined; value: unknown }) {
+// General-purpose numeric formatting — the rule's fields are named to
+// match `Intl.NumberFormat`'s own constructor options exactly (see
+// api/knowledge.ts's `PropertyFormatRule`), so this is a passthrough,
+// not a translation layer. Cached per distinct option-set the same way
+// `currencyFormatter` caches per currency code.
+const NUMERIC_FORMATTERS = new Map<string, Intl.NumberFormat>();
+
+function numericFormatter(rule: Extract<PropertyFormatRule, { kind: "numeric" }>): Intl.NumberFormat {
+  const key = JSON.stringify(rule);
+  let formatter = NUMERIC_FORMATTERS.get(key);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(undefined, {
+      style: rule.style ?? "decimal",
+      currency: rule.currency,
+      unit: rule.unit,
+      useGrouping: rule.useGrouping,
+      notation: rule.notation,
+      minimumFractionDigits: rule.minimumFractionDigits,
+      maximumFractionDigits: rule.maximumFractionDigits,
+      minimumSignificantDigits: rule.minimumSignificantDigits,
+      maximumSignificantDigits: rule.maximumSignificantDigits,
+      minimumIntegerDigits: rule.minimumIntegerDigits,
+    });
+    NUMERIC_FORMATTERS.set(key, formatter);
+  }
+  return formatter;
+}
+
+const DATETIME_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function dateTimeFormatter(style: string, timezone?: string): Intl.DateTimeFormat {
+  const key = `${style}|${timezone ?? ""}`;
+  let formatter = DATETIME_FORMATTERS.get(key);
+  if (!formatter) {
+    const options: Intl.DateTimeFormatOptions = { timeZone: timezone };
+    if (style === "date") Object.assign(options, { dateStyle: "medium" });
+    else if (style === "datetime-long") Object.assign(options, { dateStyle: "full", timeStyle: "medium" });
+    else if (style === "datetime-short") Object.assign(options, { dateStyle: "medium", timeStyle: "short" });
+    else if (style === "time") Object.assign(options, { timeStyle: "short" });
+    formatter = new Intl.DateTimeFormat(undefined, options);
+    DATETIME_FORMATTERS.set(key, formatter);
+  }
+  return formatter;
+}
+
+const RELATIVE_FORMATTER = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const RELATIVE_UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+  ["year", 60 * 60 * 24 * 365],
+  ["month", 60 * 60 * 24 * 30],
+  ["week", 60 * 60 * 24 * 7],
+  ["day", 60 * 60 * 24],
+  ["hour", 60 * 60],
+  ["minute", 60],
+  ["second", 1],
+];
+
+function formatRelative(date: Date): string {
+  const deltaSeconds = (date.getTime() - Date.now()) / 1000;
+  for (const [unit, secondsInUnit] of RELATIVE_UNITS) {
+    if (Math.abs(deltaSeconds) >= secondsInUnit || unit === "second") {
+      return RELATIVE_FORMATTER.format(Math.round(deltaSeconds / secondsInUnit), unit);
+    }
+  }
+  return RELATIVE_FORMATTER.format(0, "second");
+}
+
+function formatDateTime(rule: Extract<PropertyFormatRule, { kind: "datetime" }>, value: unknown): string {
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return String(value);
+  if (rule.style === "iso8601") return date.toISOString();
+  if (rule.style === "relative") return formatRelative(date);
+  return dateTimeFormatter(rule.style, rule.timezone).format(date);
+}
+
+// hl:{tenant}:{workspace}:{type}:{id} — the `id` segment is what every
+// resource-owning route already keys off (ObjectType name, Application
+// name), same URN shape used throughout the backend and this app's own
+// resource-tag/pin/collection work.
+function urnId(urn: string): string {
+  return urn.split(":").pop() ?? urn;
+}
+
+export function FormattedValue({
+  rule,
+  value,
+  principalsByUrn,
+}: {
+  rule: PropertyFormatRule | undefined;
+  value: unknown;
+  principalsByUrn?: Map<string, string>;
+}) {
   if (value === null || value === undefined) return <>—</>;
 
   if (rule?.kind === "currency") {
@@ -43,6 +134,45 @@ export function FormattedValue({ rule, value }: { rule: PropertyFormatRule | und
     }
   }
 
+  if (rule?.kind === "numeric") {
+    const amount = typeof value === "number" ? value : Number(value);
+    if (!Number.isNaN(amount)) {
+      const formatted = numericFormatter(rule).format(amount);
+      return (
+        <span className="hl-mono">
+          {rule.prefix}
+          {formatted}
+          {rule.suffix}
+        </span>
+      );
+    }
+  }
+
+  if (rule?.kind === "datetime") {
+    return <span>{formatDateTime(rule, value)}</span>;
+  }
+
+  if (rule?.kind === "principal") {
+    const displayName = principalsByUrn?.get(String(value));
+    return <span title={String(value)}>{displayName ?? String(value)}</span>;
+  }
+
+  if (rule?.kind === "resource-link") {
+    const id = urnId(String(value));
+    if (rule.resourceType === "object-type") {
+      return (
+        <Link to="/objects/$type" params={{ type: id }} onClick={(e) => e.stopPropagation()}>
+          {id}
+        </Link>
+      );
+    }
+    return (
+      <Link to="/applications/$name" params={{ name: id }} onClick={(e) => e.stopPropagation()}>
+        {id}
+      </Link>
+    );
+  }
+
   if (rule?.kind === "badge") {
     const color = rule.colors[String(value)];
     return (
@@ -52,5 +182,10 @@ export function FormattedValue({ rule, value }: { rule: PropertyFormatRule | und
     );
   }
 
-  return <span className="hl-mono">{String(value)}</span>;
+  // An object/array with no matching rule (e.g. a struct_reducer's
+  // struct-shaped output) — `String()` gives the useless "[object
+  // Object]"; every primitive fallback below this stays on `String()`
+  // unchanged.
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+  return <span className="hl-mono">{text}</span>;
 }

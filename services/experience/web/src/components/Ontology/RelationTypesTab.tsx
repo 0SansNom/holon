@@ -1,144 +1,203 @@
 import { useState } from "react";
-import { Button, Callout, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, InputGroup, Spinner, Tag } from "@blueprintjs/core";
-import { useRelationTypes, useCreateRelationType, useObjectTypes } from "../../api/hooks";
-import { ApiError } from "../../api/client";
+import { FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
+import { useRelationTypes, useCreateRelationType, useUpdateRelationType, useObjectTypes } from "../../api/hooks";
+import type { RelationType } from "../../api/knowledge";
+import { CardGrid, EmptyState } from "../common/ListPrimitives";
+import { RegistryDialog } from "../common/RegistryDialog";
+import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
+import { useAsyncAction } from "../../hooks/useAsyncAction";
+import { BranchesDialog } from "./BranchesDialog";
+import { OntologyTabHeader, RegistryCard } from "./OntologyTabLayout";
 
 const CARDINALITIES = ["many_to_one", "one_to_many", "one_to_one", "many_to_many"] as const;
 
 export function RelationTypesTab() {
-  const { data, isLoading } = useRelationTypes();
-  const { data: objectTypes = [] } = useObjectTypes();
+  const { data } = useRelationTypes();
+  const { data: objectTypes } = useObjectTypes();
   const createRelationType = useCreateRelationType();
+  const updateRelationType = useUpdateRelationType();
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [sourceObjectType, setSourceObjectType] = useState("");
   const [targetObjectType, setTargetObjectType] = useState("");
   const [sourceProperty, setSourceProperty] = useState("");
+  const [targetProperty, setTargetProperty] = useState("");
   const [cardinality, setCardinality] = useState<string>("many_to_one");
-  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<RelationType | null>(null);
+  const [editTargetProperty, setEditTargetProperty] = useState("");
+  const [editCardinality, setEditCardinality] = useState<string>("many_to_one");
+  const [branching, setBranching] = useState<RelationType | null>(null);
 
-  function reset() {
+  usePaletteCreateIntent("create-relation-type", setCreating);
+
+  function resetCreate() {
     setName("");
     setSourceObjectType("");
     setTargetObjectType("");
     setSourceProperty("");
+    setTargetProperty("");
     setCardinality("many_to_one");
-    setError(null);
   }
 
-  async function create() {
-    setError(null);
-    try {
-      await createRelationType.mutateAsync({
-        name,
-        source_object_type: sourceObjectType,
-        target_object_type: targetObjectType,
-        source_property: sourceProperty,
-        cardinality,
-      });
-      setCreating(false);
-      reset();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Create failed");
-    }
+  function closeCreate() {
+    setCreating(false);
+    resetCreate();
   }
 
-  if (isLoading) return <Spinner />;
+  const {
+    submit: submitCreate,
+    error: createError,
+    isPending: createPending,
+  } = useAsyncAction(async () => {
+    await createRelationType.mutateAsync({
+      name,
+      source_object_type: sourceObjectType,
+      target_object_type: targetObjectType,
+      source_property: sourceProperty,
+      target_property: targetProperty,
+      cardinality,
+    });
+    closeCreate();
+  }, { successMessage: `Relation type "${name}" created` });
+
+  function openEdit(rt: RelationType) {
+    setEditing(rt);
+    setEditTargetProperty(rt.target_property ?? "");
+    setEditCardinality(rt.cardinality);
+  }
+
+  const {
+    submit: submitEdit,
+    error: editError,
+    isPending: editPending,
+  } = useAsyncAction(async () => {
+    if (!editing) return;
+    await updateRelationType.mutateAsync({
+      name: editing.name,
+      body: { target_property: editTargetProperty, cardinality: editCardinality },
+    });
+    setEditing(null);
+  }, { successMessage: `"${editing?.name ?? "Relation type"}" saved` });
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0, maxWidth: 560 }}>
-          A named, directional link between two ObjectTypes — the foreign-key property lives on the source side, the
-          cardinality is spelled out explicitly, never implied.
-        </p>
-        <Button intent="primary" icon="add" onClick={() => setCreating(true)}>
-          New relation type
-        </Button>
-      </div>
+      <OntologyTabHeader
+        description={
+          <>
+            A named, bidirectional link between two ObjectTypes — the foreign-key property lives on the source side,
+            both ends are independently named (forward via Name, reverse via Target property), and the cardinality is
+            spelled out explicitly, never implied.
+          </>
+        }
+        createLabel="New relation type"
+        onCreate={() => setCreating(true)}
+      />
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-        {data?.map((rt) => (
-          <Card key={rt.urn}>
-            <strong
-              style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-              title={rt.name}
-            >
-              {rt.name}
-            </strong>
-            <div style={{ marginTop: 6, fontSize: 12, color: "var(--hl-text-muted)" }}>
+      <CardGrid minWidth={260}>
+        {data.map((rt) => (
+          <RegistryCard key={rt.urn} name={rt.name} onEdit={() => openEdit(rt)} onBranch={() => setBranching(rt)}>
+            <div className="hl-text-muted-sm hl-mt-xs">
               {rt.source_object_type_urn.split(":").pop()} —({rt.source_property})→ {rt.target_object_type_urn.split(":").pop()}
             </div>
-            <Tag minimal style={{ marginTop: 6 }}>
+            {rt.target_property && (
+              <div className="hl-text-muted-sm">
+                ← {rt.target_object_type_urn.split(":").pop()}.{rt.target_property}
+              </div>
+            )}
+            <Tag minimal className="hl-mt-xs">
               {rt.cardinality}
             </Tag>
-          </Card>
+          </RegistryCard>
         ))}
-        {data?.length === 0 && <p style={{ color: "var(--hl-text-muted)" }}>No relation types yet.</p>}
-      </div>
+        {data.length === 0 && (
+          <EmptyState actionLabel="New relation type" onAction={() => setCreating(true)}>
+            No relation types yet.
+          </EmptyState>
+        )}
+      </CardGrid>
 
-      <Dialog
+      <RegistryDialog
         isOpen={creating}
-        onClose={() => {
-          setCreating(false);
-          reset();
-        }}
         title="New relation type"
+        onClose={closeCreate}
+        error={createError}
+        isPending={createPending}
+        submitLabel="Create"
+        submitDisabled={!name || !sourceObjectType || !targetObjectType || !sourceProperty || !targetProperty}
+        onSubmit={() => submitCreate(undefined)}
       >
-        <DialogBody>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Name</label>
-            <InputGroup placeholder="Order.customer" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Source ObjectType</label>
-            <HTMLSelect fill value={sourceObjectType} onChange={(e) => setSourceObjectType(e.target.value)}>
-              <option value="">Select…</option>
-              {objectTypes.map((ot) => (
-                <option key={ot.name} value={ot.name}>
-                  {ot.name}
-                </option>
-              ))}
-            </HTMLSelect>
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Target ObjectType</label>
-            <HTMLSelect fill value={targetObjectType} onChange={(e) => setTargetObjectType(e.target.value)}>
-              <option value="">Select…</option>
-              {objectTypes.map((ot) => (
-                <option key={ot.name} value={ot.name}>
-                  {ot.name}
-                </option>
-              ))}
-            </HTMLSelect>
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Source property (the foreign key)</label>
-            <InputGroup placeholder="customerId" value={sourceProperty} onChange={(e) => setSourceProperty(e.target.value)} />
-          </div>
-          <div>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Cardinality</label>
-            <HTMLSelect fill value={cardinality} onChange={(e) => setCardinality(e.target.value)} options={[...CARDINALITIES]} />
-          </div>
-          {error && (
-            <Callout intent="danger" style={{ marginTop: 12 }}>
-              {error}
-            </Callout>
-          )}
-        </DialogBody>
-        <DialogFooter
-          actions={
-            <Button
-              intent="primary"
-              disabled={!name || !sourceObjectType || !targetObjectType || !sourceProperty}
-              loading={createRelationType.isPending}
-              onClick={() => void create()}
-            >
-              Create
-            </Button>
-          }
+        <FormGroup label="Name">
+          <InputGroup placeholder="Order.customer" value={name} onChange={(e) => setName(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Source ObjectType">
+          <HTMLSelect fill value={sourceObjectType} onChange={(e) => setSourceObjectType(e.target.value)}>
+            <option value="">Select…</option>
+            {objectTypes.map((ot) => (
+              <option key={ot.name} value={ot.name}>
+                {ot.name}
+              </option>
+            ))}
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="Target ObjectType">
+          <HTMLSelect fill value={targetObjectType} onChange={(e) => setTargetObjectType(e.target.value)}>
+            <option value="">Select…</option>
+            {objectTypes.map((ot) => (
+              <option key={ot.name} value={ot.name}>
+                {ot.name}
+              </option>
+            ))}
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="Source property (the foreign key)">
+          <InputGroup placeholder="customerId" value={sourceProperty} onChange={(e) => setSourceProperty(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Target property (the reverse accessor)" helperText="What the target ObjectType calls this relation, e.g. Customer.orders">
+          <InputGroup placeholder="orders" value={targetProperty} onChange={(e) => setTargetProperty(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Cardinality">
+          <HTMLSelect fill value={cardinality} onChange={(e) => setCardinality(e.target.value)} options={[...CARDINALITIES]} />
+        </FormGroup>
+      </RegistryDialog>
+
+      <RegistryDialog
+        isOpen={editing !== null}
+        title={`Edit ${editing?.name ?? ""}`}
+        onClose={() => setEditing(null)}
+        error={editError}
+        isPending={editPending}
+        submitLabel="Save"
+        submitDisabled={!editTargetProperty}
+        onSubmit={() => submitEdit(undefined)}
+      >
+        <p style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+          Source/target ObjectType and source property (<Tag minimal className="hl-mono">{editing?.source_property}</Tag>)
+          aren't editable — they're the structural identity of the link.
+        </p>
+        <FormGroup
+          label="Target property (the reverse accessor)"
+          helperText="What the target ObjectType calls this relation, e.g. Customer.orders"
+        >
+          <InputGroup value={editTargetProperty} onChange={(e) => setEditTargetProperty(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Cardinality">
+          <HTMLSelect
+            fill
+            value={editCardinality}
+            onChange={(e) => setEditCardinality(e.target.value)}
+            options={[...CARDINALITIES]}
+          />
+        </FormGroup>
+      </RegistryDialog>
+
+      {branching && (
+        <BranchesDialog
+          kind="relation_type"
+          resourceName={branching.name}
+          currentDefinition={{ target_property: branching.target_property, cardinality: branching.cardinality }}
+          onClose={() => setBranching(null)}
         />
-      </Dialog>
+      )}
     </div>
   );
 }

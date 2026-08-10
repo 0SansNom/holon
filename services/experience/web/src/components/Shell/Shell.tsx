@@ -1,23 +1,28 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Button, Icon } from "@blueprintjs/core";
+import { Button, Icon, Tag } from "@blueprintjs/core";
+import { motion } from "framer-motion";
 import { useAuthStore } from "../../store/auth";
+import { logout } from "../../api/identity";
+import { registerLoginRedirect } from "../../api/authRedirect";
+import { CommandPalette } from "./CommandPalette";
+import { ThemeToggle } from "./ThemeToggle";
+import { NAV_ITEMS, SEQUENTIAL_SHORTCUTS } from "./navigation";
+import { AppToaster } from "../../lib/toast";
 
-const NAV_ITEMS = [
-  { to: "/objects", icon: "cube" as const, label: "Objects" },
-  { to: "/sources", icon: "data-connection" as const, label: "Sources" },
-  { to: "/ontology", icon: "diagram-tree" as const, label: "Ontology" },
-  { to: "/applications", icon: "application" as const, label: "Applications" },
-  { to: "/search", icon: "search" as const, label: "Search" },
-  { to: "/glossary", icon: "book" as const, label: "Glossary" },
-  { to: "/admin", icon: "shield" as const, label: "Admin" },
-] as const;
+function isTypingTarget(el: Element | null): boolean {
+  if (!el) return false;
+  if (el instanceof HTMLElement && el.isContentEditable) return true;
+  return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT";
+}
 
 export function Shell() {
   const session = useAuthStore((s) => s.session);
   const clear = useAuthStore((s) => s.clear);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const leaderPressedAt = useRef<number | null>(null);
 
   useEffect(() => {
     if (!session) {
@@ -25,18 +30,70 @@ export function Shell() {
     }
   }, [session, navigate]);
 
+  useEffect(() => {
+    registerLoginRedirect(() => {
+      void navigate({ to: "/login" });
+    });
+    return () => registerLoginRedirect(null);
+  }, [navigate]);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        // A Blueprint Dialog's own overlay backdrop can render on top of
+        // a later-opened Omnibar, making it visible but unreachable —
+        // rather than stack, let Cmd/Ctrl+K only close the palette (never
+        // open it) while a create-dialog is already up.
+        if (!paletteOpen && document.querySelector(".bp6-dialog")) return;
+        setPaletteOpen((open) => !open);
+        return;
+      }
+
+      if (paletteOpen || isTypingTarget(document.activeElement)) {
+        leaderPressedAt.current = null;
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (leaderPressedAt.current !== null && Date.now() - leaderPressedAt.current < 800) {
+        leaderPressedAt.current = null;
+        const destination = SEQUENTIAL_SHORTCUTS[key];
+        if (destination) {
+          e.preventDefault();
+          void navigate({ to: destination });
+        }
+        return;
+      }
+
+      leaderPressedAt.current = key === "g" ? Date.now() : null;
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [paletteOpen, navigate]);
+
   if (!session) return null;
 
   return (
     <div className="hl-shell">
-      <aside className="hl-sidebar">
+      <a href="#main-content" className="hl-skip-link">
+        Skip to content
+      </a>
+      <AppToaster />
+      <aside className="hl-sidebar" aria-label="Primary">
         <div className="hl-sidebar-brand">
           Holon
           <small>Enterprise Knowledge OS</small>
         </div>
-        <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <nav className="hl-flex-col hl-gap-xs" aria-label="Main navigation">
           {NAV_ITEMS.map((item) => (
-            <Link key={item.to} to={item.to} className={`hl-nav-item ${pathname.startsWith(item.to) ? "active" : ""}`}>
+            <Link
+              key={item.to}
+              to={item.to}
+              className="hl-nav-item"
+              activeProps={{ className: "hl-nav-item active" }}
+              activeOptions={{ exact: false }}
+            >
               <Icon icon={item.icon} size={14} />
               {item.label}
             </Link>
@@ -45,28 +102,52 @@ export function Shell() {
       </aside>
       <div className="hl-main">
         <header className="hl-topbar">
-          <div className="hl-mono" style={{ color: "var(--hl-text-muted)", fontSize: 12 }}>
-            {session.principalUrn}
+          <div className="hl-mono hl-text-muted">
+            {session.principal.urn}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ fontSize: 13 }}>{session.displayName}</span>
+          <div className="hl-flex-row hl-items-center hl-gap-md">
+            <ThemeToggle />
+            <Tag
+              minimal
+              interactive
+              icon="search"
+              onClick={() => setPaletteOpen(true)}
+              style={{ fontSize: 11, color: "var(--hl-text-muted)" }}
+            >
+              <span className="hl-mono">⌘K</span>
+            </Tag>
+            <span style={{ fontSize: 13 }}>{session.principal.display_name}</span>
             <Button
               minimal
               small
               icon="log-out"
               onClick={() => {
-                clear();
-                void navigate({ to: "/login" });
+                // Best-effort — the cookie is cleared server-side, but the
+                // local principal is dropped and we navigate away either
+                // way, same as every other 401 already does.
+                void logout().finally(() => {
+                  clear();
+                  void navigate({ to: "/login" });
+                });
               }}
             >
               Sign out
             </Button>
           </div>
         </header>
-        <main className="hl-content">
+        <motion.main
+          id="main-content"
+          key={pathname}
+          className="hl-content"
+          tabIndex={-1}
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.12, ease: "easeOut" }}
+        >
           <Outlet />
-        </main>
+        </motion.main>
       </div>
+      <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }

@@ -164,3 +164,83 @@ def test_objects_endpoint_404s_for_an_unknown_interface(jdoe_token: str) -> None
         "GET", f"{KNOWLEDGE}/interfaces/{_unique_name('NeverRegistered')}/objects", token=jdoe_token
     )
     assert status == 404, body
+
+
+def test_declarative_action_satisfies_required_actions_at_publish(msmith_token: str) -> None:
+    """`_validate_implements` must see declarative ActionTypes, not only
+    hardcoded `ACTION_DEFINITIONS` — otherwise an OT cannot implement an
+    interface whose required actions are no-code.
+    """
+    local_action = _unique_name("flag")
+    action_name = f"Supplier.{local_action}"
+    status, _ = _request(
+        "POST", f"{KNOWLEDGE}/action-types", token=msmith_token,
+        body={
+            "name": action_name,
+            "target_object_type": "Supplier",
+            "required_permission": "write",
+            "risk_level": "low",
+            "description": "declarative action used as an interface required_action",
+            "parameters": [],
+            "edits": [{"property": "country", "source": "literal", "value": "FR"}],
+        },
+    )
+    assert status == 201
+
+    interface_name = _unique_name("HasDeclarativeFlag")
+    status, _ = _request(
+        "POST", f"{KNOWLEDGE}/interfaces", token=msmith_token,
+        body={"name": interface_name, "required_actions": [local_action]},
+    )
+    assert status == 201
+
+    status, draft = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=msmith_token,
+        body={"implements": [interface_name]},
+    )
+    assert status == 201, draft
+
+    status, published = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions/{draft['version']}/publish", token=msmith_token
+    )
+    assert status == 200, published
+    assert interface_name in (published.get("implements") or []), published
+
+
+def test_interface_targeted_action_satisfies_required_actions_at_publish(msmith_token: str) -> None:
+    """Actions-on-interfaces: an ActionType with `target_interface` must
+    count for `required_actions` when the draft implements that interface.
+    """
+    interface_name = _unique_name("Holdable")
+    local_action = _unique_name("hold")
+    status, _ = _request(
+        "POST", f"{KNOWLEDGE}/interfaces", token=msmith_token,
+        body={"name": interface_name, "required_actions": [local_action]},
+    )
+    assert status == 201
+
+    status, _ = _request(
+        "POST", f"{KNOWLEDGE}/action-types", token=msmith_token,
+        body={
+            "name": f"{interface_name}.{local_action}",
+            "target_interface": interface_name,
+            "required_permission": "write",
+            "risk_level": "low",
+            "description": "interface-scoped action covering required_actions",
+            "parameters": [],
+            "edits": [{"property": "country", "source": "literal", "value": "FR"}],
+        },
+    )
+    assert status == 201
+
+    status, draft = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=msmith_token,
+        body={"implements": [interface_name]},
+    )
+    assert status == 201, draft
+
+    status, published = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions/{draft['version']}/publish", token=msmith_token
+    )
+    assert status == 200, published
+    assert interface_name in (published.get("implements") or []), published

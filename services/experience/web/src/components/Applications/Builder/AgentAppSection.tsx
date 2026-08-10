@@ -26,12 +26,12 @@ export function AgentAppSection({
 
   return (
     <Card>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: value.enabled ? 12 : 0 }}>
+      <div className={`hl-builder-section-header${value.enabled ? " hl-builder-section-header--expanded" : ""}`}>
         <Checkbox
           checked={value.enabled}
           label="Agent App"
           onChange={(e) => onChange({ ...value, enabled: e.target.checked })}
-          style={{ marginBottom: 0, fontWeight: 600 }}
+          className="hl-builder-checkbox"
         />
         {value.enabled && (
           <InputGroup
@@ -39,31 +39,31 @@ export function AgentAppSection({
             placeholder="/apps/name/agent"
             value={value.route}
             onChange={(e) => onChange({ ...value, route: e.target.value })}
-            style={{ maxWidth: 260 }}
+            className="hl-builder-route-input"
           />
         )}
       </div>
 
       {value.enabled && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <label style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+        <div className="hl-builder-fields">
+          <label className="hl-text-muted">
             System prompt
             <TextArea
               fill
               autoResize
               value={value.systemPrompt}
               onChange={(e) => onChange({ ...value, systemPrompt: e.target.value })}
-              style={{ marginTop: 4 }}
+              className="hl-builder-field-mt"
               placeholder="You are a narrow, bounded agent for…"
             />
           </label>
 
           <div>
-            <div style={{ fontSize: 12, color: "var(--hl-text-muted)", marginBottom: 6 }}>
+            <div className="hl-section-title hl-mb-sm">
               Tools this agent may use — the same live catalog `GET /tools` computes, real Actions and agent-tool
               plugins alike.
             </div>
-            {tools.length === 0 && <p style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>No tools available.</p>}
+            {tools.length === 0 && <p className="hl-text-muted">No tools available.</p>}
             {tools.map((tool) => (
               <Checkbox
                 key={tool.name}
@@ -74,33 +74,33 @@ export function AgentAppSection({
             ))}
           </div>
 
-          <div style={{ display: "flex", gap: 16 }}>
-            <label style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+          <div className="hl-builder-numeric-row">
+            <label className="hl-text-muted">
               Max iterations
               <NumericInput
                 min={1}
                 value={value.maxIterations}
                 onValueChange={(n) => onChange({ ...value, maxIterations: n })}
-                style={{ marginTop: 4, width: 100 }}
+                className="hl-builder-numeric-input"
               />
             </label>
-            <label style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+            <label className="hl-text-muted">
               Max tool calls
               <NumericInput
                 min={1}
                 value={value.maxToolCalls}
                 onValueChange={(n) => onChange({ ...value, maxToolCalls: n })}
-                style={{ marginTop: 4, width: 100 }}
+                className="hl-builder-numeric-input"
               />
             </label>
-            <label style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+            <label className="hl-text-muted">
               Max tokens
               <NumericInput
                 min={1000}
                 stepSize={1000}
                 value={value.maxTokens}
                 onValueChange={(n) => onChange({ ...value, maxTokens: n })}
-                style={{ marginTop: 4, width: 120 }}
+                className="hl-builder-numeric-input hl-builder-numeric-input--wide"
               />
             </label>
           </div>

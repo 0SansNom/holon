@@ -11,6 +11,7 @@ object read.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Optional
 
@@ -20,10 +21,11 @@ from pyiceberg.exceptions import NoSuchTableError
 
 from holon_common import Principal, build_urn, issue_token
 
-from .. import actions, catalog, glossary, ontology, query_log, resolver
+from .. import actions, catalog, glossary, ontology, ontology_health, query_log, resolver
 from .. import core
 
 router = APIRouter()
+logger = logging.getLogger("knowledge.ontology_admin")
 
 IDENTITY_URL = os.environ["HOLON_IDENTITY_URL"]
 IDENTITY_VALIDATOR_URN = build_urn(core.TENANT_ID, "global", "service-account", "knowledge-project-validator")
@@ -76,6 +78,19 @@ async def list_ontology_definitions(principal: Principal = Depends(core.current_
     names. Same auth-only convention as `/relation-types`/`/actions`.
     """
     return await ontology.list_object_types(core.pool, principal.tenant_id)
+
+
+@router.get("/ontology/health-check")
+async def get_ontology_health_check(principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    """Structural anti-pattern detection (`ontology_health.py`) — registered
+    *before* `/ontology/{name}` below, or that path-param route would
+    swallow the literal `health-check` segment as an ObjectType name (the
+    same route-ordering discipline `routers/objects/seeded.py`'s module
+    docstring already documents for its own literal-vs-templated routes).
+    Same auth-only tier as `/ontology` — aggregated metadata and null-rate
+    percentages only, never raw instance values.
+    """
+    return await ontology_health.run_health_check(principal)
 
 
 @router.get("/ontology/{name}")
@@ -147,14 +162,10 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
     takes effect immediately, no draft/publish step, the same way the six
     boot-seeded types are immediately live.
 
-    Deliberately narrower than the full ontology lifecycle: no
-    interfaces/derived-properties/markings/branching at creation time —
-    those are exactly what `POST /ontology/{name}/versions` +
-    publish are for, and a self-serve type can grow into them later the
-    same way a seeded type does. What's new here is *existence*: making
-    a type reachable at all without a code change, which the versioning
-    endpoints alone can't do (they only ever version a type that's
-    already there).
+    Creation itself is existence + mapping only; branching, interfaces,
+    markings, and the rest of the lifecycle attach afterward via
+    `POST /ontology/{name}/versions` (+ publish) / branches — same path
+    a seeded type uses.
     """
     await _authorize_ontology_governance(principal)
     if not request.property_mapping:
@@ -182,14 +193,30 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
     # Without this, `_authorize_object_type` denies everyone, including
     # the creator — `object_type.read/write/approve` all reduce to
     # `parent_workspace->...`, the same relationship `authz_seed.py`
-    # writes for the six boot-seeded types at startup.
-    await core.authz.write_relationship(
-        resource_type="object_type",
-        resource_urn=object_type["urn"],
-        relation="parent_workspace",
-        subject_type="workspace",
-        subject_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
-    )
+    # writes for the six boot-seeded types at startup. PG and SpiceDB
+    # are not in one transaction: on authz failure, compensate by
+    # deleting the Postgres row so we never leave an unreadable orphan.
+    try:
+        await core.authz.write_relationship(
+            resource_type="object_type",
+            resource_urn=object_type["urn"],
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
+        )
+    except Exception as exc:
+        logger.exception("SpiceDB parent_workspace write failed for %s — compensating PG delete", object_type["urn"])
+        try:
+            await ontology.delete_object_type(core.pool, object_type["urn"])
+        except Exception:
+            logger.exception(
+                "compensating delete also failed for %s — ObjectType may exist in PG without ReBAC parent",
+                object_type["urn"],
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=f"failed to seed object_type authz relationship: {exc}",
+        ) from exc
     return object_type
 
 
@@ -197,10 +224,11 @@ class ProposeObjectTypeVersionRequest(BaseModel):
     property_mapping: Optional[dict] = None
     description: Optional[str] = None
     implements: Optional[list[str]] = None
-    derived_properties: Optional[dict[str, str]] = None
+    derived_properties: Optional[dict[str, str | dict]] = None
     project_urn: Optional[str] = None
     markings: Optional[list[str]] = None
     property_formats: Optional[dict[str, dict]] = None
+    conditional_formats: Optional[dict[str, list]] = None
     property_types: Optional[dict[str, dict]] = None
 
 
@@ -211,8 +239,10 @@ async def propose_object_type_version(
     """Ontology lifecycle versioning. Creates a `draft` — never
     touches the live definition every other read path uses until
     `POST /ontology/{name}/versions/{version}/publish` says otherwise.
+    Workspace `write` (editor+), same tier as branch creation — publishing
+    and review stay `approve` (admin-only).
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_write(principal)
     try:
         object_type_urn = await core._object_type_urn_for(name)
     except KeyError:
@@ -228,6 +258,7 @@ async def propose_object_type_version(
             project_urn=request.project_urn,
             markings=request.markings,
             property_formats=request.property_formats,
+            conditional_formats=request.conditional_formats,
             property_types=request.property_types,
         )
     except ValueError as exc:
@@ -238,6 +269,7 @@ class ValueTypeRequest(BaseModel):
     name: str
     base_type: str
     format_regex: Optional[str] = None
+    constraints: Optional[list[dict]] = None
     description: str = ""
 
 
@@ -259,6 +291,7 @@ async def create_value_type(request: ValueTypeRequest, principal: Principal = De
             name=request.name,
             base_type=request.base_type,
             format_regex=request.format_regex,
+            constraints=request.constraints,
             description=request.description,
         )
     except ValueError as exc:
@@ -276,6 +309,36 @@ async def get_value_type(name: str, principal: Principal = Depends(core.current_
     if value_type is None:
         raise HTTPException(status_code=404, detail=f"unknown value type: {name}")
     return value_type
+
+
+class UpdateValueTypeRequest(BaseModel):
+    format_regex: Optional[str] = None
+    constraints: Optional[list[dict]] = None
+    description: Optional[str] = None
+
+
+@router.put("/value-types/{name}")
+async def update_value_type(
+    name: str, request: UpdateValueTypeRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """Editing a Value Type is the same governance tier as registering
+    one. `base_type`/`name` aren't accepted here — see
+    `ontology/value_types.py`'s `update_value_type` docstring.
+    """
+    await _authorize_ontology_governance(principal)
+    if await ontology.get_value_type(core.pool, principal.tenant_id, name) is None:
+        raise HTTPException(status_code=404, detail=f"unknown value type: {name}")
+    try:
+        return await ontology.update_value_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=name,
+            format_regex=request.format_regex,
+            constraints=request.constraints,
+            description=request.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class SharedPropertyTypeRequest(BaseModel):
@@ -324,17 +387,52 @@ async def get_shared_property_type(api_name: str, principal: Principal = Depends
     return shared_property_type
 
 
+class UpdateSharedPropertyTypeRequest(BaseModel):
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+
+
+@router.put("/shared-property-types/{api_name}")
+async def update_shared_property_type(
+    api_name: str, request: UpdateSharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """`value_type`/`api_name` aren't accepted here — see
+    `ontology/shared_property_types.py`'s `update_shared_property_type`
+    docstring.
+    """
+    await _authorize_ontology_governance(principal)
+    if await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name) is None:
+        raise HTTPException(status_code=404, detail=f"unknown shared property type: {api_name}")
+    try:
+        return await ontology.update_shared_property_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            api_name=api_name,
+            display_name=request.display_name,
+            description=request.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class ActionTypeRequest(BaseModel):
     name: str
-    target_object_type: str
+    target_object_type: Optional[str] = None
+    target_interface: Optional[str] = None
     required_permission: str
     risk_level: str
     description: str
     parameters: list[dict] = []
-    edits: list[dict]
+    edits: list[dict] = []
     submission_criteria: list[dict] = []
     function_side_effect: Optional[str] = None
     writeback_dataset: Optional[str] = None
+    # Function-backed Actions: exactly one of edits/edit_function, checked
+    # in `ontology.create_action_type`, not here.
+    edit_function: Optional[str] = None
+    # Configure/Sections: purely a display grouping for the invocation
+    # form, structurally validated in `ontology.create_action_type`.
+    sections: list[dict] = []
 
 
 @router.post("/action-types", status_code=201)
@@ -357,6 +455,7 @@ async def create_action_type(request: ActionTypeRequest, principal: Principal = 
             tenant_id=principal.tenant_id,
             name=request.name,
             target_object_type=request.target_object_type,
+            target_interface=request.target_interface,
             required_permission=request.required_permission,
             risk_level=request.risk_level,
             description=request.description,
@@ -365,6 +464,8 @@ async def create_action_type(request: ActionTypeRequest, principal: Principal = 
             submission_criteria=request.submission_criteria,
             function_side_effect=request.function_side_effect,
             writeback_dataset=request.writeback_dataset,
+            edit_function=request.edit_function,
+            sections=request.sections,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -381,6 +482,41 @@ async def get_action_type(name: str, principal: Principal = Depends(core.current
     if action_type is None:
         raise HTTPException(status_code=404, detail=f"unknown action type: {name}")
     return action_type
+
+
+@router.put("/action-types/{name}")
+async def update_action_type(
+    name: str, request: ActionTypeRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """`create_action_type`'s SQL is already `ON CONFLICT (tenant_id,
+    name) DO UPDATE` — this endpoint is a full-replace edit (matches the
+    fact every column but `tenant_id`/`name` is already upsert-shaped
+    underneath), gated on the same existence direction `create` isn't:
+    404 if it's *not* there yet, instead of `create`'s 409 if it is.
+    """
+    await _authorize_ontology_governance(principal)
+    if await ontology.get_action_type(core.pool, principal.tenant_id, name) is None:
+        raise HTTPException(status_code=404, detail=f"unknown action type: {name}")
+    try:
+        return await ontology.create_action_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=name,
+            target_object_type=request.target_object_type,
+            target_interface=request.target_interface,
+            required_permission=request.required_permission,
+            risk_level=request.risk_level,
+            description=request.description,
+            parameters=request.parameters,
+            edits=request.edits,
+            submission_criteria=request.submission_criteria,
+            function_side_effect=request.function_side_effect,
+            writeback_dataset=request.writeback_dataset,
+            edit_function=request.edit_function,
+            sections=request.sections,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class InterfaceTypeRequest(BaseModel):
@@ -424,6 +560,35 @@ async def get_interface_type(name: str, principal: Principal = Depends(core.curr
     if interface is None:
         raise HTTPException(status_code=404, detail=f"unknown interface: {name}")
     return interface
+
+
+class UpdateInterfaceTypeRequest(BaseModel):
+    required_properties: Optional[list[str]] = None
+    required_actions: Optional[list[str]] = None
+    description: Optional[str] = None
+
+
+@router.put("/interfaces/{name}")
+async def update_interface_type(
+    name: str, request: UpdateInterfaceTypeRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """`name` isn't accepted here — it's the key referenced from every
+    ObjectType's `implements` list.
+    """
+    await _authorize_ontology_governance(principal)
+    if await ontology.get_interface_type(core.pool, principal.tenant_id, name) is None:
+        raise HTTPException(status_code=404, detail=f"unknown interface: {name}")
+    try:
+        return await ontology.update_interface_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=name,
+            required_properties=request.required_properties,
+            required_actions=request.required_actions,
+            description=request.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/interfaces/{name}/objects")
@@ -571,28 +736,68 @@ async def _link_object_type_to_project(object_type_urn: str, project_urn: Option
     ObjectType under a different project — or unscoping it back to `None` —
     would leave stale `parent_project` edges in place, silently granting former
     project members standing access. Because `object_type.project_urn` is single-valued
-    in Postgres, its SpiceDB relationship is kept single-valued by deleting all
-    existing `parent_project` edges first before writing the new one (if any).
+    in Postgres, its SpiceDB relationship is kept single-valued.
+
+    Order is write-new-then-delete-old (when scoping) so a mid-flight
+    failure never removes the previous edge before the new one exists.
+    On failure, best-effort restore of the pre-call edge set, then
+    re-raise — PG publish has already committed; the caller surfaces 503
+    so the client knows authz may be temporarily inconsistent rather
+    than silently succeeding with a wrong ReBAC graph.
     """
     existing = await core.authz.read_relationships(
         resource_type="object_type", resource_urn=object_type_urn, relation="parent_project"
     )
-    for relationship in existing:
-        await core.authz.delete_relationship(
-            resource_type="object_type",
-            resource_urn=object_type_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=relationship["subject"]["object"]["objectId"],
-        )
-    if project_urn is not None:
+    existing_urns = [relationship["subject"]["object"]["objectId"] for relationship in existing]
+
+    async def _write(subject_urn: str) -> None:
         await core.authz.write_relationship(
             resource_type="object_type",
             resource_urn=object_type_urn,
             relation="parent_project",
             subject_type="project",
-            subject_urn=project_urn,
+            subject_urn=subject_urn,
         )
+
+    async def _delete(subject_urn: str) -> None:
+        await core.authz.delete_relationship(
+            resource_type="object_type",
+            resource_urn=object_type_urn,
+            relation="parent_project",
+            subject_type="project",
+            subject_urn=subject_urn,
+        )
+
+    async def _restore_snapshot() -> None:
+        try:
+            current = await core.authz.read_relationships(
+                resource_type="object_type", resource_urn=object_type_urn, relation="parent_project"
+            )
+            current_urns = {relationship["subject"]["object"]["objectId"] for relationship in current}
+            for urn in existing_urns:
+                if urn not in current_urns:
+                    await _write(urn)
+            if project_urn is not None and project_urn not in existing_urns and project_urn in current_urns:
+                await _delete(project_urn)
+        except Exception:
+            logger.exception(
+                "failed to restore parent_project snapshot for %s after link error", object_type_urn
+            )
+
+    try:
+        if project_urn is not None:
+            if project_urn not in existing_urns:
+                await _write(project_urn)
+            for old_urn in existing_urns:
+                if old_urn != project_urn:
+                    await _delete(old_urn)
+        else:
+            for old_urn in existing_urns:
+                await _delete(old_urn)
+    except Exception:
+        logger.exception("SpiceDB parent_project reconcile failed for %s — attempting restore", object_type_urn)
+        await _restore_snapshot()
+        raise
 
 
 @router.post("/ontology/{name}/versions/{version}/publish")
@@ -618,7 +823,16 @@ async def publish_object_type_version(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _link_object_type_to_project(object_type_urn, result.get("project_urn"))
+    try:
+        await _link_object_type_to_project(object_type_urn, result.get("project_urn"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"ObjectType version {version} published in Postgres, but SpiceDB "
+                f"parent_project reconcile failed: {exc}"
+            ),
+        ) from exc
     return result
 
 
@@ -627,18 +841,24 @@ class CreateBranchRequest(BaseModel):
     property_mapping: Optional[dict] = None
     description: Optional[str] = None
     implements: Optional[list[str]] = None
-    derived_properties: Optional[dict[str, str]] = None
+    derived_properties: Optional[dict[str, str | dict]] = None
     project_urn: Optional[str] = None
     markings: Optional[list[str]] = None
+    property_formats: Optional[dict[str, dict]] = None
+    conditional_formats: Optional[dict[str, list]] = None
+    property_types: Optional[dict[str, dict]] = None
 
 
 class UpdateBranchDraftRequest(BaseModel):
     property_mapping: Optional[dict] = None
     description: Optional[str] = None
     implements: Optional[list[str]] = None
-    derived_properties: Optional[dict[str, str]] = None
+    derived_properties: Optional[dict[str, str | dict]] = None
     project_urn: Optional[str] = None
     markings: Optional[list[str]] = None
+    property_formats: Optional[dict[str, dict]] = None
+    conditional_formats: Optional[dict[str, list]] = None
+    property_types: Optional[dict[str, dict]] = None
 
 
 class ReviewBranchRequest(BaseModel):
@@ -669,6 +889,9 @@ async def create_branch(name: str, request: CreateBranchRequest, principal: Prin
             derived_properties=request.derived_properties,
             project_urn=request.project_urn,
             markings=request.markings,
+            property_formats=request.property_formats,
+            conditional_formats=request.conditional_formats,
+            property_types=request.property_types,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -718,6 +941,9 @@ async def update_branch_draft(
             derived_properties=request.derived_properties,
             project_urn=request.project_urn,
             markings=request.markings,
+            property_formats=request.property_formats,
+            conditional_formats=request.conditional_formats,
+            property_types=request.property_types,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -753,7 +979,16 @@ async def review_branch(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if request.decision == "approved":
         object_type = await ontology.get_object_type(core.pool, object_type_urn)
-        await _link_object_type_to_project(object_type_urn, object_type.get("project_urn"))
+        try:
+            await _link_object_type_to_project(object_type_urn, object_type.get("project_urn") if object_type else None)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"branch {branch_name!r} merged in Postgres, but SpiceDB "
+                    f"parent_project reconcile failed: {exc}"
+                ),
+            ) from exc
     return result
 
 
@@ -767,6 +1002,142 @@ async def list_branch_reviews(name: str, branch_name: str, principal: Principal 
     if branch is None:
         raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
     return await ontology.list_branch_reviews(core.pool, branch["id"])
+
+
+def _validate_resource_type(resource_type: str) -> None:
+    if resource_type not in ontology.ALLOWED_RESOURCE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown resource_type: {resource_type!r} (expected one of {sorted(ontology.ALLOWED_RESOURCE_TYPES)})",
+        )
+
+
+class CreateResourceBranchRequest(BaseModel):
+    branch_name: str
+    proposed_definition: dict
+
+
+class UpdateResourceBranchDraftRequest(BaseModel):
+    proposed_definition: dict
+
+
+@router.post("/ontology-resources/{resource_type}/{resource_name}/branches", status_code=201)
+async def create_resource_branch(
+    resource_type: str, resource_name: str, request: CreateResourceBranchRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """Generic branch/review for the 4 registries that aren't ObjectType
+    (`ontology/resource_branching.py`) — same `write`-tier gate
+    `create_branch` (ObjectType's own version) already uses. Unlike
+    ObjectType, there's no structural validation of `proposed_definition`
+    at this point — it's a freeform dict until review time, when it's
+    validated for real by calling straight through to the target
+    registry's `create_*`/`update_*`.
+    """
+    _validate_resource_type(resource_type)
+    await _authorize_ontology_write(principal)
+    try:
+        return await ontology.create_resource_branch(
+            core.pool,
+            resource_type=resource_type,
+            resource_name=resource_name,
+            branch_name=request.branch_name,
+            created_by_urn=principal.urn,
+            tenant_id=principal.tenant_id,
+            proposed_definition=request.proposed_definition,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ontology-resources/{resource_type}/{resource_name}/branches")
+async def list_resource_branches(
+    resource_type: str, resource_name: str, principal: Principal = Depends(core.current_principal)
+) -> list[dict]:
+    _validate_resource_type(resource_type)
+    return await ontology.list_resource_branches(
+        core.pool, resource_type=resource_type, resource_name=resource_name, tenant_id=principal.tenant_id
+    )
+
+
+@router.get("/ontology-resources/{resource_type}/{resource_name}/branches/{branch_name}")
+async def get_resource_branch(
+    resource_type: str, resource_name: str, branch_name: str, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    _validate_resource_type(resource_type)
+    branch = await ontology.get_resource_branch(
+        core.pool, resource_type=resource_type, resource_name=resource_name, branch_name=branch_name, tenant_id=principal.tenant_id
+    )
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
+    return branch
+
+
+@router.post("/ontology-resources/{resource_type}/{resource_name}/branches/{branch_name}/draft")
+async def update_resource_branch_draft(
+    resource_type: str,
+    resource_name: str,
+    branch_name: str,
+    request: UpdateResourceBranchDraftRequest,
+    principal: Principal = Depends(core.current_principal),
+) -> dict:
+    _validate_resource_type(resource_type)
+    await _authorize_ontology_write(principal)
+    try:
+        return await ontology.update_resource_branch_draft(
+            core.pool,
+            resource_type=resource_type,
+            resource_name=resource_name,
+            branch_name=branch_name,
+            tenant_id=principal.tenant_id,
+            proposed_definition=request.proposed_definition,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ontology-resources/{resource_type}/{resource_name}/branches/{branch_name}/review")
+async def review_resource_branch(
+    resource_type: str,
+    resource_name: str,
+    branch_name: str,
+    request: ReviewBranchRequest,
+    principal: Principal = Depends(core.current_principal),
+) -> dict:
+    """The merge gate — workspace `approve` (admin-only), same tier as
+    `review_branch` (ObjectType's own version). `decision == "approved"`
+    calls straight through to the target registry's real `create_*`/
+    `update_*`, so every existing structural validation those functions
+    already do still applies unchanged.
+    """
+    _validate_resource_type(resource_type)
+    await _authorize_ontology_governance(principal)
+    try:
+        return await ontology.review_resource_branch(
+            core.pool,
+            resource_type=resource_type,
+            resource_name=resource_name,
+            branch_name=branch_name,
+            reviewer_urn=principal.urn,
+            decision=request.decision,
+            note=request.note,
+            tenant_id=principal.tenant_id,
+            workspace_id=core.WORKSPACE_ID,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ontology-resources/{resource_type}/{resource_name}/branches/{branch_name}/reviews")
+async def list_resource_branch_reviews(
+    resource_type: str, resource_name: str, branch_name: str, principal: Principal = Depends(core.current_principal)
+) -> list[dict]:
+    _validate_resource_type(resource_type)
+    branch = await ontology.get_resource_branch(
+        core.pool, resource_type=resource_type, resource_name=resource_name, branch_name=branch_name, tenant_id=principal.tenant_id
+    )
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
+    return await ontology.list_resource_branch_reviews(core.pool, branch["id"])
 
 
 @router.get("/query-log")
@@ -807,12 +1178,16 @@ async def list_actions(principal: Principal = Depends(core.current_principal)) -
         {
             "name": action_type["name"],
             "target_object_type": action_type["target_object_type"],
+            "target_interface": action_type.get("target_interface"),
             "required_permission": action_type["required_permission"],
             "risk_level": action_type["risk_level"],
             "description": action_type["description"],
             "function_side_effect": action_type.get("function_side_effect"),
             "writeback_dataset": action_type.get("writeback_dataset"),
             "parameters": action_type["parameters"],
+            "edits": action_type["edits"],
+            "edit_function": action_type.get("edit_function"),
+            "sections": action_type.get("sections", []),
         }
         for action_type in await ontology.list_action_types(core.pool, principal.tenant_id)
     ]
@@ -833,6 +1208,7 @@ class RelationTypeRequest(BaseModel):
     source_object_type: str
     target_object_type: str
     source_property: str
+    target_property: str
     cardinality: str
 
 
@@ -842,6 +1218,36 @@ async def list_relation_types(principal: Principal = Depends(core.current_princi
     instance data, so nothing for the PDP to check per-row.
     """
     return await ontology.list_relation_types(core.pool, principal.tenant_id)
+
+
+class UpdateRelationTypeRequest(BaseModel):
+    target_property: Optional[str] = None
+    cardinality: Optional[str] = None
+
+
+@router.put("/relation-types/{name}")
+async def update_relation_type(
+    name: str, request: UpdateRelationTypeRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """Source/target ObjectType and `source_property` aren't accepted
+    here — they're the structural identity of the link. See
+    `ontology/relation_types.py`'s `update_relation_type` docstring.
+    """
+    await _authorize_ontology_governance(principal)
+    urn = ontology.relation_type_urn(principal.tenant_id, core.WORKSPACE_ID, name)
+    if await ontology.get_relation_type(core.pool, urn) is None:
+        raise HTTPException(status_code=404, detail=f"unknown RelationType: {name}")
+    try:
+        return await ontology.update_relation_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            workspace_id=core.WORKSPACE_ID,
+            name=name,
+            target_property=request.target_property,
+            cardinality=request.cardinality,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/relation-types/{name}")
@@ -883,7 +1289,40 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
             source_object_type=request.source_object_type,
             target_object_type=request.target_object_type,
             source_property=request.source_property,
+            target_property=request.target_property,
             cardinality=request.cardinality,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class ObjectTypeGroupRequest(BaseModel):
+    name: str
+    description: str = ""
+    object_types: list[str] = []
+
+
+@router.post("/object-type-groups", status_code=201)
+async def create_object_type_group(
+    request: ObjectTypeGroupRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """A purely navigational registry — same governance tier as
+    Interfaces/Markings/Value Types, not its own permission concept.
+    """
+    await _authorize_ontology_governance(principal)
+    try:
+        return await ontology.create_object_type_group(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            workspace_id=core.WORKSPACE_ID,
+            name=request.name,
+            description=request.description,
+            object_types=request.object_types,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/object-type-groups")
+async def list_object_type_groups(principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    return await ontology.list_object_type_groups(core.pool, principal.tenant_id)

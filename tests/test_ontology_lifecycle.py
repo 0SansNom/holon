@@ -3,12 +3,14 @@ real, previously-flagged gap (no `knowledge.objecttype.published` event
 existed at all; ObjectTypes were only ever code-seeded, no runtime
 governance). Proves: a draft never affects the live definition every
 other read path uses until explicitly published; a partial update
-carries the unspecified field forward unchanged; publishing is
-governance-gated (workspace `approve`, same tier as RelationType
-creation) and emits the real event; re-publishing an already-published
-version is rejected; a published change survives a service restart
-(the real fix for `ensure_seeded`'s boot-time reseed, which would
-otherwise silently revert it). No real LLM calls.
+carries the unspecified field forward unchanged; proposing is
+`write`-gated (editor+) while publishing is governance-gated (workspace
+`approve`, same tier as RelationType creation) and emits the real event;
+re-publishing an already-published version is rejected; publishing an
+older draft than the live version is rejected (monotonicity); a
+published change survives a service restart (the real fix for
+`ensure_seeded`'s boot-time reseed, which would otherwise silently
+revert it). No real LLM calls.
 """
 
 from __future__ import annotations
@@ -37,9 +39,17 @@ def _token_for(principal_urn: str) -> str:
     pytest.fail(f"could not mint a token for {principal_urn}")
 
 
-def test_editor_cannot_propose_or_publish_a_version(jdoe_token: str) -> None:
+def test_editor_can_propose_but_cannot_publish_a_version(jdoe_token: str) -> None:
+    """Role separation: editors hold workspace `write` (draft/propose)
+    but not `approve` (publish) — same split branching already enforces.
+    """
+    status, draft = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=jdoe_token, body={"description": "editor draft"}
+    )
+    assert status == 201, draft
+
     status, body = _request(
-        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=jdoe_token, body={"description": "should be denied"}
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions/{draft['version']}/publish", token=jdoe_token
     )
     assert status == 403, body
     assert "rebac_denied" in body["detail"], body
@@ -105,6 +115,42 @@ def test_republishing_an_already_published_version_is_rejected(msmith_token: str
         "POST", f"{KNOWLEDGE}/ontology/Supplier/versions/{draft['version']}/publish", token=msmith_token
     )
     assert status == 400, second_publish
+
+
+def test_publishing_an_older_draft_than_live_is_rejected(msmith_token: str) -> None:
+    """Monotonicity: once live is at vN, publishing a still-open draft
+    with version ≤ N must fail loudly — not silently regress the schema.
+    """
+    status, older = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=msmith_token,
+        body={"description": f"older draft {time.time()}"},
+    )
+    assert status == 201, older
+
+    status, newer = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions", token=msmith_token,
+        body={"description": f"newer draft {time.time()}"},
+    )
+    assert status == 201, newer
+    assert newer["version"] > older["version"], (older, newer)
+
+    status, published = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions/{newer['version']}/publish", token=msmith_token
+    )
+    assert status == 200, published
+
+    status, live = _request("GET", f"{KNOWLEDGE}/ontology/Supplier", token=msmith_token)
+    assert live["version"] == newer["version"], live
+
+    status, regress = _request(
+        "POST", f"{KNOWLEDGE}/ontology/Supplier/versions/{older['version']}/publish", token=msmith_token
+    )
+    assert status == 400, regress
+    assert "live is already at version" in regress["detail"], regress
+
+    status, still_live = _request("GET", f"{KNOWLEDGE}/ontology/Supplier", token=msmith_token)
+    assert still_live["version"] == newer["version"], still_live
+    assert still_live["description"] == newer["description"], still_live
 
 
 def test_version_history_lists_every_proposed_version(msmith_token: str) -> None:

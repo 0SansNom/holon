@@ -8,6 +8,8 @@ are still the ones `routers/objects.py` knows how to traverse.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import asyncpg
 
 from .object_types import get_object_type
@@ -35,16 +37,25 @@ async def create_relation_type(
     source_object_type: str,
     target_object_type: str,
     source_property: str,
+    target_property: str,
     cardinality: str,
 ) -> dict:
     """Explicit cardinality and direction with existing endpoints
-    enforced here rather than merely true by
-    construction of the hardcoded `RELATION_TYPES` seed list. Definition
-    only: this does not wire the new relation into any traversal endpoint
-    (the three existing ones in `routers/objects.py` stay hand-written).
+    enforced here rather than merely true by construction of the
+    hardcoded `RELATION_TYPES` seed list. `target_property` names the
+    reverse-direction accessor (e.g. `Order.customer`'s `orders`) — a
+    real Link Type names both ends, not just the forward one; validated
+    here the same trust tier `source_property` already has (non-empty,
+    not deep-checked against the target's real properties). Definition
+    only beyond that: registering a relation doesn't wire it into
+    anything by itself — real traversal (`routers/objects/seeded.py`'s
+    instance graph and `/links/{link_name}` endpoint) reads this
+    registry live at request time instead.
     """
     if cardinality not in VALID_CARDINALITIES:
         raise ValueError(f"invalid cardinality: {cardinality!r} (must be one of {sorted(VALID_CARDINALITIES)})")
+    if not target_property:
+        raise ValueError("target_property is required — the reverse-direction accessor name")
 
     source_urn = object_type_urn(tenant_id, workspace_id, source_object_type)
     if await get_object_type(pool, source_urn) is None:
@@ -57,8 +68,8 @@ async def create_relation_type(
     urn = relation_type_urn(tenant_id, workspace_id, name)
     await pool.execute(
         """
-        INSERT INTO relation_type (urn, tenant_id, name, source_object_type_urn, target_object_type_urn, source_property, cardinality)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO relation_type (urn, tenant_id, name, source_object_type_urn, target_object_type_urn, source_property, target_property, cardinality)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """,
         urn,
         tenant_id,
@@ -66,6 +77,42 @@ async def create_relation_type(
         source_urn,
         target_urn,
         source_property,
+        target_property,
         cardinality,
+    )
+    return await get_relation_type(pool, urn)
+
+
+async def update_relation_type(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    name: str,
+    target_property: Optional[str] = None,
+    cardinality: Optional[str] = None,
+) -> dict:
+    """Partial update — source/target ObjectType and `source_property`
+    are deliberately not accepted params: they're the structural
+    identity of the link. Only the reverse-direction accessor name and
+    the declared cardinality are safe to adjust without breaking
+    anything that already resolved this relation. `None` means "leave
+    unchanged".
+    """
+    urn = relation_type_urn(tenant_id, workspace_id, name)
+    current = await get_relation_type(pool, urn)
+    if current is None:
+        raise ValueError(f"unknown RelationType: {name!r}")
+
+    new_target_property = current["target_property"] if target_property is None else target_property
+    new_cardinality = current["cardinality"] if cardinality is None else cardinality
+    if not new_target_property:
+        raise ValueError("target_property is required — the reverse-direction accessor name")
+    if new_cardinality not in VALID_CARDINALITIES:
+        raise ValueError(f"invalid cardinality: {new_cardinality!r} (must be one of {sorted(VALID_CARDINALITIES)})")
+
+    await pool.execute(
+        "UPDATE relation_type SET target_property = $1, cardinality = $2 WHERE urn = $3",
+        new_target_property, new_cardinality, urn,
     )
     return await get_relation_type(pool, urn)

@@ -6,3 +6,31 @@ export const INTELLIGENCE_URL = import.meta.env.VITE_INTELLIGENCE_URL ?? "http:/
 
 export const TENANT_ID = import.meta.env.VITE_TENANT_ID ?? "acme";
 export const WORKSPACE_ID = import.meta.env.VITE_WORKSPACE_ID ?? "demo";
+
+export function validateConfig(): { isDevFallback: boolean; missingVars: string[] } {
+  const missingVars: string[] = [];
+  const envKeys = [
+    "VITE_IDENTITY_URL",
+    "VITE_CONNECTIVITY_URL",
+    "VITE_KNOWLEDGE_URL",
+    "VITE_EXPERIENCE_URL",
+    "VITE_INTELLIGENCE_URL",
+    "VITE_TENANT_ID",
+    "VITE_WORKSPACE_ID",
+  ];
+
+  for (const key of envKeys) {
+    if (!import.meta.env[key]) {
+      missingVars.push(key);
+    }
+  }
+
+  const isDevFallback = missingVars.length > 0;
+  if (isDevFallback && import.meta.env.PROD) {
+    console.error("[Config Warning] Running in production mode with default fallback values for:", missingVars);
+  }
+
+  return { isDevFallback, missingVars };
+}
+
+validateConfig();

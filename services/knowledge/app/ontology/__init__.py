@@ -44,6 +44,7 @@ from .object_types import (
     SUPPLIER_PROPERTY_MAPPING,
     SUPPORT_TICKET_PROPERTY_MAPPING,
     create_object_type,
+    delete_object_type,
     ensure_schema,
     ensure_seeded,
     get_object_type,
@@ -54,15 +55,36 @@ from .object_types import (
     list_object_types,
     upsert_property_classification,
 )
-from .interfaces import create_interface_type, get_interface_type, list_interface_types
+from .interfaces import create_interface_type, get_interface_type, list_interface_types, update_interface_type
 from .markings import create_marking, get_instance_markings_bulk, get_marking, list_markings, set_instance_markings
-from .value_types import create_value_type, get_value_type, list_value_types, validate_value
-from .shared_property_types import create_shared_property_type, get_shared_property_type, list_shared_property_types
+from .value_types import create_value_type, get_value_type, list_value_types, update_value_type, validate_value
+from .shared_property_types import (
+    create_shared_property_type,
+    get_shared_property_type,
+    list_shared_property_types,
+    update_shared_property_type,
+)
 from .action_types import create_action_type, get_action_type, list_action_types
 from .publishing import propose_object_type_version, publish_object_type_version
 from .branching import create_branch, get_branch, list_branch_reviews, list_branches, review_branch, update_branch_draft
-from .relation_types import VALID_CARDINALITIES, create_relation_type, get_relation_type, list_relation_types
+from .relation_types import (
+    VALID_CARDINALITIES,
+    create_relation_type,
+    get_relation_type,
+    list_relation_types,
+    update_relation_type,
+)
+from .object_type_groups import create_object_type_group, get_object_type_group, list_object_type_groups
 from .authz_seed import ensure_authz_seeded
+from .resource_branching import (
+    ALLOWED_RESOURCE_TYPES,
+    create_resource_branch,
+    get_resource_branch,
+    list_resource_branch_reviews,
+    list_resource_branches,
+    review_resource_branch,
+    update_resource_branch_draft,
+)
 
 __all__ = [
     "CUSTOMER_PROPERTY_MAPPING",
@@ -87,6 +109,7 @@ __all__ = [
     "ensure_schema",
     "ensure_seeded",
     "create_object_type",
+    "delete_object_type",
     "get_object_type_by_dataset",
     "get_object_type",
     "list_object_type_versions",
@@ -94,6 +117,7 @@ __all__ = [
     "create_interface_type",
     "get_interface_type",
     "list_interface_types",
+    "update_interface_type",
     "create_marking",
     "get_marking",
     "list_markings",
@@ -102,10 +126,12 @@ __all__ = [
     "create_value_type",
     "get_value_type",
     "list_value_types",
+    "update_value_type",
     "validate_value",
     "create_shared_property_type",
     "get_shared_property_type",
     "list_shared_property_types",
+    "update_shared_property_type",
     "create_action_type",
     "get_action_type",
     "list_action_types",
@@ -123,5 +149,16 @@ __all__ = [
     "list_object_types",
     "list_relation_types",
     "create_relation_type",
+    "update_relation_type",
+    "create_object_type_group",
+    "get_object_type_group",
+    "list_object_type_groups",
     "ensure_authz_seeded",
+    "ALLOWED_RESOURCE_TYPES",
+    "create_resource_branch",
+    "get_resource_branch",
+    "list_resource_branches",
+    "update_resource_branch_draft",
+    "review_resource_branch",
+    "list_resource_branch_reviews",
 ]

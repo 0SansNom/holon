@@ -1,0 +1,412 @@
+// `numeric`'s fields are named to match JS `Intl.NumberFormat` options
+// exactly (see `PropertyFormat.tsx`) — same names `knowledge`'s
+// `_validate_property_formats` validates server-side, no translation
+// layer needed on either side.
+export type PropertyFormatRule =
+  | { kind: "currency"; currency: string }
+  | { kind: "badge"; colors: Record<string, string> }
+  | {
+      kind: "numeric";
+      style?: "decimal" | "currency" | "percent" | "unit";
+      currency?: string;
+      unit?: string;
+      prefix?: string;
+      suffix?: string;
+      useGrouping?: boolean;
+      notation?: "standard" | "compact" | "scientific" | "engineering";
+      minimumFractionDigits?: number;
+      maximumFractionDigits?: number;
+      minimumSignificantDigits?: number;
+      maximumSignificantDigits?: number;
+      minimumIntegerDigits?: number;
+    }
+  | { kind: "datetime"; style: "date" | "datetime-long" | "datetime-short" | "iso8601" | "relative" | "time"; timezone?: string }
+  | { kind: "principal" }
+  | { kind: "resource-link"; resourceType: "object-type" | "application" };
+
+// Conditional formatting — a sibling concept to PropertyFormatRule above,
+// not a `style` folded into it: this styles a value already rendered by
+// FormattedValue, rather than controlling the value's own textual form.
+export type ConditionalFormatCondition =
+  | { type: "always" }
+  | { type: "is-null" }
+  | { type: "string-equals" | "string-contains" | "string-starts-with"; value: string; caseSensitive?: boolean }
+  | { type: "number-range"; min?: number; max?: number }
+  | { type: "number-equals"; value: number };
+
+export interface ConditionalFormatStyle {
+  color?: string;
+  backgroundColor?: string;
+  textAlign?: "left" | "center" | "right";
+}
+
+export interface ConditionalFormatRule {
+  condition: ConditionalFormatCondition;
+  compareTo?: { kind: "property"; property: string };
+  style: ConditionalFormatStyle;
+}
+
+// A leaf/struct/array declaration — one level of struct/array nesting
+// only, the same limit `ontology/publishing.py`'s `_validate_property_types`
+// enforces server-side (a struct's own properties, or an array's
+// element, may only ever be a `value_type`/`shared_property_type` leaf).
+type PropertyTypeLeaf =
+  | { kind: "value_type"; value_type: string }
+  | { kind: "shared_property_type"; shared_property_type: string };
+
+// `editable`/`required` (property control) only ever apply at this
+// top level — never inside a nested `struct.properties`/`array.element`
+// entry, which stays a plain `PropertyTypeLeaf`.
+export type PropertyTypeRule = { editable?: boolean; required?: boolean } & (
+  | PropertyTypeLeaf
+  | { kind: "struct"; properties: Record<string, PropertyTypeLeaf> }
+  | { kind: "array"; element: PropertyTypeLeaf }
+);
+
+// A derived property is either a Function plugin name (string) or a
+// Foundry-style reducer over a RelationType — `relation` matches the
+// same forward-local-name-or-target_property convention the `/links`
+// endpoint resolves server-side; `property` names a property on the
+// *related* ObjectType and is required unless `aggregate` is "count".
+export interface DerivedPropertyLinkAggregate {
+  kind: "link_aggregate";
+  relation: string;
+  aggregate: "sum" | "count" | "avg" | "min" | "max";
+  property?: string;
+}
+
+// A reducer over one of *this* ObjectType's own array properties
+// (struct array or scalar array) — `property` must be an `array`-kind
+// `property_types` entry; `by` names the struct field to compare for
+// latest/earliest/max/min, and must be absent for a scalar array
+// (the raw values are compared directly).
+export interface DerivedPropertyStructReducer {
+  kind: "struct_reducer";
+  property: string;
+  reducer: "first" | "last" | "latest" | "earliest" | "max" | "min";
+  by?: string;
+}
+
+export type DerivedPropertyValue = string | DerivedPropertyLinkAggregate | DerivedPropertyStructReducer;
+
+export interface ObjectType {
+  urn: string;
+  tenant_id: string;
+  name: string;
+  source_dataset_urn: string;
+  property_mapping: Record<string, string>;
+  property_formats: Record<string, PropertyFormatRule>;
+  conditional_formats?: Record<string, ConditionalFormatRule[]>;
+  property_types?: Record<string, PropertyTypeRule>;
+  implements?: string[];
+  derived_properties?: Record<string, DerivedPropertyValue>;
+  markings?: string[];
+  classification: "public" | "internal" | "confidential" | "restricted";
+  description: string;
+  version: number;
+  created_at: string;
+  column_classification?: Record<string, string>;
+  project_urn?: string | null;
+}
+
+export type ValueTypeBaseType =
+  | "string"
+  | "integer"
+  | "double"
+  | "boolean"
+  | "date"
+  | "timestamp"
+  | "short"
+  | "byte"
+  | "long"
+  | "decimal"
+  | "float"
+  | "geopoint"
+  | "geoshape"
+  | "vector";
+
+export type ValueTypeConstraint =
+  | { kind: "enum"; values: (string | number)[]; caseSensitive?: boolean }
+  | { kind: "range"; min?: number; max?: number }
+  | { kind: "rid" }
+  | { kind: "uuid" };
+
+export interface ValueType {
+  tenant_id: string;
+  name: string;
+  base_type: ValueTypeBaseType;
+  format_regex: string | null;
+  constraints: ValueTypeConstraint[];
+  description: string;
+  created_at: string;
+}
+
+export interface SharedPropertyType {
+  tenant_id: string;
+  api_name: string;
+  display_name: string;
+  value_type: string;
+  description: string;
+  created_at: string;
+}
+
+export interface ActionParameter {
+  name: string;
+  required: boolean;
+  // Omitted (undefined) means "value_type", the original/default shape —
+  // same omittable-discriminator convention `property_types`/
+  // `derived_properties` already use.
+  kind?: "value_type" | "object_reference";
+  value_type?: string;
+  object_type?: string;
+}
+
+export interface ActionEdit {
+  property: string;
+  source: "parameter" | "literal";
+  parameter_name?: string;
+  value?: unknown;
+}
+
+export interface SubmissionCriterion {
+  property: string;
+  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte";
+  value: unknown;
+}
+
+// Configure/Sections: a purely-display grouping of an Action Type's
+// parameters in the invocation form (Foundry's "Sections") — never
+// affects what gets submitted. A parameter not named in any section
+// renders ungrouped, same as before this existed.
+export interface ActionParameterSection {
+  name: string;
+  parameter_names: string[];
+}
+
+export interface ActionType {
+  tenant_id: string;
+  name: string;
+  // Exactly one of these two is ever set — an Action Type targets either
+  // one ObjectType or one Interface (Actions on interfaces), never both.
+  target_object_type: string | null;
+  target_interface?: string | null;
+  required_permission: string;
+  risk_level: "low" | "high";
+  description: string;
+  parameters: ActionParameter[];
+  edits: ActionEdit[];
+  submission_criteria: SubmissionCriterion[];
+  function_side_effect: string | null;
+  writeback_dataset: string | null;
+  // Function-backed Actions: mutually exclusive with a non-empty `edits`
+  // — the named Function plugin's return value becomes the applied
+  // edits, instead of a fixed declaration.
+  edit_function?: string | null;
+  sections?: ActionParameterSection[];
+  created_at: string;
+}
+
+export interface InterfaceType {
+  tenant_id: string;
+  name: string;
+  required_properties: string[];
+  required_actions: string[];
+  description: string;
+  created_at: string;
+}
+
+export interface Marking {
+  tenant_id: string;
+  name: string;
+  description: string;
+  created_at: string;
+}
+
+export interface ObjectTypeVersion {
+  id: number;
+  object_type_urn: string;
+  tenant_id: string;
+  version: number;
+  property_mapping: Record<string, string>;
+  description: string;
+  status: "draft" | "published";
+  created_at: string;
+  published_at: string | null;
+  implements: string[];
+  derived_properties: Record<string, DerivedPropertyValue>;
+  project_urn: string | null;
+  markings: string[];
+  property_formats: Record<string, PropertyFormatRule>;
+  conditional_formats: Record<string, ConditionalFormatRule[]>;
+  property_types: Record<string, PropertyTypeRule>;
+}
+
+// The `ontology_branch` table backs both the ObjectType-specific branch
+// flow (`object_type_urn`/`version` set, `resource_type` defaults to
+// 'object_type', `resource_name`/`proposed_definition` null) and the
+// generic 4-registry flow (`resource_type`/`resource_name`/
+// `proposed_definition` set, `object_type_urn`/`version` null) — see
+// `ontology/resource_branching.py`'s module docstring. One flat type
+// mirrors the raw row rather than forcing a discriminated union neither
+// backend shape actually needs.
+export interface Branch {
+  id: number;
+  tenant_id: string;
+  branch_name: string;
+  status: "open" | "merged";
+  created_by_urn: string;
+  created_at: string;
+  object_type_urn: string | null;
+  version: number | null;
+  resource_type: string | null;
+  resource_name: string | null;
+  proposed_definition: string | null;
+}
+
+export interface BranchReview {
+  id: number;
+  branch_id: number;
+  tenant_id: string;
+  reviewer_urn: string;
+  decision: "approved" | "changes_requested";
+  note: string | null;
+  decided_at: string;
+}
+
+export type ResourceBranchKind = "interface_type" | "relation_type" | "value_type" | "shared_property_type" | "action_type";
+
+// Internal — used only within api.ts to type branch creation/update bodies.
+export interface ObjectTypeBranchFields {
+  property_mapping?: Record<string, string>;
+  description?: string;
+  implements?: string[];
+  derived_properties?: Record<string, DerivedPropertyValue>;
+  project_urn?: string;
+  markings?: string[];
+  property_formats?: Record<string, PropertyFormatRule>;
+  conditional_formats?: Record<string, ConditionalFormatRule[]>;
+  property_types?: Record<string, PropertyTypeRule>;
+}
+
+export interface ActionDefinition {
+  name: string;
+  target_object_type: string | null;
+  target_interface?: string | null;
+  required_permission: string;
+  risk_level: "low" | "high";
+  description: string;
+  function_side_effect?: string | null;
+  writeback_dataset?: string | null;
+  // Only ever present for a declarative Action Type — the two hardcoded
+  // Customer Actions never carry this key at all (see `libs/holon_osdk/
+  // schema.py`'s `is_declarative` detection, which relies on exactly
+  // this presence-vs-absence distinction).
+  parameters?: ActionParameter[];
+  edits?: ActionEdit[];
+  // Function-backed Actions: mutually exclusive with a non-empty `edits`
+  // — the named Function plugin's return value becomes the applied
+  // edits, instead of a fixed declaration.
+  edit_function?: string | null;
+  sections?: ActionParameterSection[];
+}
+
+export interface LineageEdge {
+  source_urn: string;
+  target_urn: string;
+  relation: string;
+  source_column: string;
+  target_property: string;
+}
+
+export interface SearchResult {
+  total: number;
+  results: Array<{
+    urn: string;
+    object_type: string;
+    tenant_id: string;
+    classification: string;
+    text: string;
+  }>;
+  facets: Record<string, number>;
+}
+
+export interface GlossaryTerm {
+  term: string;
+  definition: string;
+  synonyms: string[];
+  related_object_type_urn: string | null;
+}
+
+export interface InstanceGraphNode {
+  id: string;
+  objectType: string;
+  instanceId: string | number;
+  label: string;
+  hop: number;
+  degraded: boolean;
+  maskedFields: string[];
+}
+
+export interface InstanceGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  direction: "toward_one" | "toward_many";
+}
+
+export interface InstanceGraph {
+  root: string;
+  nodes: InstanceGraphNode[];
+  edges: InstanceGraphEdge[];
+  truncated: boolean;
+}
+
+export interface RelationType {
+  urn: string;
+  name: string;
+  source_object_type_urn: string;
+  target_object_type_urn: string;
+  source_property: string;
+  target_property: string;
+  cardinality: string;
+}
+
+export interface TimelineEvent {
+  kind: "invoked" | "requested" | "rejected" | "expired";
+  action_name: string;
+  actor_urn: string | null;
+  reason: string;
+  at: string;
+  id: number | null;
+  has_edits: boolean;
+  revertible: boolean;
+  reverted: boolean;
+}
+
+export interface ObjectLinksResponse {
+  relation: string;
+  direction: "toward_one" | "toward_many" | null;
+  cardinality: string;
+  items: Array<Record<string, unknown>>;
+}
+
+export interface ObjectTypeGroup {
+  tenant_id: string;
+  name: string;
+  description: string;
+  object_types: string[];
+  created_at: string;
+}
+
+export interface DatasetPreviewColumn {
+  name: string;
+  sample: unknown;
+}
+
+export interface HealthCheckFinding {
+  kind: "action_sprawl" | "god_object" | "misnomer_property" | "misnomer_type" | "dry_duplication" | "time_machine";
+  object_type: string;
+  severity: "warning";
+  detail: string;
+}

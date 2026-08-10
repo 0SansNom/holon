@@ -113,3 +113,15 @@ def test_invalid_relation_is_rejected(msmith_token: str) -> None:
     )
     assert status == 400, body
     assert "relation" in body["detail"], body
+
+
+def test_grant_to_unknown_principal_is_rejected(msmith_token: str) -> None:
+    unknown_urn = f"hl:{TENANT_ID}:global:user:does-not-exist"
+    status, body = _request(
+        "POST",
+        f"{IDENTITY}/principals/{unknown_urn}/access/grant",
+        token=msmith_token,
+        body={"relation": "viewer"},
+    )
+    assert status == 404, body
+    assert "unknown principal" in body["detail"], body

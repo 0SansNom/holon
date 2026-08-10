@@ -1,25 +1,32 @@
-import { H3, Tab, Tabs } from "@blueprintjs/core";
+import { Suspense, useState } from "react";
+import { Tab, Tabs, type TabId } from "@blueprintjs/core";
 import { PrincipalsTab } from "./PrincipalsTab";
 import { ProjectsTab } from "./ProjectsTab";
+import { usePaletteIntentStore } from "../../store/paletteIntent";
+import { RegistryPage } from "../common/PageLayout";
+import { RegistryTabSkeleton } from "../common/Skeleton";
 
-// self-service admin UI for principal/workspace/project
-// management — every endpoint this renders (`GET /principals`,
-// `POST /principals/{urn}/access/*`, the Project CRUD/access endpoints
-// from Phase B.1) has been API-only since it was built; this is the
-// frontend catching up, not a new backend capability.
+const TAB_SKELETON = <RegistryTabSkeleton />;
+
 export function AdminPage() {
+  const intent = usePaletteIntentStore((s) => s.intent);
+  const [selectedTabId, setSelectedTabId] = useState<TabId>(() => (intent === "create-project" ? "projects" : "principals"));
+
   return (
-    <div>
-      <H3>Admin</H3>
-      <p style={{ color: "var(--hl-text-muted)", marginBottom: 20 }}>
-        Principal, workspace, and project access management — the same governance actions the CLI's{" "}
-        <code>holon principals</code>/<code>holon workspace</code>/<code>holon projects</code> commands wrap,
-        here as a self-service UI.
-      </p>
-      <Tabs id="admin-tabs" renderActiveTabPanelOnly>
-        <Tab id="principals" title="Principals" panel={<PrincipalsTab />} />
-        <Tab id="projects" title="Projects" panel={<ProjectsTab />} />
+    <RegistryPage
+      title="Admin"
+      description={
+        <>
+          Principal, workspace, and project access management — the same governance actions the CLI's{" "}
+          <code>holon principals</code>/<code>holon workspace</code>/<code>holon projects</code> commands wrap,
+          here as a self-service UI.
+        </>
+      }
+    >
+      <Tabs id="admin-tabs" selectedTabId={selectedTabId} onChange={setSelectedTabId} renderActiveTabPanelOnly>
+        <Tab id="principals" title="Principals" panel={<Suspense fallback={TAB_SKELETON}><PrincipalsTab /></Suspense>} />
+        <Tab id="projects" title="Projects" panel={<Suspense fallback={TAB_SKELETON}><ProjectsTab /></Suspense>} />
       </Tabs>
-    </div>
+    </RegistryPage>
   );
 }

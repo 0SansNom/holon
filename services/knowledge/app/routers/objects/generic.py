@@ -27,7 +27,8 @@ from holon_common import Principal
 
 from ... import ontology, resolver
 from ... import core
-from ...actions import request_generic_action
+from ...actions import request_generic_action, revert_declarative_action
+from ...actions.declarative import _object_type_and_instance_id_from_instance_urn
 
 router = APIRouter()
 
@@ -121,11 +122,26 @@ async def invoke_generic_action(
     happen inside `actions.request_generic_action` before anything is
     requested or applied, so a bad call never reaches a 500.
     """
-    definition = await _generic_object_type_or_404(object_type, principal)
+    # Deliberately not `_generic_object_type_or_404` — that helper exists
+    # to keep this router's own generic list/get routes from shadowing
+    # `seeded.py`'s specific ones, and rejects every seeded type name for
+    # that reason. Action invocation isn't split seeded-vs-generic like
+    # reads are (this is the *only* route for any declarative Action,
+    # confirmed via `routers/objects/__init__.py`'s own docstring — the
+    # two hardcoded Customer actions are the sole exception, via their
+    # own literal routes in `routers/actions.py`), so a declarative
+    # Action Type targeting a seeded ObjectType was unreachable here
+    # before this fix — `core._object_type_urn_for` is the
+    # seeded-or-self-serve-agnostic resolver every other cross-cutting
+    # route (e.g. the revert endpoint below) already uses instead.
+    try:
+        object_type_urn = await core._object_type_urn_for(object_type)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
     action_type = await ontology.get_action_type(core.pool, principal.tenant_id, action_name)
     if action_type is None:
         raise HTTPException(status_code=404, detail=f"unknown Action Type: {action_name}")
-    await core._authorize_object_type(principal, definition["urn"], action_type["required_permission"])
+    await core._authorize_object_type(principal, object_type_urn, action_type["required_permission"])
     try:
         return await request_generic_action(
             core.pool,
@@ -138,6 +154,43 @@ async def invoke_generic_action(
             reason=request.reason,
             parameters=request.parameters,
             ttl_seconds=request.ttl_seconds,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/action-invocations/{invocation_id}/revert")
+async def revert_action_invocation(invocation_id: int, principal: Principal = Depends(core.current_principal)) -> dict:
+    """The backing endpoint for a Timeline "Undo" button — a
+    user-initiated single-invocation revert, not a saga compensator (see
+    `revert_declarative_action`'s own docstring for that distinction).
+    Loads the invocation first since its ObjectType (and so its
+    permission tier) isn't in the URL — `core._object_type_urn_for` is
+    used rather than `_generic_object_type_or_404` because a declarative
+    Action can target *any* ObjectType, seeded or self-serve, unlike
+    every other route in this file which only ever serves the self-serve
+    half.
+    """
+    row = await core.pool.fetchrow(
+        "SELECT action_name, instance_urn FROM action_invocation WHERE id = $1 AND tenant_id = $2",
+        invocation_id, principal.tenant_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"action invocation {invocation_id} not found")
+    object_type, _ = _object_type_and_instance_id_from_instance_urn(row["instance_urn"])
+    try:
+        object_type_urn = await core._object_type_urn_for(object_type)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
+    action_type = await ontology.get_action_type(core.pool, principal.tenant_id, row["action_name"])
+    required_permission = action_type["required_permission"] if action_type else "write"
+    await core._authorize_object_type(principal, object_type_urn, required_permission)
+    try:
+        return await revert_declarative_action(
+            core.pool, invocation_id=invocation_id, tenant_id=principal.tenant_id,
+            workspace_id=core.WORKSPACE_ID, actor=principal,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

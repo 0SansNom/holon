@@ -46,10 +46,22 @@ async def _validate_markings(pool: asyncpg.Pool, *, tenant_id: str, markings: li
     grant side, `_authorize_markings` checking SpiceDB
     `marking:{name}#hold`, meaningless — a principal could never hold a
     marking that was never registered for anyone to be granted).
+
+    Uses a single `ANY()` query rather than N sequential SELECTs so that
+    publishing with several markings doesn't become N round-trips. Also
+    reports *all* unknown markings at once rather than stopping at the
+    first one — better UX for a caller fixing multiple errors.
     """
-    for name in markings:
-        if await get_marking(pool, tenant_id, name) is None:
-            raise ValueError(f"unknown marking: {name!r}")
+    if not markings:
+        return
+    rows = await pool.fetch(
+        "SELECT name FROM marking WHERE tenant_id = $1 AND name = ANY($2::text[])",
+        tenant_id, markings,
+    )
+    found = {row["name"] for row in rows}
+    missing = [m for m in markings if m not in found]
+    if missing:
+        raise ValueError(f"unknown marking{'s' if len(missing) > 1 else ''}: {missing!r}")
 
 
 async def set_instance_markings(

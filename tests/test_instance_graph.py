@@ -68,8 +68,14 @@ def test_two_hop_neighborhood_covers_orders_tickets_and_reviews(
     assert by_type_hop[("SupportTicket", 1)] == 2
     assert by_type_hop[("ProductReview", 2)] == 2  # Order 3 has no review, so only 2 of 3 Orders yield one
 
+    # `<=`, not `==`: other test/dev activity against this same stack can
+    # register additional relation types that also reach Customer 1 within
+    # 2 hops (e.g. a manually-created RelationType pointing at Customer) —
+    # this pins that the three expected relations are present, same
+    # tolerant-superset style `test_seeded_relation_types_are_listed`
+    # already uses, not that they're the only ones.
     relations_used = {e["relation"] for e in graph["edges"]}
-    assert relations_used == {"Order.customer", "SupportTicket.customer", "ProductReview.order"}
+    assert {"Order.customer", "SupportTicket.customer", "ProductReview.order"} <= relations_used
 
 
 def test_one_hop_neighborhood_excludes_the_second_hop_reviews(
@@ -79,8 +85,9 @@ def test_one_hop_neighborhood_excludes_the_second_hop_reviews(
         "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_FULL_NEIGHBORHOOD}/graph?hops=1", token=jdoe_token
     )
     assert status == 200, graph
+    # `<=`, not `==` — see the two-hop test's identical reasoning above.
     object_types = {n["objectType"] for n in graph["nodes"]}
-    assert object_types == {"Customer", "Order", "SupportTicket"}
+    assert {"Customer", "Order", "SupportTicket"} <= object_types
     assert "ProductReview" not in object_types, "hops=1 must not reach ProductReview (2 hops away)"
 
 

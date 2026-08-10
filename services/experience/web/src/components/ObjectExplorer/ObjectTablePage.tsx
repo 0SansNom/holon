@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
-import { Button, H3, HTMLSelect, Icon, InputGroup, Spinner, Tag } from "@blueprintjs/core";
+import { Button, HTMLSelect, Icon, InputGroup, Tag } from "@blueprintjs/core";
 import {
   useReactTable,
   getCoreRowModel,
@@ -11,12 +11,14 @@ import {
   createColumnHelper,
   type SortingState,
 } from "@tanstack/react-table";
-import { useObjectType, useObjects } from "../../api/hooks";
-import { camelToSnake, FormattedValue } from "../common/PropertyFormat";
-import { PageBreadcrumbs } from "../common/PageBreadcrumbs";
-import type { PropertyFormatRule } from "../../api/knowledge";
-
-const METADATA_KEYS = new Set(["materializedAt", "sourceLagSeconds", "degraded", "_maskedFields"]);
+import { useObjectType, useObjects, usePrincipals, useActions, useValueTypes, useInvokeAction } from "../../api/hooks";
+import { FormattedValue } from "../common/PropertyFormat";
+import { applyConditionalStyle, camelToSnake } from "../common/propertyFormatUtils";
+import { DetailPage } from "../common/PageLayout";
+import type { PropertyFormatRule, ConditionalFormatRule } from "../../api/knowledge";
+import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
+import { OBJECT_METADATA_KEYS, computeInlineEditableActions } from "./objectExplorerUtils";
+import { InlineEditableCell } from "./InlineEditableCell";
 
 type Row = Record<string, unknown>;
 
@@ -24,14 +26,20 @@ export function ObjectTablePage() {
   const { type } = useParams({ from: "/shell/objects/$type" });
   const navigate = useNavigate();
   const { data: objectType } = useObjectType(type);
-  const { data: rows, isLoading, error } = useObjects(type);
+  const { data: rows } = useObjects(type);
+  const { data: principals } = usePrincipals();
+  const { data: allActions = [] } = useActions();
+  const { data: valueTypes = [] } = useValueTypes();
+  const invokeAction = useInvokeAction(type);
 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
 
-  // property_formats is keyed by ontology camelCase property names;
-  // row data uses raw source column names — index by the converted key
-  // once so each cell render doesn't redo the lookup.
+  const inlineEditableBySourceKey = useMemo(
+    () => computeInlineEditableActions(type, objectType?.implements ?? [], allActions),
+    [type, objectType, allActions],
+  );
+
   const formatsBySourceKey = useMemo(() => {
     const map = new Map<string, PropertyFormatRule>();
     Object.entries(objectType?.property_formats ?? {}).forEach(([property, rule]) => {
@@ -40,23 +48,60 @@ export function ObjectTablePage() {
     return map;
   }, [objectType]);
 
+  const conditionalFormatsBySourceKey = useMemo(() => {
+    const map = new Map<string, ConditionalFormatRule[]>();
+    Object.entries(objectType?.conditional_formats ?? {}).forEach(([property, rules]) => {
+      map.set(camelToSnake(property), rules);
+    });
+    return map;
+  }, [objectType]);
+
+  const principalsByUrn = useMemo(() => {
+    const map = new Map<string, string>();
+    (principals ?? []).forEach((p) => map.set(p.urn, p.display_name));
+    return map;
+  }, [principals]);
+
   const columns = useMemo(() => {
     const helper = createColumnHelper<Row>();
     const first = rows?.[0];
-    const keys = first ? Object.keys(first).filter((k) => !METADATA_KEYS.has(k)) : [];
-    return keys.map((key) =>
-      helper.accessor((row) => row[key], {
+    const keys = first ? Object.keys(first).filter((k) => !OBJECT_METADATA_KEYS.has(k)) : [];
+    return keys.map((key) => {
+      const inlineAction = inlineEditableBySourceKey.get(key);
+      const inlineParameterBaseType = inlineAction
+        ? valueTypes.find((vt) => vt.name === inlineAction.parameters?.[0]?.value_type)?.base_type
+        : undefined;
+      return helper.accessor((row) => row[key], {
         id: key,
         header: key,
         cell: (info) => {
           const row = info.row.original;
           const masked = Array.isArray(row._maskedFields) && (row._maskedFields as string[]).includes(key);
           if (masked) return <span className="hl-masked-field">forbidden — masked</span>;
-          return <FormattedValue rule={formatsBySourceKey.get(key)} value={info.getValue()} />;
+          if (inlineAction) {
+            return (
+              <InlineEditableCell
+                value={info.getValue()}
+                action={inlineAction}
+                baseType={inlineParameterBaseType}
+                onSubmit={(value) => {
+                  const parameterName = inlineAction.parameters?.[0]?.name;
+                  if (!parameterName) return;
+                  void invokeAction.mutateAsync({
+                    id: row.id as string | number,
+                    actionName: inlineAction.name,
+                    reason: "Inline edit",
+                    parameters: { [parameterName]: value },
+                  });
+                }}
+              />
+            );
+          }
+          return <FormattedValue rule={formatsBySourceKey.get(key)} value={info.getValue()} principalsByUrn={principalsByUrn} />;
         },
-      }),
-    );
-  }, [rows, formatsBySourceKey]);
+      });
+    });
+  }, [rows, formatsBySourceKey, principalsByUrn, inlineEditableBySourceKey, valueTypes, invokeAction]);
 
   const table = useReactTable({
     data: rows ?? [],
@@ -71,61 +116,42 @@ export function ObjectTablePage() {
     initialState: { pagination: { pageSize: 25 } },
   });
 
-  if (isLoading) return <Spinner />;
-  if (error) return <p style={{ color: "var(--hl-danger)" }}>{(error as Error).message}</p>;
-
   return (
-    <div>
-      <PageBreadcrumbs items={[{ label: "Objects", to: "/objects" }, { label: type }]} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
-        <H3 style={{ margin: 0 }}>{type}</H3>
+    <DetailPage
+      breadcrumbs={[{ label: "Objects", to: "/objects" }, { label: type }]}
+      title={type}
+      description={objectType?.description}
+      actions={
         <Button
           icon="diagram-tree"
-          onClick={() => void navigate({ to: "/lineage/$urn", params: { urn: `hl:acme:demo:object-type:${type}` } })}
+          onClick={() => void navigate({ to: "/lineage/$urn", params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` } })}
         >
           View lineage
         </Button>
-      </div>
-      {objectType && <p style={{ color: "var(--hl-text-muted)", marginTop: 8, marginBottom: 16 }}>{objectType.description}</p>}
+      }
+    >
       <InputGroup
         leftIcon="filter"
         placeholder="Filter rows..."
         value={globalFilter}
         onChange={(e) => table.setGlobalFilter(e.target.value)}
-        style={{ marginBottom: 12, maxWidth: 320 }}
+        className="hl-mb-md hl-filter-input"
       />
-      <style>{`.hl-object-row:hover { background: var(--hl-accent-soft); }`}</style>
-      <div className="hl-panel" style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+      <div className="hl-panel hl-table-scroll">
+        <table className="hl-data-table">
           <thead>
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
                 {hg.headers.map((header) => {
                   const sortDirection = header.column.getIsSorted();
                   return (
-                    <th
-                      key={header.id}
-                      onClick={header.column.getToggleSortingHandler()}
-                      style={{
-                        textAlign: "left",
-                        padding: "8px 12px",
-                        borderBottom: "1px solid var(--hl-border)",
-                        color: "var(--hl-text-muted)",
-                        fontWeight: 500,
-                        fontSize: 11,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.03em",
-                        cursor: "pointer",
-                        userSelect: "none",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
+                    <th key={header.id} onClick={header.column.getToggleSortingHandler()}>
                       {flexRender(header.column.columnDef.header, header.getContext())}
                       {sortDirection && (
                         <Icon
                           icon={sortDirection === "asc" ? "caret-up" : "caret-down"}
                           size={12}
-                          style={{ marginLeft: 4, verticalAlign: "text-bottom" }}
+                          className="hl-sort-icon"
                         />
                       )}
                     </th>
@@ -140,12 +166,15 @@ export function ObjectTablePage() {
               return (
                 <tr
                   key={row.id}
-                  className="hl-object-row"
+                  className="hl-data-table-row hl-object-row"
                   onClick={() => void navigate({ to: "/objects/$type/$id", params: { type, id: String(id) } })}
-                  style={{ borderBottom: "1px solid var(--hl-border)", cursor: "pointer" }}
                 >
                   {row.getVisibleCells().map((cell, idx) => (
-                    <td key={cell.id} style={{ padding: "8px 12px", color: idx === 0 ? "var(--hl-accent)" : undefined }}>
+                    <td
+                      key={cell.id}
+                      className={idx === 0 ? "hl-link-accent" : undefined}
+                      style={applyConditionalStyle(conditionalFormatsBySourceKey.get(cell.column.id), row.original, cell.getValue())}
+                    >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
                   ))}
@@ -154,9 +183,9 @@ export function ObjectTablePage() {
             })}
           </tbody>
         </table>
-        {rows?.length === 0 && <p style={{ color: "var(--hl-text-muted)", padding: 12 }}>No instances found.</p>}
+        {rows?.length === 0 && <p className="hl-data-table-empty">No instances found.</p>}
       </div>
-      <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+      <div className="hl-pagination-bar">
         <Tag minimal>
           {table.getFilteredRowModel().rows.length} of {rows?.length ?? 0} rows
         </Tag>
@@ -169,7 +198,7 @@ export function ObjectTablePage() {
               disabled={!table.getCanPreviousPage()}
               onClick={() => table.previousPage()}
             />
-            <span style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+            <span className="hl-text-muted">
               Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount()}
             </span>
             <Button
@@ -193,6 +222,6 @@ export function ObjectTablePage() {
           </>
         )}
       </div>
-    </div>
+    </DetailPage>
   );
 }

@@ -1,20 +1,27 @@
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useParams } from "@tanstack/react-router";
-import { Button, Callout, H3, Tab, Tabs, Tag } from "@blueprintjs/core";
+import { Button, Callout, HTMLSelect, Tab, Tabs, Tag } from "@blueprintjs/core";
 import Editor from "@monaco-editor/react";
+import { useMonacoEditorTheme } from "../../hooks/useMonacoEditorTheme";
 import {
-  useApplication,
+  useApplicationOptional,
   useApplicationDashboard,
   useObjectTypes,
   useActions,
   useTools,
   usePromoteApplication,
   useSaveApplication,
+  useSetApplicationProject,
+  useProjects,
 } from "../../api/hooks";
 import { DashboardWidgets } from "./DashboardWidgets";
+import { ObjectAppView } from "./ObjectAppView";
 import { ApplicationBuilder } from "./Builder/ApplicationBuilder";
 import type { ApplicationDefinition } from "../../api/experience";
 import { ApiError } from "../../api/client";
+import { ResourceActionsMenu } from "../common/ResourceActionsMenu";
+import { DetailPage } from "../common/PageLayout";
+import { ObjectAppSkeleton } from "../common/Skeleton";
 
 const DEFAULT_DEFINITION = {
   surfaces: [{ type: "objectApp", objectType: "Customer", route: "/apps/example" }],
@@ -27,13 +34,16 @@ const DEFAULT_DEFINITION = {
 
 export function ApplicationPage() {
   const { name } = useParams({ from: "/shell/applications/$name" });
-  const { data: application, error, refetch } = useApplication(name);
+  const monacoTheme = useMonacoEditorTheme();
+  const { data: application, error, refetch } = useApplicationOptional(name);
   const { data: dashboard } = useApplicationDashboard(application?.status === "promoted" ? name : undefined);
   const { data: objectTypes = [] } = useObjectTypes();
   const { data: actions = [] } = useActions();
   const { data: tools = [] } = useTools();
+  const { data: projects = [] } = useProjects();
   const saveMutation = useSaveApplication(name);
   const promoteMutation = usePromoteApplication(name);
+  const setProjectMutation = useSetApplicationProject(name);
 
   const [editorValue, setEditorValue] = useState(JSON.stringify(DEFAULT_DEFINITION, null, 2));
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -79,37 +89,52 @@ export function ApplicationPage() {
   }
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <H3>{name}</H3>
-        {application && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <DetailPage
+      breadcrumbs={[{ label: "Applications", to: "/applications" }, { label: name }]}
+      title={name}
+      actions={
+        application ? (
+          <div className="hl-flex-row hl-items-center hl-gap-sm">
             <Tag intent={application.status === "promoted" ? "success" : "warning"}>
               {application.status} · v{application.version}
             </Tag>
+            <HTMLSelect
+              minimal
+              value={application.project_urn ?? ""}
+              disabled={setProjectMutation.isPending}
+              onChange={(e) => setProjectMutation.mutate(e.target.value || null)}
+            >
+              <option value="">No project</option>
+              {projects.map((p) => (
+                <option key={p.urn} value={p.urn}>
+                  {p.name}
+                </option>
+              ))}
+            </HTMLSelect>
             {application.status === "draft" && (
               <Button intent="primary" loading={promoteMutation.isPending} onClick={() => void promote()}>
                 Promote
               </Button>
             )}
+            <ResourceActionsMenu urn={application.urn} />
           </div>
-        )}
-      </div>
-
+        ) : undefined
+      }
+    >
       {notFound && <Callout intent="warning">No draft yet — edit the definition below and save to create one.</Callout>}
       {saveError && (
-        <Callout intent="danger" style={{ marginTop: 12 }}>
+        <Callout intent="danger" className="hl-mt-sm">
           {saveError}
         </Callout>
       )}
       {saveOk && (
-        <Callout intent="success" style={{ marginTop: 12 }}>
+        <Callout intent="success" className="hl-mt-sm">
           Saved.
         </Callout>
       )}
 
-      <div style={{ marginTop: 20 }}>
-      <Tabs id="application-tabs" renderActiveTabPanelOnly>
+      <div className="hl-mt-md">
+        <Tabs id="application-tabs" renderActiveTabPanelOnly>
         <Tab
           id="builder"
           title="Builder"
@@ -126,13 +151,26 @@ export function ApplicationPage() {
           }
         />
         <Tab
+          id="app"
+          title="App"
+          panel={
+            application ? (
+              <Suspense fallback={<ObjectAppSkeleton />}>
+                <ObjectAppView application={application} />
+              </Suspense>
+            ) : (
+              <p className="hl-text-muted">Loading…</p>
+            )
+          }
+        />
+        <Tab
           id="dashboard"
           title="Dashboard"
           panel={
             application?.status === "promoted" && dashboard ? (
               <DashboardWidgets widgets={dashboard.widgets} />
             ) : (
-              <p style={{ color: "var(--hl-text-muted)" }}>Promote the application to see its dashboard.</p>
+              <p className="hl-text-muted">Promote the application to see its dashboard.</p>
             )
           }
         />
@@ -141,20 +179,20 @@ export function ApplicationPage() {
           title="Definition"
           panel={
             <div>
-              <p style={{ fontSize: 12, color: "var(--hl-text-muted)", marginBottom: 8 }}>
+              <p className="hl-ontology-tab-desc hl-mb-sm">
                 Every binding/action/component is validated against Knowledge's real ontology on save.
               </p>
-              <div className="hl-panel" style={{ padding: 0, overflow: "hidden" }}>
+              <div className="hl-json-editor">
                 <Editor
                   height="400px"
                   defaultLanguage="json"
-                  theme="vs-dark"
+                  theme={monacoTheme}
                   value={editorValue}
                   onChange={(v) => setEditorValue(v ?? "")}
                   options={{ minimap: { enabled: false }, fontSize: 13 }}
                 />
               </div>
-              <Button intent="primary" style={{ marginTop: 12 }} loading={saveMutation.isPending} onClick={() => void save()}>
+              <Button intent="primary" className="hl-mt-sm" loading={saveMutation.isPending} onClick={() => void save()}>
                 Save draft
               </Button>
             </div>
@@ -162,6 +200,6 @@ export function ApplicationPage() {
         />
       </Tabs>
       </div>
-    </div>
+    </DetailPage>
   );
 }

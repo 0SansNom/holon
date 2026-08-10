@@ -49,6 +49,33 @@ async def create_shared_property_type(
     return await get_shared_property_type(pool, tenant_id, api_name)
 
 
+async def update_shared_property_type(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    api_name: str,
+    display_name: Optional[str] = None,
+    description: Optional[str] = None,
+) -> dict:
+    """Partial update — `value_type` and `api_name` are deliberately not
+    accepted params: changing the wrapped Value Type would silently
+    change the data contract for every property referencing this Shared
+    Property Type by name. `None` means "leave unchanged".
+    """
+    current = await get_shared_property_type(pool, tenant_id, api_name)
+    if current is None:
+        raise ValueError(f"unknown shared property type: {api_name!r}")
+
+    new_display_name = current["display_name"] if display_name is None else display_name
+    new_description = current["description"] if description is None else description
+
+    await pool.execute(
+        "UPDATE shared_property_type SET display_name = $1, description = $2 WHERE tenant_id = $3 AND api_name = $4",
+        new_display_name, new_description, tenant_id, api_name,
+    )
+    return await get_shared_property_type(pool, tenant_id, api_name)
+
+
 async def get_shared_property_type(pool: asyncpg.Pool, tenant_id: str, api_name: str) -> Optional[dict]:
     row = await pool.fetchrow(
         "SELECT * FROM shared_property_type WHERE tenant_id = $1 AND api_name = $2", tenant_id, api_name

@@ -27,6 +27,8 @@ from typing import Optional
 import asyncpg
 import httpx
 
+from holon_common import build_urn
+
 from . import ui_component_registry
 
 logger = logging.getLogger("experience.application_builder")
@@ -44,6 +46,19 @@ CREATE TABLE IF NOT EXISTS application (
     promoted_at TIMESTAMPTZ,
     UNIQUE (tenant_id, name, version)
 );
+
+-- ReBAC hardening: previously Applications had no URN and no SpiceDB
+-- relation at all (any authenticated principal could read/write any
+-- application). One URN per (tenant, name) — not per version, since a
+-- version is an internal draft/promote detail, not a separately
+-- addressable resource the way an ObjectType's URN@version is.
+ALTER TABLE application ADD COLUMN IF NOT EXISTS urn TEXT;
+
+-- Project scoping — same single-valued-per-(tenant,name), not-per-
+-- version shape as `urn` above (an Application's project membership is a
+-- workspace-organization fact, not a governed/versioned one the way
+-- ObjectType's project_urn is tied to its propose/publish lifecycle).
+ALTER TABLE application ADD COLUMN IF NOT EXISTS project_urn TEXT;
 
 -- an `agentApp` session is opened under the single shared
 -- `ingest-bot` agent identity (Intelligence's `POST /sessions` requires
@@ -66,6 +81,31 @@ CREATE TABLE IF NOT EXISTS agent_app_session (
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
+
+
+def application_urn(tenant_id: str, workspace_id: str, name: str) -> str:
+    return build_urn(tenant_id, workspace_id, "application", name)
+
+
+async def backfill_urns(pool: asyncpg.Pool, *, tenant_id: str, workspace_id: str) -> list[str]:
+    """One-time (but idempotent — safe every startup) catch-up for
+    applications created before Applications had a `urn` column at all.
+    Returns the names that were actually backfilled, so the caller
+    (`main.py`'s lifespan) knows exactly which ones still need their
+    `parent_workspace` SpiceDB relationship written too — a pre-existing
+    application row is otherwise indistinguishable from one a brand-new
+    create request should grant a relation for.
+    """
+    rows = await pool.fetch(
+        "SELECT DISTINCT name FROM application WHERE tenant_id = $1 AND urn IS NULL", tenant_id,
+    )
+    names = [row["name"] for row in rows]
+    for name in names:
+        await pool.execute(
+            "UPDATE application SET urn = $1 WHERE tenant_id = $2 AND name = $3",
+            application_urn(tenant_id, workspace_id, name), tenant_id, name,
+        )
+    return names
 
 
 async def record_agent_app_session(
@@ -235,6 +275,21 @@ async def list_applications(pool: asyncpg.Pool, *, tenant_id: str) -> list[dict]
     return results
 
 
+async def set_application_project(
+    pool: asyncpg.Pool, *, tenant_id: str, name: str, project_urn: Optional[str]
+) -> Optional[dict]:
+    """Direct set/clear — unlike ObjectType's `project_urn`, this isn't
+    tied to a propose/publish governance workflow (Applications have no
+    branching/versioned-governance lifecycle), so there's no draft to
+    stage it on. Applies to every version row for this name, same
+    "identity fact, not a per-version one" treatment `urn` already gets.
+    """
+    await pool.execute(
+        "UPDATE application SET project_urn = $1 WHERE tenant_id = $2 AND name = $3", project_urn, tenant_id, name,
+    )
+    return await get_application(pool, tenant_id=tenant_id, name=name)
+
+
 async def get_application(pool: asyncpg.Pool, *, tenant_id: str, name: str) -> Optional[dict]:
     row = await pool.fetchrow(
         "SELECT * FROM application WHERE tenant_id = $1 AND name = $2 ORDER BY version DESC LIMIT 1",
@@ -254,6 +309,7 @@ async def create_or_update_draft(
     http: httpx.AsyncClient,
     *,
     tenant_id: str,
+    workspace_id: str,
     name: str,
     definition: dict,
     knowledge_url: str,
@@ -268,9 +324,10 @@ async def create_or_update_draft(
 
     if existing is None:
         await pool.execute(
-            "INSERT INTO application (tenant_id, name, version, definition, dependencies, status) "
-            "VALUES ($1, $2, 1, $3::jsonb, $4::jsonb, 'draft')",
+            "INSERT INTO application (tenant_id, name, version, definition, dependencies, status, urn) "
+            "VALUES ($1, $2, 1, $3::jsonb, $4::jsonb, 'draft', $5)",
             tenant_id, name, json.dumps(definition), json.dumps(dependencies),
+            application_urn(tenant_id, workspace_id, name),
         )
     elif existing["status"] == "draft":
         # Editing an unpromoted draft in place — not yet "live"
@@ -283,10 +340,16 @@ async def create_or_update_draft(
     else:
         # The latest version is already promoted (immutable);
         # further changes always create a new draft, never edit it live.
+        # `urn`/`project_urn` carry forward from the prior version — they're
+        # identity/organization facts about the Application, not something
+        # a new draft resets (a bug fixed here: this branch previously left
+        # them NULL on the new row, which `get_application`'s `ORDER BY
+        # version DESC LIMIT 1` would then surface as the "current" urn).
         await pool.execute(
-            "INSERT INTO application (tenant_id, name, version, definition, dependencies, status) "
-            "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, 'draft')",
+            "INSERT INTO application (tenant_id, name, version, definition, dependencies, status, urn, project_urn) "
+            "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, 'draft', $6, $7)",
             tenant_id, name, existing["version"] + 1, json.dumps(definition), json.dumps(dependencies),
+            existing["urn"], existing.get("project_urn"),
         )
 
     return await get_application(pool, tenant_id=tenant_id, name=name)
