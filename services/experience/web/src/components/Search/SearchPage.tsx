@@ -1,13 +1,18 @@
 import { useState } from "react";
-import { Button, H3, InputGroup, Spinner, Tag } from "@blueprintjs/core";
+import { useSearch as useSearchParams } from "@tanstack/react-router";
+import { Button, InputGroup, Tag } from "@blueprintjs/core";
 import { useSearch } from "../../api/hooks";
 import { ClassificationBadge } from "../common/ClassificationBadge";
+import { EmptyState } from "../common/ListPrimitives";
+import { RegistryPage } from "../common/PageLayout";
+import { SearchResultsSkeleton } from "../common/Skeleton";
 
 const PAGE_SIZE = 20;
 
 export function SearchPage() {
-  const [query, setQuery] = useState("");
-  const [submitted, setSubmitted] = useState("");
+  const { q: prefill } = useSearchParams({ strict: false });
+  const [query, setQuery] = useState(prefill ?? "");
+  const [submitted, setSubmitted] = useState(prefill ?? "");
   const [objectType, setObjectType] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(0);
 
@@ -28,12 +33,15 @@ export function SearchPage() {
   const facetEntries = Object.entries(data?.facets ?? {}).sort((a, b) => b[1] - a[1]);
 
   return (
-    <div>
-      <H3>Search</H3>
-      <p style={{ color: "var(--hl-text-muted)", marginBottom: 16 }}>
-        Unified search — entitlement tokens are filtered at the source in OpenSearch itself, never a
-        post-filter, so the total you see is exactly what's genuinely visible.
-      </p>
+    <RegistryPage
+      title="Search"
+      description={
+        <>
+          Unified search (Knowledge `/search`) — entitlement tokens are filtered at the source in OpenSearch,
+          never a post-filter, so the total you see is exactly what's genuinely visible.
+        </>
+      }
+    >
       <InputGroup
         large
         leftIcon="search"
@@ -41,49 +49,34 @@ export function SearchPage() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit(query)}
-        rightElement={undefined}
       />
 
-      {isLoading && <Spinner style={{ marginTop: 16 }} />}
+      {isLoading && submitted && <SearchResultsSkeleton />}
 
-      {data && (
-        <div style={{ marginTop: 16, display: "flex", gap: 24 }}>
+      {data && !isLoading && (
+        <div className="hl-search-layout">
           {facetEntries.length > 0 && (
-            <div style={{ width: 180, flexShrink: 0 }}>
-              <div
-                style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em", color: "var(--hl-text-muted)", marginBottom: 8 }}
-              >
-                Object type
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div className="hl-search-facets">
+              <div className="hl-section-title hl-mb-sm">Object type</div>
+              <div className="hl-grid-gap-sm">
                 {facetEntries.map(([facet, count]) => (
                   <button
                     key={facet}
-                    onClick={() => toggleFacet(facet)}
+                    type="button"
                     className="hl-facet-item"
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      background: objectType === facet ? "var(--hl-accent-soft)" : "transparent",
-                      color: objectType === facet ? "var(--hl-accent)" : "var(--hl-text)",
-                      border: "none",
-                      borderRadius: 4,
-                      padding: "6px 8px",
-                      fontSize: 13,
-                      cursor: "pointer",
-                      textAlign: "left",
-                    }}
+                    data-active={objectType === facet}
+                    onClick={() => toggleFacet(facet)}
                   >
                     <span>{facet}</span>
-                    <span style={{ color: "var(--hl-text-muted)" }}>{count}</span>
+                    <span className="hl-text-muted">{count}</span>
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <div className="hl-flex-1 hl-min-w-0">
+            <div className="hl-flex-row hl-items-center hl-gap-sm hl-mb-md">
               <Tag minimal>{data.total} results</Tag>
               {objectType && (
                 <Tag minimal intent="primary" onRemove={() => toggleFacet(objectType)}>
@@ -93,22 +86,24 @@ export function SearchPage() {
             </div>
 
             {data.results.map((r) => (
-              <div key={r.urn} className="hl-panel" style={{ marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="hl-mono" style={{ fontSize: 12 }}>
-                    {r.urn}
-                  </span>
+              <div key={r.urn} className="hl-panel hl-mb-sm">
+                <div className="hl-flex-between">
+                  <span className="hl-mono hl-text-muted-sm">{r.urn}</span>
                   <ClassificationBadge classification={r.classification} />
                 </div>
-                <p style={{ fontSize: 13, margin: "8px 0 0" }}>{r.text}</p>
+                <p className="hl-body-text hl-mt-sm" style={{ marginBottom: 0 }}>
+                  {r.text}
+                </p>
               </div>
             ))}
-            {data.results.length === 0 && <p style={{ color: "var(--hl-text-muted)" }}>No results.</p>}
+            {data.results.length === 0 && (
+              <EmptyState>No results for "{submitted}".</EmptyState>
+            )}
 
             {totalPages > 1 && (
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
+              <div className="hl-flex-row hl-items-center hl-gap-md hl-mt-md">
                 <Button minimal small icon="chevron-left" disabled={page === 0} onClick={() => setPage((p) => p - 1)} />
-                <span style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+                <span className="hl-text-muted">
                   Page {page + 1} of {totalPages}
                 </span>
                 <Button
@@ -123,6 +118,10 @@ export function SearchPage() {
           </div>
         </div>
       )}
-    </div>
+
+      {!submitted && !isLoading && (
+        <p className="hl-text-muted hl-mt-md">Enter a query to search across indexed objects.</p>
+      )}
+    </RegistryPage>
   );
 }

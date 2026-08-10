@@ -30,12 +30,12 @@ export function ObjectAppSection({
 
   return (
     <Card>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: value.enabled ? 12 : 0 }}>
+      <div className={`hl-builder-section-header${value.enabled ? " hl-builder-section-header--expanded" : ""}`}>
         <Checkbox
           checked={value.enabled}
           label="Object App"
           onChange={(e) => onChange({ ...value, enabled: e.target.checked })}
-          style={{ marginBottom: 0, fontWeight: 600 }}
+          className="hl-builder-checkbox"
         />
         {value.enabled && (
           <InputGroup
@@ -43,20 +43,20 @@ export function ObjectAppSection({
             placeholder="/apps/name"
             value={value.route}
             onChange={(e) => onChange({ ...value, route: e.target.value })}
-            style={{ maxWidth: 260 }}
+            className="hl-builder-route-input"
           />
         )}
       </div>
 
       {value.enabled && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <label style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+        <div className="hl-builder-fields">
+          <label className="hl-text-muted">
             ObjectType
             <HTMLSelect
               fill
               value={value.objectType}
               onChange={(e) => onChange({ ...value, objectType: e.target.value, actions: [] })}
-              style={{ marginTop: 4 }}
+              className="hl-builder-field-mt"
             >
               <option value="">Select ObjectType…</option>
               {objectTypes.map((ot) => (
@@ -69,9 +69,9 @@ export function ObjectAppSection({
 
           {value.objectType && (
             <div>
-              <div style={{ fontSize: 12, color: "var(--hl-text-muted)", marginBottom: 6 }}>Actions to expose</div>
+              <div className="hl-section-title hl-mb-sm">Actions to expose</div>
               {availableActions.length === 0 && (
-                <p style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>No Actions declared for this ObjectType.</p>
+                <p className="hl-text-muted">No Actions declared for this ObjectType.</p>
               )}
               {availableActions.map((action) => {
                 const localName = action.name.split(".", 2)[1];
@@ -83,7 +83,7 @@ export function ObjectAppSection({
                     labelElement={
                       <span>
                         {localName}{" "}
-                        <Tag minimal intent={action.risk_level === "high" ? "danger" : "none"} style={{ marginLeft: 4 }}>
+                        <Tag minimal intent={action.risk_level === "high" ? "danger" : "none"} className="hl-ml-xs">
                           {action.risk_level}
                         </Tag>
                       </span>

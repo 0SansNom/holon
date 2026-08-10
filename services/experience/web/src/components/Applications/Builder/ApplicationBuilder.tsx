@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import { DndContext, type DragEndEvent } from "@dnd-kit/core";
 import { arrayMove } from "@dnd-kit/sortable";
 import { Button, Callout } from "@blueprintjs/core";
-import type { ApplicationDefinition } from "../../../api/experience";
+import type { ApplicationDefinition, ApplicationSurface } from "../../../api/experience";
+import { isAgentAppSurface, isDashboardSurface, isObjectAppSurface } from "../../../api/experience";
 import type { ObjectType, ActionDefinition } from "../../../api/knowledge";
 import type { ToolDefinition } from "../../../api/intelligence";
 import { WidgetPalette } from "./WidgetPalette";
@@ -30,29 +31,11 @@ const DEFAULT_STATE: BuilderState = {
   },
 };
 
-// The Builder is a second, opinionated editor over the *same* resource
-// Monaco's raw JSON tab edits — it only ever needs to round-trip the
-// shapes those surfaces actually use, not the full generality raw JSON
-// allows (a hand-authored surface with fields the Builder doesn't know
-// about is left alone: this only rewrites the three surface types it
-// owns, `definitionToState`/`stateToDefinition` are deliberately lossy
-// only in that one direction, never dropping *other* surfaces present).
 function definitionToState(definition: ApplicationDefinition): BuilderState {
   const surfaces = definition.surfaces ?? [];
-  const objectAppSurface = surfaces.find((s) => s.type === "objectApp") as
-    | { objectType?: string; route?: string }
-    | undefined;
-  const dashboardSurface = surfaces.find((s) => s.type === "dashboard") as
-    | { route?: string; widgets?: Array<{ component?: string; objectType?: string; label?: string }> }
-    | undefined;
-  const agentAppSurface = surfaces.find((s) => s.type === "agentApp") as
-    | {
-        route?: string;
-        systemPrompt?: string;
-        tools?: string[];
-        budget?: { max_iterations?: number; max_tool_calls?: number; max_tokens?: number };
-      }
-    | undefined;
+  const objectAppSurface = surfaces.find(isObjectAppSurface);
+  const dashboardSurface = surfaces.find(isDashboardSurface);
+  const agentAppSurface = surfaces.find(isAgentAppSurface);
 
   const objectAppActions = objectAppSurface
     ? (definition.actionRefs ?? [])
@@ -90,10 +73,13 @@ function definitionToState(definition: ApplicationDefinition): BuilderState {
   };
 }
 
-function stateToDefinition(state: BuilderState, actions: ActionDefinition[]): ApplicationDefinition {
-  const surfaces: Array<Record<string, unknown>> = [];
-  const bindings: Array<Record<string, unknown>> = [];
-  const actionRefs: Array<{ action: string; riskClass: string }> = [];
+function stateToDefinition(state: BuilderState, actions: ActionDefinition[], existingSurfaces: ApplicationSurface[]): ApplicationDefinition {
+  const preservedSurfaces = existingSurfaces.filter(
+    (s) => !isObjectAppSurface(s) && !isDashboardSurface(s) && !isAgentAppSurface(s),
+  );
+  const surfaces: ApplicationSurface[] = [...preservedSurfaces];
+  const bindings: ApplicationDefinition["bindings"] = [];
+  const actionRefs: ApplicationDefinition["actionRefs"] = [];
 
   if (state.objectApp.enabled && state.objectApp.objectType) {
     surfaces.push({ type: "objectApp", objectType: state.objectApp.objectType, route: state.objectApp.route || "/apps/app" });
@@ -151,12 +137,14 @@ export function ApplicationBuilder({
   saving: boolean;
   saveError: string | null;
 }) {
+  const definitionKey = JSON.stringify(definition);
+  const prevDefinitionKey = useRef(definitionKey);
   const [state, setState] = useState<BuilderState>(() => definitionToState(definition));
 
-  useEffect(() => {
+  if (prevDefinitionKey.current !== definitionKey) {
+    prevDefinitionKey.current = definitionKey;
     setState(definitionToState(definition));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [definition]);
+  }
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
@@ -164,8 +152,6 @@ export function ApplicationBuilder({
     const draggedKind = active.data.current?.kind as "kpi" | "table" | undefined;
 
     if (draggedKind) {
-      // Dropped a palette chip — anywhere over the canvas or an existing
-      // widget both count as "add it to the dashboard."
       const widgetIds = state.dashboard.widgets.map((w) => w.id);
       if (over.id === "dashboard-canvas" || widgetIds.includes(over.id as string)) {
         const newWidget: DashboardWidgetConfig = { id: crypto.randomUUID(), component: draggedKind, objectType: "", label: "" };
@@ -174,7 +160,6 @@ export function ApplicationBuilder({
       return;
     }
 
-    // Reordering an existing widget within the dashboard.
     const widgetIds = state.dashboard.widgets.map((w) => w.id);
     if (active.id !== over.id && widgetIds.includes(active.id as string) && widgetIds.includes(over.id as string)) {
       const oldIndex = widgetIds.indexOf(active.id as string);
@@ -185,21 +170,21 @@ export function ApplicationBuilder({
 
   return (
     <DndContext onDragEnd={handleDragEnd}>
-      <p style={{ fontSize: 12, color: "var(--hl-text-muted)", marginBottom: 12 }}>
+      <p className="hl-ontology-tab-desc hl-mb-sm">
         A visual editor over the same definition the Definition tab edits as raw JSON — enable the surfaces this
         application needs, drag widgets onto the dashboard canvas, and save. Switch to Definition for full manual
         control at any time.
       </p>
       {saveError && (
-        <Callout intent="danger" style={{ marginBottom: 12 }}>
+        <Callout intent="danger" className="hl-mb-sm">
           {saveError}
         </Callout>
       )}
-      <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
-        <div style={{ width: 180, flexShrink: 0, position: "sticky", top: 12 }}>
+      <div className="hl-flex-row hl-gap-lg hl-items-start">
+        <div className="hl-builder-palette">
           <WidgetPalette />
         </div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+        <div className="hl-flex-col hl-gap-md hl-flex-1 hl-min-w-0">
           <ObjectAppSection
             value={state.objectApp}
             objectTypes={objectTypes}
@@ -215,8 +200,8 @@ export function ApplicationBuilder({
           <Button
             intent="primary"
             loading={saving}
-            style={{ alignSelf: "flex-start" }}
-            onClick={() => onSave(stateToDefinition(state, actions))}
+            className="hl-self-start"
+            onClick={() => onSave(stateToDefinition(state, actions, definition.surfaces ?? []))}
           >
             Save draft
           </Button>

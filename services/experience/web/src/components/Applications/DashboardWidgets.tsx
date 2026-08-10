@@ -1,23 +1,22 @@
 import ReactECharts from "echarts-for-react";
 import { Card } from "@blueprintjs/core";
 import type { DashboardWidget } from "../../api/experience";
+import { useThemeStore } from "../../store/theme";
 
 export function DashboardWidgets({ widgets }: { widgets: DashboardWidget[] }) {
   if (widgets.length === 0) {
     return (
-      <p style={{ fontSize: 13, color: "var(--hl-text-muted)" }}>
+      <p className="hl-text-muted">
         No widgets configured yet — go to the Builder tab, enable Dashboard, and drag a KPI or Table widget onto
         the canvas (each one needs an ObjectType selected before saving, or it won't be included).
       </p>
     );
   }
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
+    <div className="hl-dashboard-grid">
       {widgets.map((widget, i) => (
         <Card key={i}>
-          <div style={{ fontSize: 12, color: "var(--hl-text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.03em" }}>
-            {widget.label}
-          </div>
+          <div className="hl-widget-label">{widget.label}</div>
           {widget.component === "kpi" && <KpiWidget value={widget.value ?? 0} />}
           {widget.component === "table" && <TableWidget rows={widget.rows ?? []} />}
           {widget.component !== "kpi" && widget.component !== "table" && <PluginWidget widget={widget} />}
@@ -28,6 +27,9 @@ export function DashboardWidgets({ widgets }: { widgets: DashboardWidget[] }) {
 }
 
 function KpiWidget({ value }: { value: number }) {
+  const resolved = useThemeStore((s) => s.resolved);
+  const textColor = resolved === "dark" ? "#e8eaed" : "#1c2127";
+
   const option = {
     series: [
       {
@@ -42,32 +44,30 @@ function KpiWidget({ value }: { value: number }) {
         splitLine: { show: false },
         axisLabel: { show: false },
         pointer: { show: false },
-        detail: { valueAnimation: true, fontSize: 32, color: "#1c2127", offsetCenter: [0, 0] },
+        detail: { valueAnimation: true, fontSize: 32, color: textColor, offsetCenter: [0, 0] },
         data: [{ value }],
       },
     ],
   };
-  return <ReactECharts option={option} style={{ height: 160 }} />;
+  return <ReactECharts option={option} className="hl-chart-sm" />;
 }
 
 function TableWidget({ rows }: { rows: Array<Record<string, unknown>> }) {
   const keys = rows[0] ? Object.keys(rows[0]).slice(0, 4) : [];
   return (
-    <table style={{ width: "100%", fontSize: 12 }}>
+    <table className="hl-data-table hl-data-table-compact">
       <thead>
         <tr>
           {keys.map((k) => (
-            <th key={k} style={{ textAlign: "left", color: "var(--hl-text-muted)", padding: "4px 6px" }}>
-              {k}
-            </th>
+            <th key={k}>{k}</th>
           ))}
         </tr>
       </thead>
       <tbody>
         {rows.slice(0, 6).map((row, i) => (
-          <tr key={i} style={{ borderTop: "1px solid var(--hl-border)" }}>
+          <tr key={i} className="hl-data-table-row">
             {keys.map((k) => (
-              <td key={k} className="hl-mono" style={{ padding: "4px 6px" }}>
+              <td key={k} className="hl-mono">
                 {String(row[k] ?? "—")}
               </td>
             ))}
@@ -80,14 +80,16 @@ function TableWidget({ rows }: { rows: Array<Record<string, unknown>> }) {
 
 function PluginWidget({ widget }: { widget: DashboardWidget }) {
   if (!widget.iframeUrl) {
-    return <p style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>Plugin component "{widget.component}" — no iframe URL declared.</p>;
+    return <p className="hl-text-muted">Plugin component "{widget.component}" — no iframe URL declared.</p>;
   }
   return (
     <iframe
       src={widget.iframeUrl}
       title={widget.label}
-      style={{ width: "100%", height: 160, border: "1px solid var(--hl-border)", borderRadius: 4, background: "#fff" }}
+      className="hl-plugin-iframe"
       sandbox=""
+      referrerPolicy="no-referrer"
+      loading="lazy"
     />
   );
 }

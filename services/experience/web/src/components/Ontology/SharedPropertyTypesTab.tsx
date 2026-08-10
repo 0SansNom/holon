@@ -1,58 +1,91 @@
 import { useState } from "react";
-import { Button, Callout, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, InputGroup, Spinner, Tag } from "@blueprintjs/core";
-import { useSharedPropertyTypes, useCreateSharedPropertyType, useValueTypes } from "../../api/hooks";
-import { ApiError } from "../../api/client";
+import { Callout, FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
+import { useSharedPropertyTypes, useCreateSharedPropertyType, useUpdateSharedPropertyType, useValueTypes } from "../../api/hooks";
+import type { SharedPropertyType } from "../../api/knowledge";
+import { CardGrid, EmptyState } from "../common/ListPrimitives";
+import { RegistryDialog } from "../common/RegistryDialog";
+import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
+import { useAsyncAction } from "../../hooks/useAsyncAction";
+import { BranchesDialog } from "./BranchesDialog";
+import { OntologyTabHeader, RegistryCard } from "./OntologyTabLayout";
 
 export function SharedPropertyTypesTab() {
-  const { data, isLoading } = useSharedPropertyTypes();
-  const { data: valueTypes = [] } = useValueTypes();
+  const { data } = useSharedPropertyTypes();
+  const { data: valueTypes } = useValueTypes();
   const createSharedPropertyType = useCreateSharedPropertyType();
+  const updateSharedPropertyType = useUpdateSharedPropertyType();
   const [creating, setCreating] = useState(false);
   const [apiName, setApiName] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [valueType, setValueType] = useState("");
   const [description, setDescription] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<SharedPropertyType | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [branching, setBranching] = useState<SharedPropertyType | null>(null);
 
-  function reset() {
+  usePaletteCreateIntent("create-shared-property-type", setCreating);
+
+  function resetCreate() {
     setApiName("");
     setDisplayName("");
     setValueType("");
     setDescription("");
-    setError(null);
   }
 
-  async function create() {
-    setError(null);
-    try {
-      await createSharedPropertyType.mutateAsync({
-        api_name: apiName,
-        display_name: displayName,
-        value_type: valueType,
-        description: description || undefined,
-      });
-      setCreating(false);
-      reset();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Create failed");
-    }
+  function closeCreate() {
+    setCreating(false);
+    resetCreate();
   }
 
-  if (isLoading) return <Spinner />;
+  const {
+    submit: submitCreate,
+    error: createError,
+    isPending: createPending,
+  } = useAsyncAction(async () => {
+    await createSharedPropertyType.mutateAsync({
+      api_name: apiName,
+      display_name: displayName,
+      value_type: valueType,
+      description: description || undefined,
+    });
+    closeCreate();
+  }, { successMessage: `Shared property type "${displayName}" created` });
+
+  function openEdit(spt: SharedPropertyType) {
+    setEditing(spt);
+    setEditDisplayName(spt.display_name);
+    setEditDescription(spt.description ?? "");
+  }
+
+  const {
+    submit: submitEdit,
+    error: editError,
+    isPending: editPending,
+  } = useAsyncAction(async () => {
+    if (!editing) return;
+    await updateSharedPropertyType.mutateAsync({
+      apiName: editing.api_name,
+      body: { display_name: editDisplayName, description: editDescription },
+    });
+    setEditing(null);
+  }, { successMessage: `"${editing?.display_name ?? "Shared property type"}" saved` });
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <p style={{ fontSize: 12, color: "var(--hl-text-muted)", margin: 0, maxWidth: 620 }}>
-          A canonical, reusable <em>property</em> definition — an API name plus a display name and description,
-          wrapping a Value Type for its data shape. Reference it from any ObjectType's <code>property_types</code>{" "}
-          (<code>{"{kind: \"shared_property_type\", shared_property_type: \"…\"}"}</code>) so renaming or
-          redescribing the property is a single edit, not one per ObjectType.
-        </p>
-        <Button intent="primary" icon="add" onClick={() => setCreating(true)} disabled={valueTypes.length === 0}>
-          New shared property type
-        </Button>
-      </div>
+      <OntologyTabHeader
+        description={
+          <>
+            A canonical, reusable <em>property</em> definition — an API name plus a display name and description,
+            wrapping a Value Type for its data shape. Reference it from any ObjectType's <code>property_types</code>{" "}
+            (<code>{"{kind: \"shared_property_type\", shared_property_type: \"…\"}"}</code>) so renaming or
+            redescribing the property is a single edit, not one per ObjectType.
+          </>
+        }
+        createLabel="New shared property type"
+        createDisabled={valueTypes.length === 0}
+        onCreate={() => setCreating(true)}
+      />
 
       {valueTypes.length === 0 && (
         <Callout intent="none" style={{ marginBottom: 12 }}>
@@ -60,16 +93,15 @@ export function SharedPropertyTypesTab() {
         </Callout>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-        {data?.map((spt) => (
-          <Card key={spt.api_name}>
-            <strong
-              style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-              title={spt.display_name}
-            >
-              {spt.display_name}
-            </strong>
-            <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <CardGrid minWidth={260}>
+        {data.map((spt) => (
+          <RegistryCard
+            key={spt.api_name}
+            name={spt.display_name}
+            onEdit={() => openEdit(spt)}
+            onBranch={() => setBranching(spt)}
+          >
+            <div className="hl-tag-row hl-mt-xs">
               <Tag minimal className="hl-mono">
                 {spt.api_name}
               </Tag>
@@ -77,71 +109,86 @@ export function SharedPropertyTypesTab() {
                 {spt.value_type}
               </Tag>
             </div>
-            {spt.description && (
-              <p style={{ fontSize: 12, color: "var(--hl-text-muted)", marginTop: 8, marginBottom: 0 }}>{spt.description}</p>
-            )}
-          </Card>
+            {spt.description && <p className="hl-card-desc">{spt.description}</p>}
+          </RegistryCard>
         ))}
-        {data?.length === 0 && <p style={{ color: "var(--hl-text-muted)" }}>No shared property types yet.</p>}
-      </div>
+        {data.length === 0 && (
+          <EmptyState actionLabel="New shared property type" onAction={() => setCreating(true)}>
+            No shared property types yet.
+          </EmptyState>
+        )}
+      </CardGrid>
 
-      <Dialog
+      <RegistryDialog
         isOpen={creating}
-        onClose={() => {
-          setCreating(false);
-          reset();
-        }}
         title="New shared property type"
+        onClose={closeCreate}
+        error={createError}
+        isPending={createPending}
+        submitLabel="Create"
+        submitDisabled={!apiName || !displayName || !valueType}
+        onSubmit={() => submitCreate(undefined)}
       >
-        <DialogBody>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-              API name <span className="hl-mono" style={{ color: "var(--hl-text-muted)" }}>(referenced by property_types)</span>
-            </label>
-            <InputGroup className="hl-mono" placeholder="email" value={apiName} onChange={(e) => setApiName(e.target.value)} />
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Display name</label>
-            <InputGroup placeholder="Email address" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Value type</label>
-            <HTMLSelect fill value={valueType} onChange={(e) => setValueType(e.target.value)}>
-              <option value="">Select…</option>
-              {valueTypes.map((vt) => (
-                <option key={vt.name} value={vt.name}>
-                  {vt.name}
-                </option>
-              ))}
-            </HTMLSelect>
-          </div>
-          <div>
-            <label style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Description</label>
-            <InputGroup
-              placeholder="the canonical contact email property"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </div>
-          {error && (
-            <Callout intent="danger" style={{ marginTop: 12 }}>
-              {error}
-            </Callout>
-          )}
-        </DialogBody>
-        <DialogFooter
-          actions={
-            <Button
-              intent="primary"
-              disabled={!apiName || !displayName || !valueType}
-              loading={createSharedPropertyType.isPending}
-              onClick={() => void create()}
-            >
-              Create
-            </Button>
-          }
+        <FormGroup label="API name" helperText="referenced by property_types">
+          <InputGroup className="hl-mono" placeholder="email" value={apiName} onChange={(e) => setApiName(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Display name">
+          <InputGroup placeholder="Email address" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Value type">
+          <HTMLSelect fill value={valueType} onChange={(e) => setValueType(e.target.value)}>
+            <option value="">Select…</option>
+            {valueTypes.map((vt) => (
+              <option key={vt.name} value={vt.name}>
+                {vt.name}
+              </option>
+            ))}
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="Description">
+          <InputGroup
+            placeholder="the canonical contact email property"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </FormGroup>
+      </RegistryDialog>
+
+      <RegistryDialog
+        isOpen={editing !== null}
+        title={`Edit ${editing?.api_name ?? ""}`}
+        onClose={() => setEditing(null)}
+        error={editError}
+        isPending={editPending}
+        submitLabel="Save"
+        submitDisabled={!editDisplayName}
+        onSubmit={() => submitEdit(undefined)}
+      >
+        <p style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+          API name (<Tag minimal className="hl-mono">{editing?.api_name}</Tag>) and wrapped value type (
+          <Tag minimal icon="link">{editing?.value_type}</Tag>) aren't editable — changing either would silently
+          change the data contract for every property referencing this Shared Property Type.
+        </p>
+        <FormGroup label="Display name">
+          <InputGroup value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Description">
+          <InputGroup value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+        </FormGroup>
+      </RegistryDialog>
+
+      {branching && (
+        <BranchesDialog
+          kind="shared_property_type"
+          resourceName={branching.api_name}
+          currentDefinition={{
+            display_name: branching.display_name,
+            value_type: branching.value_type,
+            description: branching.description,
+          }}
+          onClose={() => setBranching(null)}
         />
-      </Dialog>
+      )}
     </div>
   );
 }
