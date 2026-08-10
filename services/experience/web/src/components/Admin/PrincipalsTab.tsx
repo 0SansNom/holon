@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
-import { Button, Callout, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, InputGroup, Spinner, Tag } from "@blueprintjs/core";
+import { Button, Callout, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
 import { usePrincipals, useGrantWorkspaceAccess, useRevokeWorkspaceAccess } from "../../api/hooks";
 import type { IdentityPrincipal, AccessRelation } from "../../api/identity";
 import { ApiError } from "../../api/client";
+import { CardGrid, EmptyState, ErrorCallout } from "../common/ListPrimitives";
+import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
 
 const RELATIONS: AccessRelation[] = ["viewer", "editor", "admin"];
 
@@ -28,10 +30,8 @@ function ManageAccessDialog({ principal, onClose }: { principal: IdentityPrincip
   return (
     <Dialog isOpen title={`Workspace access — ${principal.display_name}`} onClose={onClose}>
       <DialogBody>
-        <p className="hl-mono" style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
-          {principal.urn}
-        </p>
-        <p style={{ fontSize: 12, color: "var(--hl-text-muted)" }}>
+        <p className="hl-mono hl-text-muted">{principal.urn}</p>
+        <p className="hl-text-muted">
           Grants/revokes are workspace-tier governance — only a principal already holding workspace{" "}
           <code>approve</code> (admin) can do this; everyone else gets a 403 from Identity.
         </p>
@@ -41,13 +41,9 @@ function ManageAccessDialog({ principal, onClose }: { principal: IdentityPrincip
           onChange={(e) => setRelation(e.target.value as AccessRelation)}
           options={RELATIONS}
         />
-        {error && (
-          <Callout intent="danger" style={{ marginTop: 12 }}>
-            {error}
-          </Callout>
-        )}
+        {error && <ErrorCallout>{error}</ErrorCallout>}
         {ok && (
-          <Callout intent="success" style={{ marginTop: 12 }}>
+          <Callout intent="success" className="hl-mt-sm">
             {ok}
           </Callout>
         )}
@@ -69,7 +65,7 @@ function ManageAccessDialog({ principal, onClose }: { principal: IdentityPrincip
 }
 
 export function PrincipalsTab() {
-  const { data, isLoading } = usePrincipals();
+  const { data } = usePrincipals();
   const [managing, setManaging] = useState<IdentityPrincipal | null>(null);
   const [filter, setFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -85,22 +81,25 @@ export function PrincipalsTab() {
     });
   }, [data, filter, typeFilter]);
 
-  if (isLoading) return <Spinner />;
-
   return (
     <div>
-      <p style={{ fontSize: 12, color: "var(--hl-text-muted)", marginBottom: 12 }}>
-        Every seeded principal in this tenant — agents and service accounts included, not just human users.
-        Workspace-level access (the base ReBAC grant every ObjectType's <code>read</code>/<code>write</code>/
-        <code>approve</code> permission cascades from) is managed here.
-      </p>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <OntologyTabHeader
+        description={
+          <>
+            Every seeded principal in this tenant — agents and service accounts included, not just human users.
+            Workspace-level access (the base ReBAC grant every ObjectType's <code>read</code>/<code>write</code>/
+            <code>approve</code> permission cascades from) is managed here.
+          </>
+        }
+      />
+
+      <div className="hl-flex-row hl-gap-sm hl-mb-sm">
         <InputGroup
           leftIcon="filter"
           placeholder="Filter by name or URN..."
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          style={{ maxWidth: 280 }}
+          className="hl-filter-input"
         />
         <HTMLSelect value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
           <option value="">All types</option>
@@ -110,32 +109,31 @@ export function PrincipalsTab() {
             </option>
           ))}
         </HTMLSelect>
-        <Tag minimal style={{ alignSelf: "center" }}>
+        <Tag minimal className="hl-self-center">
           {filtered.length} of {data?.length ?? 0}
         </Tag>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+
+      <CardGrid minWidth={280}>
         {filtered.map((principal) => (
           <Card key={principal.urn}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start" }}>
-              <div>
-                <strong>{principal.display_name}</strong>
-                <div className="hl-mono" style={{ fontSize: 11, color: "var(--hl-text-muted)", marginTop: 4 }}>
-                  {principal.urn}
-                </div>
+            <div className="hl-registry-card-header">
+              <div className="hl-min-w-0">
+                <strong className="hl-registry-card-title">{principal.display_name}</strong>
+                <div className="hl-mono hl-text-muted-sm hl-mt-xs">{principal.urn}</div>
               </div>
               <Tag minimal>{principal.type}</Tag>
             </div>
-            <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11, color: "var(--hl-text-muted)" }}>{principal.country ?? "—"}</span>
+            <div className="hl-card-footer">
+              <span className="hl-text-muted-sm">{principal.country ?? "—"}</span>
               <Button small minimal icon="key" onClick={() => setManaging(principal)}>
                 Manage access
               </Button>
             </div>
           </Card>
         ))}
-        {filtered.length === 0 && <p style={{ color: "var(--hl-text-muted)" }}>No principals match this filter.</p>}
-      </div>
+        {filtered.length === 0 && <EmptyState>No principals match this filter.</EmptyState>}
+      </CardGrid>
       {managing && <ManageAccessDialog principal={managing} onClose={() => setManaging(null)} />}
     </div>
   );
