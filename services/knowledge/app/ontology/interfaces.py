@@ -32,6 +32,37 @@ async def create_interface_type(
     return await get_interface_type(pool, tenant_id, name)
 
 
+async def update_interface_type(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    name: str,
+    required_properties: Optional[list[str]] = None,
+    required_actions: Optional[list[str]] = None,
+    description: Optional[str] = None,
+) -> dict:
+    """Partial update — `name` is deliberately not an accepted param: it's
+    the key referenced from every ObjectType's `implements` list.
+    `None` means "leave unchanged".
+    """
+    current = await get_interface_type(pool, tenant_id, name)
+    if current is None:
+        raise ValueError(f"unknown interface: {name!r}")
+
+    new_required_properties = current["required_properties"] if required_properties is None else required_properties
+    new_required_actions = current["required_actions"] if required_actions is None else required_actions
+    new_description = current["description"] if description is None else description
+
+    await pool.execute(
+        """
+        UPDATE interface_type SET required_properties = $1::jsonb, required_actions = $2::jsonb, description = $3
+        WHERE tenant_id = $4 AND name = $5
+        """,
+        json.dumps(new_required_properties), json.dumps(new_required_actions), new_description, tenant_id, name,
+    )
+    return await get_interface_type(pool, tenant_id, name)
+
+
 def _parse_interface_row(row: asyncpg.Record) -> dict:
     result = dict(row)
     for key in ("required_properties", "required_actions"):

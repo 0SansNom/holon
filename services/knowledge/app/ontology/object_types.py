@@ -91,6 +91,7 @@ RELATION_TYPES = [
         "source_object_type": "Order",
         "target_object_type": "Customer",
         "source_property": "customerId",
+        "target_property": "orders",
         "cardinality": "many_to_one",
     },
     {
@@ -98,6 +99,7 @@ RELATION_TYPES = [
         "source_object_type": "SupportTicket",
         "target_object_type": "Customer",
         "source_property": "customerId",
+        "target_property": "tickets",
         "cardinality": "many_to_one",
     },
     {
@@ -105,11 +107,38 @@ RELATION_TYPES = [
         "source_object_type": "ProductReview",
         "target_object_type": "Order",
         "source_property": "orderId",
+        "target_property": "reviews",
         "cardinality": "many_to_one",
     },
 ]
 
 INITIAL_CLASSIFICATION = "internal"
+
+# All JSONB columns on `object_type`; a subset (without `column_classification`)
+# covers `object_type_version`. Centralised so adding a new JSONB column only
+# requires touching this constant — not the four independent call sites below.
+_OT_JSONB_KEYS: tuple[str, ...] = (
+    "property_mapping", "implements", "derived_properties", "markings",
+    "property_formats", "conditional_formats", "property_types", "column_classification",
+)
+# object_type_version has no column_classification column.
+_OTV_JSONB_KEYS: tuple[str, ...] = _OT_JSONB_KEYS[:-1]
+
+
+def _parse_jsonb_keys(row: asyncpg.Record, keys: tuple[str, ...]) -> dict:
+    """Deserialise the JSONB columns of an asyncpg record.
+
+    asyncpg may return JSONB columns either as an unparsed string or already
+    as a Python object depending on the driver/codec configuration — the
+    isinstance guard handles both without failing on either. API callers
+    always receive structured dicts/lists, never raw JSON strings.
+    """
+    result = dict(row)
+    for key in keys:
+        if isinstance(result.get(key), str):
+            result[key] = json.loads(result[key])
+    return result
+
 
 DDL = """
 CREATE TABLE IF NOT EXISTS object_type (
@@ -153,6 +182,25 @@ CREATE TABLE IF NOT EXISTS relation_type (
     source_property TEXT NOT NULL,
     cardinality TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The reverse-direction accessor name (e.g. `Order.customer`'s
+-- `target_property` is `orders`) — Foundry's real Link Type model always
+-- names both ends; nullable at the column level only so an in-place
+-- upgrade doesn't need a destructive migration for any pre-existing row.
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS target_property TEXT;
+
+-- A purely navigational cluster of ObjectTypes (Foundry's Ontology
+-- Manager "Object Type Groups") — no new permission or schema concept,
+-- just a named, validated list; `ObjectTypesTab`'s own group filter is
+-- what makes this real rather than a label nobody reads.
+CREATE TABLE IF NOT EXISTS object_type_group (
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    object_types JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, name)
 );
 
 -- Row/column security declared per property, not just collapsed
@@ -224,6 +272,24 @@ CREATE TABLE IF NOT EXISTS ontology_review (
     decided_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Generalizes branching beyond ObjectType to the 4 other governed
+-- registries (RelationType, ValueType, SharedPropertyType, ActionType —
+-- matching Foundry's own branching scope minus Type groups/Rule sets).
+-- Existing ObjectType branch rows are untouched: `resource_type`
+-- defaults to 'object_type' and `resource_name`/`proposed_definition`
+-- stay NULL for them. The generic branching code
+-- (`ontology/resource_branching.py`) only ever operates on the other 4
+-- resource_type values — a disjoint set from 'object_type' — so the two
+-- code paths never collide on the same table despite sharing it.
+ALTER TABLE ontology_branch ALTER COLUMN object_type_urn DROP NOT NULL;
+ALTER TABLE ontology_branch ALTER COLUMN version DROP NOT NULL;
+ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS resource_type TEXT NOT NULL DEFAULT 'object_type';
+ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS resource_name TEXT;
+ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS proposed_definition JSONB;
+CREATE UNIQUE INDEX IF NOT EXISTS ontology_branch_resource_unique
+    ON ontology_branch (tenant_id, resource_type, resource_name, branch_name)
+    WHERE resource_name IS NOT NULL;
+
 -- Org/Space/Project hierarchy: an ObjectType can optionally
 -- scope down to a project, one tier narrower than its default workspace
 -- scope. Validated against Identity's real project registry at publish
@@ -281,6 +347,16 @@ ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS markings JSONB NOT NULL
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS property_formats JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS property_formats JSONB NOT NULL DEFAULT '{}';
 
+-- Conditional formatting: {"lifetimeValue": [{"condition": {"type":
+-- "number-range", "max": 0}, "style": {"color": "danger"}}, ...]}.
+-- Deliberately a sibling field to `property_formats` above, not a `style`
+-- key folded into a `PropertyFormatRule` — genuinely separate concerns
+-- (this styles a value already rendered; property_formats controls the
+-- value's own textual form). Same versioned governance treatment,
+-- validated at publish time (`_validate_conditional_formats`).
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS conditional_formats JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS conditional_formats JSONB NOT NULL DEFAULT '{}';
+
 -- Declared per-column classification for a self-serve ObjectType
 -- (`create_object_type`) — {"email": "confidential", "id": "public"},
 -- keyed by *source column* the same way `object_type_property` already
@@ -312,6 +388,11 @@ CREATE TABLE IF NOT EXISTS value_type (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, name)
 );
+
+-- Richer constraints (enum/range/rid/uuid) beyond the single format_regex
+-- above — see value_types.py's module docstring for why exactly these
+-- four and not Foundry's full eight.
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS constraints JSONB NOT NULL DEFAULT '[]';
 
 -- Shared Property Types: a canonical, reusable *property* definition
 -- (api_name + display_name + description) wrapping a Value Type for
@@ -380,6 +461,34 @@ CREATE TABLE IF NOT EXISTS action_type (
 
 -- additive migration for databases seeded before this column existed
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS writeback_dataset TEXT;
+
+-- Actions on interfaces: an Action Type may target an Interface instead
+-- of one ObjectType, becoming invocable against any instance of any
+-- ObjectType that currently `implements` it — same generalization
+-- Foundry's own "interface action rules" apply, restricted the same way
+-- (see `declarative.request_generic_action`): only the interface's own
+-- `required_properties` may be edited, never a type-specific one.
+-- Exactly one of `target_object_type`/`target_interface` is set, checked
+-- in `action_types.create_action_type`, not here.
+ALTER TABLE action_type ALTER COLUMN target_object_type DROP NOT NULL;
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS target_interface TEXT;
+
+-- Function-backed Actions: an Action Type may declare `edit_function`
+-- instead of a static `edits` list — the named Function plugin's return
+-- value BECOMES the applied edits (dynamic logic), as opposed to
+-- `function_side_effect` (fire-and-forget, result discarded). Exactly
+-- one of `edits`/`edit_function` is set, checked in
+-- `action_types.create_action_type`, not here.
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS edit_function TEXT;
+
+-- Configure/Sections: an ordered list of {name, parameter_names} groupings
+-- an Action Type may optionally declare, purely a display concern for the
+-- invocation form (Foundry's "Sections") — never affects what gets
+-- submitted, validated, or applied. A parameter not referenced by any
+-- section renders ungrouped, same as before this column existed.
+-- Structural validation (names exist, no parameter in two sections) lives
+-- in `action_types.create_action_type`, not here.
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS sections JSONB NOT NULL DEFAULT '[]';
 """
 
 
@@ -492,9 +601,9 @@ async def ensure_seeded(pool: asyncpg.Pool, tenant_id: str, workspace_id: str) -
     for relation in RELATION_TYPES:
         await pool.execute(
             """
-            INSERT INTO relation_type (urn, tenant_id, name, source_object_type_urn, target_object_type_urn, source_property, cardinality)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (urn) DO NOTHING
+            INSERT INTO relation_type (urn, tenant_id, name, source_object_type_urn, target_object_type_urn, source_property, target_property, cardinality)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (urn) DO UPDATE SET target_property = EXCLUDED.target_property
             """,
             build_urn(tenant_id, workspace_id, "relation-type", relation["name"]),
             tenant_id,
@@ -502,6 +611,7 @@ async def ensure_seeded(pool: asyncpg.Pool, tenant_id: str, workspace_id: str) -
             object_type_urn(tenant_id, workspace_id, relation["source_object_type"]),
             object_type_urn(tenant_id, workspace_id, relation["target_object_type"]),
             relation["source_property"],
+            relation["target_property"],
             relation["cardinality"],
         )
 
@@ -523,10 +633,9 @@ async def create_object_type(
     place. Reuses `_upsert_object_type` (same insert every boot-seeded
     type goes through) rather than a parallel code path, so a self-serve
     type is a real `object_type` row indistinguishable from a seeded one
-    at read time — only its *governance* surface is narrower for now
-    (see this function's caller in `routers/ontology_admin.py`: no
-    branching/interfaces/markings support yet, deliberately scoped out,
-    not silently missing).
+    at read time. Creation itself is existence + mapping; branching,
+    interfaces, markings, and the rest attach afterward via the normal
+    versioning endpoints, same as a seeded type.
 
     `column_classification` (source column -> "public"/"internal"/
     "confidential"/"restricted") is the admin's one chance to say which
@@ -564,55 +673,16 @@ async def get_object_type_by_dataset(pool: asyncpg.Pool, tenant_id: str, source_
     row = await pool.fetchrow(
         "SELECT * FROM object_type WHERE tenant_id = $1 AND source_dataset_urn = $2", tenant_id, source_dataset_urn
     )
-    if row is None:
-        return None
-    result = dict(row)
-    if isinstance(result["property_mapping"], str):
-        result["property_mapping"] = json.loads(result["property_mapping"])
-    if isinstance(result.get("column_classification"), str):
-        result["column_classification"] = json.loads(result["column_classification"])
-    return result
+    return _parse_jsonb_keys(row, _OT_JSONB_KEYS) if row is not None else None
 
 
 async def get_object_type(pool: asyncpg.Pool, urn: str) -> dict | None:
     row = await pool.fetchrow("SELECT * FROM object_type WHERE urn = $1", urn)
-    if row is None:
-        return None
-    result = dict(row)
-    # asyncpg returns JSONB columns as unparsed strings; parse them into
-    # dicts/lists to ensure API callers receive structured JSON objects.
-    if isinstance(result["property_mapping"], str):
-        result["property_mapping"] = json.loads(result["property_mapping"])
-    if isinstance(result.get("implements"), str):
-        result["implements"] = json.loads(result["implements"])
-    if isinstance(result.get("derived_properties"), str):
-        result["derived_properties"] = json.loads(result["derived_properties"])
-    if isinstance(result.get("markings"), str):
-        result["markings"] = json.loads(result["markings"])
-    if isinstance(result.get("property_formats"), str):
-        result["property_formats"] = json.loads(result["property_formats"])
-    if isinstance(result.get("property_types"), str):
-        result["property_types"] = json.loads(result["property_types"])
-    if isinstance(result.get("column_classification"), str):
-        result["column_classification"] = json.loads(result["column_classification"])
-    return result
+    return _parse_jsonb_keys(row, _OT_JSONB_KEYS) if row is not None else None
 
 
 def _parse_version_row(row: asyncpg.Record) -> dict:
-    result = dict(row)
-    if isinstance(result["property_mapping"], str):
-        result["property_mapping"] = json.loads(result["property_mapping"])
-    if isinstance(result.get("implements"), str):
-        result["implements"] = json.loads(result["implements"])
-    if isinstance(result.get("derived_properties"), str):
-        result["derived_properties"] = json.loads(result["derived_properties"])
-    if isinstance(result.get("markings"), str):
-        result["markings"] = json.loads(result["markings"])
-    if isinstance(result.get("property_formats"), str):
-        result["property_formats"] = json.loads(result["property_formats"])
-    if isinstance(result.get("property_types"), str):
-        result["property_types"] = json.loads(result["property_types"])
-    return result
+    return _parse_jsonb_keys(row, _OTV_JSONB_KEYS)
 
 
 async def list_object_type_versions(pool: asyncpg.Pool, object_type_urn: str) -> list[dict]:
@@ -665,11 +735,34 @@ async def list_object_types(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     way any other caller trusts the detail endpoint.
     """
     rows = await pool.fetch("SELECT * FROM object_type WHERE tenant_id = $1 ORDER BY name", tenant_id)
-    results = []
-    for row in rows:
-        result = dict(row)
-        for key in ("property_mapping", "implements", "derived_properties", "markings", "property_formats", "property_types", "column_classification"):
-            if isinstance(result.get(key), str):
-                result[key] = json.loads(result[key])
-        results.append(result)
-    return results
+    return [_parse_jsonb_keys(row, _OT_JSONB_KEYS) for row in rows]
+
+
+async def delete_object_type(pool: asyncpg.Pool, urn: str) -> None:
+    """Compensating delete after a failed SpiceDB `parent_workspace`
+    write on create — rolls back the Postgres row so we never leave an
+    ObjectType that exists in PG but is unreadable via ReBAC.
+
+    Refuses if any `object_type_version` (or property/marking/branch)
+    rows already reference the type: those mean lifecycle has started
+    and a blind delete would orphan history. Brand-new self-serve
+    creates have none of those yet.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        version_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM object_type_version WHERE object_type_urn = $1", urn
+        )
+        if version_count:
+            raise ValueError(
+                f"refusing to delete {urn}: {version_count} object_type_version row(s) already exist"
+            )
+        branch_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM ontology_branch WHERE object_type_urn = $1", urn
+        )
+        if branch_count:
+            raise ValueError(f"refusing to delete {urn}: {branch_count} ontology_branch row(s) already exist")
+        await conn.execute("DELETE FROM object_type_property WHERE object_type_urn = $1", urn)
+        await conn.execute("DELETE FROM instance_marking WHERE object_type_urn = $1", urn)
+        result = await conn.execute("DELETE FROM object_type WHERE urn = $1", urn)
+        if result == "DELETE 0":
+            raise ValueError(f"unknown ObjectType: {urn}")
