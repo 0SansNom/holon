@@ -79,7 +79,7 @@ SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 
 async def _consume_identity_events(consumer: EventConsumer) -> None:
     """Decision cache event-driven invalidation.
-    `identity.permission.revoked` fires from Identity's `/access/revoke`;
+    Identity emits permission grant/revoke events after changing SpiceDB;
     every cached decision naming that principal — as either the acting
     principal or a mandant — is purged the instant it arrives, not left to
     expire on the TTL alone.
@@ -87,10 +87,10 @@ async def _consume_identity_events(consumer: EventConsumer) -> None:
     await consumer.start()
     async for event in consumer:
         try:
-            if event.event_type == "identity.permission.revoked":
+            if event.event_type in {"identity.permission.granted", "identity.permission.revoked"}:
                 purged = app.state.authz.invalidate_principal(event.payload["principal_urn"])
                 logger.info(
-                    "authz cache: purged %d entr%s for revoked principal %s",
+                    "authz cache: purged %d entr%s for changed principal %s",
                     purged, "y" if purged == 1 else "ies", event.payload["principal_urn"],
                 )
         except Exception:

@@ -53,13 +53,32 @@ def test_experience_config():
     assert "customer_object_type_urn" in body
 
 
-def test_experience_token_proxy():
-    """Verify proxying token issuance to Identity via POST /api/token."""
+def test_experience_token_proxy_is_limited_to_authenticated_self(jdoe_token: str):
+    """The legacy proxy may refresh self, but cannot mint another identity."""
     user_urn = f"hl:{TENANT_ID}:global:user:jdoe"
-    status, body = _request("POST", f"{EXPERIENCE}/api/token", body={"principal_urn": user_urn})
+    status, body = _request(
+        "POST", f"{EXPERIENCE}/api/token", token=jdoe_token, body={"principal_urn": user_urn}
+    )
     assert status == 200
     assert "access_token" in body
     assert body["token_type"] == "bearer"
+
+    status, body = _request(
+        "POST",
+        f"{EXPERIENCE}/api/token",
+        token=jdoe_token,
+        body={"principal_urn": f"hl:{TENANT_ID}:global:user:msmith"},
+    )
+    assert status == 403, body
+
+
+def test_experience_token_proxy_rejects_anonymous_callers():
+    status, body = _request(
+        "POST",
+        f"{EXPERIENCE}/api/token",
+        body={"principal_urn": f"hl:{TENANT_ID}:global:user:jdoe"},
+    )
+    assert status == 401, body
 
 
 def test_experience_knowledge_proxies(jdoe_token: str):

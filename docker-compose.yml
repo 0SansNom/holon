@@ -498,12 +498,15 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/experience/app:/app/app
+      - ./docker/spicedb/schema.zed:/app/spicedb-schema.zed:ro
     ports:
       - "8004:8000"
     depends_on:
       postgres:
         condition: service_healthy
       knowledge:
+        condition: service_started
+      spicedb:
         condition: service_started
 
 volumes:

@@ -162,7 +162,12 @@ class PermissionClient:
         prunes an old edge on its own when a single-valued Postgres
         column like `object_type.project_urn` moves on to a new value.
         The gateway streams one JSON object per line rather than a JSON
-        array.
+        array. Fully consistent on purpose: the default minimize-latency
+        consistency serves from a quantized revision window that lags
+        writes by seconds, which made a grant/revoke briefly invisible
+        to the governance listings built on this — unacceptable for an
+        "is the revocation effective?" view, and `check_rebac` already
+        pays the same fully-consistent cost for every decision.
         """
         relationship_filter: dict[str, Any] = {
             "resourceType": resource_type, "optionalResourceId": _object_id(resource_urn)
@@ -172,7 +177,7 @@ class PermissionClient:
         response = await self._client.post(
             f"{self._spicedb_url}/v1/relationships/read",
             headers=self._spicedb_headers,
-            json={"relationshipFilter": relationship_filter},
+            json={"relationshipFilter": relationship_filter, "consistency": {"fullyConsistent": True}},
         )
         response.raise_for_status()
         relationships = []

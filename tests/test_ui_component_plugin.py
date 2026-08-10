@@ -97,6 +97,20 @@ def test_unregistered_component_is_rejected_registered_one_is_accepted(jdoe_toke
     assert len(widget["rows"]) > 0, widget
 
 
+def test_workspace_viewer_cannot_manage_ui_component_plugins(kenji_token: str) -> None:
+    """UI component manifests control a dashboard iframe URL, so a viewer
+    must not be able to register or change one.
+    """
+    entry_point = "app.plugins.map_widget_plugin:MapWidgetPlugin"
+    for method, path, body in (
+        ("POST", "/ui-component-plugins", {"entry_point": entry_point}),
+        ("POST", "/ui-component-plugins/map-widget/disable", None),
+        ("POST", "/ui-component-plugins/map-widget/enable", None),
+    ):
+        status, response = _request(method, f"{EXPERIENCE}{path}", token=kenji_token, body=body)
+        assert status == 403, response
+
+
 def test_a_plugin_cannot_claim_a_builtin_component_name(jdoe_token: str) -> None:
     module_name = f"_test_conflict_builtin_{int(time.time())}"
     path = _write_conflict_plugin(module_name, "HijackPlugin", "table")

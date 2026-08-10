@@ -57,6 +57,21 @@ definition object_type {
     permission approve = parent_workspace->approve + parent_project->approve
 }
 
+// Application — same parent_workspace/parent_project union `object_type`
+// already has (added so Applications can be scoped into a Project too,
+// same "pin in project" prerequisite). Originally added workspace-only,
+// so `experience`'s own resources (previously gated only by "is this a
+// valid authenticated principal," no ReBAC check at all) got the same
+// real workspace read/write enforcement object_type already has; the
+// project tier is additive on top, never a replacement.
+definition application {
+    relation parent_workspace: workspace
+    relation parent_project: project
+
+    permission read = parent_workspace->read + parent_project->read
+    permission write = parent_workspace->write + parent_project->write
+}
+
 // Markings — deliberately flat, not cascading like `project`
 // above: a marking grant is a direct, admin-issued clearance ("does this
 // principal hold PII clearance"), not something inherited down an org

@@ -355,3 +355,22 @@ def test_analytics_endpoints_require_the_surface_to_be_declared(jdoe_token: str)
     )
     assert status == 400, err
     assert "no analytics surface" in err["detail"], err
+
+
+def test_application_surfaces_require_application_access(jdoe_token: str, alice_token: str) -> None:
+    """A tenant member without an application grant cannot inspect its
+    configuration or promote its draft merely by knowing its name.
+    """
+    name = f"private-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200, app
+
+    for method, path in (
+        ("GET", f"/api/applications/{name}/data"),
+        ("GET", f"/api/applications/{name}/form"),
+        ("POST", f"/api/applications/{name}/promote"),
+    ):
+        status, body = _request(method, f"{EXPERIENCE}{path}", token=alice_token)
+        assert status == 403, body

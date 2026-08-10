@@ -173,7 +173,10 @@ def fetch_inventory_levels(*, sku: Optional[str] = None, **iceberg_config) -> li
     return rows.to_pylist()
 
 
-def fetch_generic(dataset_name: str, *, id_value: Optional[str] = None, **iceberg_config) -> list[dict]:
+def fetch_generic(
+    dataset_name: str, *, id_value: Optional[str] = None,
+    filter_column: Optional[str] = None, filter_value=None, **iceberg_config,
+) -> list[dict]:
     """The self-serve counterpart to the five `fetch_*` functions above:
     every one of them already does exactly this — `SELECT * FROM table`,
     optionally `WHERE id = ?` — the only thing that ever varied between
@@ -182,6 +185,17 @@ def fetch_generic(dataset_name: str, *, id_value: Optional[str] = None, **iceber
     hardcoded, so a self-serve ObjectType (`ontology.create_object_type`)
     reads through the identical scan-then-DuckDB path without needing its
     own hand-written function.
+
+    `filter_column`/`filter_value` is the generic counterpart to each
+    hardcoded `fetch_*`'s own named FK kwarg (e.g. `fetch_orders`'s
+    `customer_id`) — used for relation fan-out (`routers/objects/seeded.py`'s
+    `_resolve_relation_neighbors`), where the column varies per
+    RelationType and can't be a fixed keyword. Always a real, already-
+    resolved storage column (from a RelationType's `source_property` via
+    `property_mapping`), never raw request input — the same trust level
+    `serving_store.list_instances`' own `filter_column` already has —
+    but still checked against the table's actual columns before being
+    interpolated into SQL, since DuckDB can't parameterize an identifier.
     """
     table = _load_table(dataset_name, **iceberg_config)
     arrow_table = table.scan().to_arrow()
@@ -198,6 +212,10 @@ def fetch_generic(dataset_name: str, *, id_value: Optional[str] = None, **iceber
         except ValueError:
             typed_id = id_value
         rows = con.execute("SELECT * FROM t WHERE id = ?", [typed_id]).fetch_arrow_table()
+    elif filter_column is not None:
+        if filter_column not in arrow_table.column_names:
+            return []
+        rows = con.execute(f"SELECT * FROM t WHERE {filter_column} = ?", [filter_value]).fetch_arrow_table()
     else:
         rows = con.execute("SELECT * FROM t ORDER BY id").fetch_arrow_table()
     return rows.to_pylist()
