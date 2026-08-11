@@ -16,7 +16,7 @@ import { camelToSnake } from "../common/propertyFormatUtils";
 import { DetailPage } from "../common/PageLayout";
 import type { PropertyFormatRule, ConditionalFormatRule } from "../../api/knowledge";
 import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
-import { urnShortName, type RelatedLink } from "./objectExplorerUtils";
+import { titleOf, urnShortName, type RelatedLink } from "./objectExplorerUtils";
 import { RelatedLinkPanel } from "./RelatedLinkPanel";
 import { ObjectPropertiesTable } from "./ObjectPropertiesTable";
 import { ObjectActionsBar } from "./ObjectActionsBar";
@@ -28,6 +28,7 @@ export function ObjectDetailPage() {
   const navigate = useNavigate();
   const { data: object } = useObject(type, id);
   const { data: objectType } = useObjectType(type);
+  const displayTitle = titleOf(object as Record<string, unknown> | undefined, objectType);
   const { data: actions } = useActions();
   const { data: relationTypes } = useRelationTypes();
   const { data: principals } = usePrincipals();
@@ -129,9 +130,9 @@ export function ObjectDetailPage() {
       breadcrumbs={[
         { label: "Objects", to: "/objects" },
         { label: type, to: "/objects/$type", params: { type } },
-        { label: String(id) },
+        { label: displayTitle || String(id) },
       ]}
-      title={`${type} / ${id}`}
+      title={displayTitle || `${type} / ${id}`}
       actions={
         <ButtonGroup>
           <Button
@@ -154,6 +155,7 @@ export function ObjectDetailPage() {
 
       <ObjectPropertiesTable
         object={object}
+        objectType={objectType}
         maskedFields={maskedFields}
         fkFieldTargets={fkFieldTargets}
         formatsBySourceKey={formatsBySourceKey}

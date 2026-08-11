@@ -12,6 +12,7 @@ export type PaletteIntent =
   | "create-shared-property-type"
   | "create-action-type"
   | "create-object-type-group"
+  | "create-object-set"
   | "create-project"
   | "connect-source"
   | "create-connection";

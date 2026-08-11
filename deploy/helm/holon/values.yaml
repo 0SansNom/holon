@@ -1,0 +1,77 @@
+# Production-shaped defaults. Secrets via existingSecret / ExternalSecrets — never inline.
+image:
+  registry: ghcr.io
+  repository: holon
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Deployer-provided infrastructure (no subcharts for HA Postgres/Kafka).
+external:
+  postgresHost: postgres.example.svc
+  postgresUser: holon
+  kafkaBootstrap: redpanda.example.svc:9092
+  s3Endpoint: https://s3.example
+  awsRegion: us-east-1
+  icebergCatalogUri: http://iceberg-rest.example.svc:8181
+  icebergWarehouse: s3://holon-warehouse
+  spicedbUrl: http://spicedb.example.svc:8443
+  opaUrl: http://opa.example.svc:8181
+  opensearchUrl: https://opensearch.example.svc:9200
+  qdrantUrl: http://qdrant.example.svc:6333
+  otlpEndpoint: http://otel-collector.example.svc:4318
+
+# Connectivity's bundled walking-skeleton demo connectors (source_erp/support-desk
+# Mongo/reviews API) — required at boot (bare `os.environ[...]`, no fallback in
+# app code today), even though a real deployer has no interest in them. Point
+# these at anything reachable-or-not; the pod boots either way, only the demo
+# connector's own sync calls would fail if left unreachable. Tracked as an
+# app-side gap (these should become optional/lazy like the weather feed
+# plugin's own env var already is) — not fixable from the chart alone.
+demo:
+  sourceDbUrl: "postgresql://unset:unset@unset.invalid:5432/source_erp"
+  mongoUrl: "mongodb://unset:unset@unset.invalid:27017"
+  reviewsApiUrl: "http://unset.invalid"
+
+bootstrap:
+  tenantId: acme
+  workspaceId: demo
+
+secretBackend: kubernetes
+# Must include at least:
+#   HOLON_JWT_SECRET, HOLON_SPICEDB_PRESHARED_KEY, POSTGRES_PASSWORD,
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (S3/MinIO — connectivity/knowledge/intelligence),
+#   HOLON_OPENSEARCH_PASSWORD (knowledge),
+#   ANTHROPIC_API_KEY (intelligence)
+# Conditionally, only if the matching feature is enabled:
+#   HOLON_OIDC_CLIENT_SECRET (if oidc.enabled), VOYAGE_API_KEY (if HOLON_EMBEDDING_PROVIDER=voyage)
+existingSecret: holon-secrets
+
+oidc:
+  enabled: false
+  issuer: ""
+  clientId: ""
+  redirectUri: ""
+  scopes: "openid profile email groups"
+  tenantClaim: tenant_id
+  tenantGroupPrefix: "tenant:"
+  workspaceGroupPrefix: "workspace:"
+
+services:
+  identity:
+    replicas: 2
+    port: 8001
+  connectivity:
+    replicas: 2
+    port: 8002
+  knowledge:
+    replicas: 2
+    port: 8003
+  experience:
+    replicas: 2
+    port: 8004
+  automation:
+    replicas: 2
+    port: 8005
+  intelligence:
+    replicas: 1
+    port: 8006

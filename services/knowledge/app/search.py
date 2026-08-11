@@ -46,9 +46,40 @@ _INDEX_MAPPING = {
             "classification": {"type": "keyword"},
             "entitlement_tokens": {"type": "keyword"},
             "text": {"type": "text"},
+            # Keyword values for properties with render_hints including "sortable".
+            "props": {"type": "object", "dynamic": True},
         }
     }
 }
+
+
+def _searchable_columns(property_mapping: dict, property_types: dict | None) -> list[str]:
+    """Columns included in the unified `text` bag. Default searchable=True
+    when render_hints is absent; omit a column only when hints are present
+    and do not include ``searchable``.
+    """
+    columns: list[str] = []
+    for prop_name, column in property_mapping.items():
+        rule = (property_types or {}).get(prop_name) or {}
+        hints = rule.get("render_hints")
+        if hints is None or "searchable" in hints:
+            columns.append(column)
+    return columns
+
+
+def _sortable_prop_values(row: dict, property_mapping: dict, property_types: dict | None) -> dict[str, str]:
+    """Flatten sortable property values under ``props.<apiName>`` for keyword sort."""
+    out: dict[str, str] = {}
+    for prop_name, column in property_mapping.items():
+        rule = (property_types or {}).get(prop_name) or {}
+        hints = rule.get("render_hints") or []
+        if "sortable" not in hints:
+            continue
+        value = row.get(column)
+        if value is None:
+            continue
+        out[prop_name] = str(value)
+    return out
 
 
 def _entitlement_tokens_for(classification: str, allowed_countries: set[str]) -> list[str]:
@@ -81,16 +112,18 @@ async def index_rows(
     property_mapping: dict,
     rows: list[dict],
     allowed_countries: set[str],
+    property_types: dict | None = None,
 ) -> None:
     if not rows:
         return
     tokens = _entitlement_tokens_for(classification, allowed_countries)
+    text_columns = _searchable_columns(property_mapping, property_types)
     lines: list[str] = []
     for row in rows:
         instance_id = row["id"]
         doc_id = f"{object_type_name}:{tenant_id}:{instance_id}"
-        text = " ".join(str(row.get(column, "")) for column in property_mapping.values())
-        document = {
+        text = " ".join(str(row.get(column, "")) for column in text_columns)
+        document: dict[str, Any] = {
             "urn": doc_id,
             "object_type": object_type_name,
             "tenant_id": tenant_id,
@@ -98,6 +131,9 @@ async def index_rows(
             "entitlement_tokens": tokens,
             "text": text,
         }
+        props = _sortable_prop_values(row, property_mapping, property_types)
+        if props:
+            document["props"] = props
         lines.append(json.dumps({"index": {"_index": INDEX_NAME, "_id": doc_id}}))
         lines.append(json.dumps(document, default=str))
 

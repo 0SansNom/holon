@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holon-config
+data:
+  HOLON_TENANT_ID: {{ .Values.bootstrap.tenantId | quote }}
+  HOLON_WORKSPACE_ID: {{ .Values.bootstrap.workspaceId | quote }}
+  HOLON_SECRET_BACKEND: {{ .Values.secretBackend | quote }}
+  HOLON_KAFKA_BOOTSTRAP: {{ .Values.external.kafkaBootstrap | quote }}
+  HOLON_SPICEDB_URL: {{ .Values.external.spicedbUrl | quote }}
+  HOLON_OPA_URL: {{ .Values.external.opaUrl | quote }}
+  HOLON_OTLP_ENDPOINT: {{ .Values.external.otlpEndpoint | quote }}
+  HOLON_OPENSEARCH_URL: {{ .Values.external.opensearchUrl | quote }}
+  HOLON_QDRANT_URL: {{ .Values.external.qdrantUrl | quote }}
+  HOLON_S3_ENDPOINT: {{ .Values.external.s3Endpoint | quote }}
+  AWS_REGION: {{ .Values.external.awsRegion | quote }}
+  HOLON_ICEBERG_CATALOG_URI: {{ .Values.external.icebergCatalogUri | quote }}
+  HOLON_ICEBERG_WAREHOUSE: {{ .Values.external.icebergWarehouse | quote }}
+  # In-cluster service-to-service calls — the chart's own Service names/ports
+  # (below), never an external.* value: these never leave the cluster.
+  HOLON_IDENTITY_URL: "http://holon-identity:{{ .Values.services.identity.port }}"
+  HOLON_CONNECTIVITY_URL: "http://holon-connectivity:{{ .Values.services.connectivity.port }}"
+  HOLON_KNOWLEDGE_URL: "http://holon-knowledge:{{ .Values.services.knowledge.port }}"
+  HOLON_AUTOMATION_URL: "http://holon-automation:{{ .Values.services.automation.port }}"
+  HOLON_INTELLIGENCE_URL: "http://holon-intelligence:{{ .Values.services.intelligence.port }}"
+  # Walking-skeleton demo connectors — see values.yaml's `demo` comment.
+  HOLON_SOURCE_DB_URL: {{ .Values.demo.sourceDbUrl | quote }}
+  HOLON_MONGO_URL: {{ .Values.demo.mongoUrl | quote }}
+  HOLON_REVIEWS_API_URL: {{ .Values.demo.reviewsApiUrl | quote }}
+  {{- if .Values.oidc.enabled }}
+  HOLON_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  HOLON_OIDC_CLIENT_ID: {{ .Values.oidc.clientId | quote }}
+  HOLON_OIDC_REDIRECT_URI: {{ .Values.oidc.redirectUri | quote }}
+  HOLON_OIDC_SCOPES: {{ .Values.oidc.scopes | default "openid profile email groups" | quote }}
+  HOLON_OIDC_TENANT_CLAIM: {{ .Values.oidc.tenantClaim | default "tenant_id" | quote }}
+  HOLON_OIDC_TENANT_GROUP_PREFIX: {{ .Values.oidc.tenantGroupPrefix | default "tenant:" | quote }}
+  HOLON_OIDC_WORKSPACE_GROUP_PREFIX: {{ .Values.oidc.workspaceGroupPrefix | default "workspace:" | quote }}
+  {{- end }}
+  HOLON_SPICEDB_SCHEMA_PATH: {{ .Values.external.spicedbSchemaPath | default "/app/spicedb-schema.zed" | quote }}

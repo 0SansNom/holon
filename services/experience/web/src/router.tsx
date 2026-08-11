@@ -100,6 +100,9 @@ const objectTableRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/objects/$type",
   component: ObjectTablePage,
+  validateSearch: (search: Record<string, unknown>): { set?: string } => ({
+    set: typeof search.set === "string" && search.set.length > 0 ? search.set : undefined,
+  }),
 });
 
 const objectDetailRoute = createRoute({

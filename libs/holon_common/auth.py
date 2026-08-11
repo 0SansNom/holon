@@ -3,35 +3,18 @@
 `Principal` and its JWT encoding form the identity primitives.
 `holon_common.authz.PermissionClient` handles authorization decisions.
 
-**Key rotation — not implemented, deliberately deferred, design captured
-here.** Today `issue_token`/`decode_token` take a single shared secret
-(every service reads the identical `HOLON_JWT_SECRET` env var),
-`algorithm="HS256"` hardcoded, no `kid` claim. Appropriate for a
-pre-commercial build with no real users/secrets at risk yet — but real
-debt, not nothing, so the shape of the fix is written down rather than
-left to be rediscovered:
-
-- `HOLON_JWT_SECRET` (singular) → `HOLON_JWT_SECRETS`, a `kid:secret` map
-  (e.g. a small JSON object or `kid1:secretA,kid2:secretB` env value).
-- `issue_token` stamps the currently-active `kid` into the JWT header
-  (`jwt.encode(..., headers={"kid": active_kid})`).
-- `decode_token` reads the unverified header's `kid` first, looks up the
-  matching secret, *then* verifies — falling back to a clear 401 (not a
-  crash) if `kid` is missing or unknown.
-- Every internal token-minting call site needs the active `kid` threaded
-  through (10 call sites across 7 files, as of this note):
-  `services/automation/app/agent_chain_trigger.py:57`,
-  `services/automation/app/workflow.py:92,121`,
-  `services/connectivity/app/main.py:355`,
-  `services/identity/app/main.py:151` (the actual `/token` sign-in
-  endpoint), `services/intelligence/app/main.py:76,92`,
-  `services/experience/app/main.py:64`,
-  `services/knowledge/app/routers/ontology_admin.py:43`,
-  `services/knowledge/app/plugins/customer_value_model_function.py:43`.
+**Key rotation.** `HOLON_JWT_SECRETS` is a `kid:secret` map
+(`kid1:secretA,kid2:secretB` or JSON object). `HOLON_JWT_SECRET` (singular)
+remains supported as the single active key with kid `default`.
+Services boot via `active_jwt()` and pass `kid`+`secrets` into `issue_token`
+so the active kid is stamped; `decode_token` looks up the header kid then
+verifies — 401 if kid missing/unknown.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from typing import Optional
 
@@ -39,13 +22,6 @@ import jwt
 from fastapi import HTTPException, Request, Response, status
 from pydantic import BaseModel
 
-# The browser-facing counterpart to the `Authorization: Bearer` header —
-# set only by Identity's `/login` (never `/token`, which stays a plain
-# body-token response for CLI/script/service-to-service callers with no
-# cookie jar). `HttpOnly` keeps it unreadable to JS entirely (the whole
-# point — defeats XSS-based token theft, `localStorage`'s weakness);
-# `Secure` + `SameSite=Strict` mean it's never even transmitted outside
-# a first-party, same-site, HTTPS(-or-localhost) request.
 COOKIE_NAME = "holon_session"
 SESSION_COOKIE_TTL_SECONDS = 3600
 
@@ -59,7 +35,46 @@ class Principal(BaseModel):
     country: Optional[str] = None
 
 
-def issue_token(principal: Principal, secret: str, ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS) -> str:
+def load_jwt_secrets() -> tuple[dict[str, str], str]:
+    """Returns (kid→secret map, active_kid)."""
+    multi = (os.environ.get("HOLON_JWT_SECRETS") or "").strip() or None
+    if multi:
+        if multi.startswith("{"):
+            mapping = {str(k): str(v) for k, v in json.loads(multi).items()}
+        else:
+            mapping = {}
+            for part in multi.split(","):
+                kid, _, secret = part.partition(":")
+                if not kid or not secret:
+                    raise ValueError(f"invalid HOLON_JWT_SECRETS entry: {part!r}")
+                mapping[kid.strip()] = secret.strip()
+        active = os.environ.get("HOLON_JWT_ACTIVE_KID") or next(iter(mapping))
+        if active not in mapping:
+            raise ValueError(f"HOLON_JWT_ACTIVE_KID {active!r} not in HOLON_JWT_SECRETS")
+        return mapping, active
+    singular = os.environ.get("HOLON_JWT_SECRET")
+    if not singular:
+        raise RuntimeError("HOLON_JWT_SECRET or HOLON_JWT_SECRETS required")
+    return {"default": singular}, "default"
+
+
+def active_jwt() -> tuple[str, str, dict[str, str]]:
+    """Returns `(active_secret, active_kid, secrets_map)` for service boot."""
+    secrets, active = load_jwt_secrets()
+    return secrets[active], active, secrets
+
+
+def issue_token(
+    principal: Principal,
+    secret: str,
+    ttl_seconds: int = SESSION_COOKIE_TTL_SECONDS,
+    *,
+    kid: Optional[str] = None,
+    secrets: Optional[dict[str, str]] = None,
+) -> str:
+    """`secret` is the signing key. When `secrets`+`kid` are provided
+    (rotation), the kid is stamped into the JWT header.
+    """
     now = int(time.time())
     payload = {
         "sub": principal.urn,
@@ -71,12 +86,24 @@ def issue_token(principal: Principal, secret: str, ttl_seconds: int = SESSION_CO
         "iat": now,
         "exp": now + ttl_seconds,
     }
-    return jwt.encode(payload, secret, algorithm="HS256")
+    headers = {"kid": kid} if kid else None
+    sign_key = secrets[kid] if secrets and kid else secret
+    return jwt.encode(payload, sign_key, algorithm="HS256", headers=headers)
 
 
-def decode_token(token: str, secret: str) -> Principal:
+def decode_token(token: str, secret: str, *, secrets: Optional[dict[str, str]] = None) -> Principal:
     try:
-        payload = jwt.decode(token, secret, algorithms=["HS256"])
+        if secrets:
+            header = jwt.get_unverified_header(token)
+            kid = header.get("kid") or "default"
+            if kid not in secrets:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"unknown jwt kid: {kid}")
+            verify_key = secrets[kid]
+        else:
+            verify_key = secret
+        payload = jwt.decode(token, verify_key, algorithms=["HS256"])
+    except HTTPException:
+        raise
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"invalid token: {exc}") from exc
     return Principal(
@@ -89,13 +116,9 @@ def decode_token(token: str, secret: str) -> Principal:
     )
 
 
-def make_principal_dependency(secret: str, *, expected_tenant_id: Optional[str] = None):
+def make_principal_dependency(secret: str, *, expected_tenant_id: Optional[str] = None, secrets: Optional[dict[str, str]] = None):
     """Builds a FastAPI dependency that resolves the current Principal from
-    either the Authorization header (internal service-to-service calls,
-    CLI/script use — unchanged behavior) or the `holon_session` HttpOnly
-    cookie (browser calls, since `/login`) and enforces tenant_id. When an
-    expected tenant is supplied, tokens from any other tenant are rejected.
-    Header checked first so nothing about existing non-browser callers changes.
+    either the Authorization header or the `holon_session` HttpOnly cookie.
     """
 
     async def dependency(request: Request) -> Principal:
@@ -105,8 +128,11 @@ def make_principal_dependency(secret: str, *, expected_tenant_id: Optional[str] 
         else:
             token = request.cookies.get(COOKIE_NAME)
         if token is None:
-            raise HTTPException(status_code=401, detail="authentication required (Authorization: Bearer <token> header or session cookie)")
-        principal = decode_token(token, secret)
+            raise HTTPException(
+                status_code=401,
+                detail="authentication required (Authorization: Bearer <token> header or session cookie)",
+            )
+        principal = decode_token(token, secret, secrets=secrets)
         if not principal.tenant_id:
             raise HTTPException(status_code=401, detail="missing tenant_id")
         if expected_tenant_id is not None and principal.tenant_id != expected_tenant_id:
@@ -133,7 +159,20 @@ def clear_session_cookie(response: Response) -> None:
 
 
 def require_tenant_match(principal: Principal, resource_tenant_id: str) -> None:
-    """Minimal access guard: rejects any cross-tenant access.
+    """Hard cross-tenant fence (ADR 026). Must be called on every resource
+    path that already knows the resource's tenant — this helper is not
+    ambient middleware; omitting it is a security bug.
     """
     if principal.tenant_id != resource_tenant_id:
         raise HTTPException(status_code=403, detail="access denied: tenant mismatch")
+
+
+def require_urn_tenant_match(principal: Principal, resource_urn: str) -> None:
+    """Parse `hl:{tenant}:...` and enforce `require_tenant_match`."""
+    from .urn import InvalidURNError, parse as parse_urn
+
+    try:
+        parsed = parse_urn(resource_urn)
+    except InvalidURNError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    require_tenant_match(principal, parsed.tenant)

@@ -23,7 +23,7 @@ import httpx
 from holon_common import EventActor, EventEnvelope, build_urn, outbox
 
 from . import markings as markings_module
-from .object_types import get_object_type, get_object_type_version
+from .object_types import get_object_type, get_object_type_version, validate_ot_metadata
 from .interfaces import get_interface_type
 
 
@@ -98,9 +98,10 @@ async def _validate_implements(
             )
 
 
-_ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max"}
+_ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max", "collect_list", "collect_set"}
 _ALLOWED_STRUCT_REDUCERS = {"first", "last", "latest", "earliest", "max", "min"}
 _FIELD_BASED_STRUCT_REDUCERS = {"latest", "earliest", "max", "min"}
+_MAX_LINK_AGGREGATE_HOPS = 3
 
 
 def _find_relation_by_link_name(relation_types: list[dict], object_type_name: str, link_name: object) -> Optional[dict]:
@@ -123,6 +124,17 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type_name: st
     return None
 
 
+def _link_aggregate_path(rule: dict) -> list[str]:
+    """Foundry-style multi-hop path (1–3). `path` wins; legacy single
+    `relation` is treated as a one-hop path.
+    """
+    path = rule.get("path")
+    if path is not None:
+        return path if isinstance(path, list) else []
+    relation = rule.get("relation")
+    return [relation] if isinstance(relation, str) and relation else []
+
+
 async def _validate_derived_properties(
     pool: asyncpg.Pool, *, derived_properties: dict[str, object], object_type_name: str, tenant_id: str,
     property_types: Optional[dict[str, dict]] = None,
@@ -130,13 +142,12 @@ async def _validate_derived_properties(
     """Enforced at publish time, same tier as `_validate_implements`. A
     plain string must name a real, currently-*active* Function plugin —
     the original shape, unchanged. A `{"kind": "link_aggregate", ...}`
-    dict is a Foundry-style reducer over a RelationType: `relation` must
-    resolve to a real RelationType touching this ObjectType
-    (`_find_relation_by_link_name`), `aggregate` must be a known
-    aggregate, and — unless `aggregate` is `count`, which needs no value
-    to read — `property` must be a real mapped property on the *related*
-    ObjectType (not this one; the value being aggregated lives on the far
-    side of the link). A `{"kind": "struct_reducer", ...}` dict is a
+    dict is a Foundry-style reducer over a RelationType path (`path` of
+    1–3 link names, or legacy single `relation`): each hop must resolve
+    from the type reached so far, `aggregate` must be a known aggregate,
+    and — unless `aggregate` is `count`, which needs no value to read —
+    `property` must be a real mapped property on the *final* related
+    ObjectType. A `{"kind": "struct_reducer", ...}` dict is a
     Foundry-style reducer over one of *this* ObjectType's own array
     properties: `property` must name an `array`-kind `property_types`
     entry, `reducer` must be a known reducer, and — for the field-based
@@ -204,19 +215,44 @@ async def _validate_derived_properties(
                 f"derived property {property_name!r}: unknown aggregate {aggregate!r} "
                 f"(expected one of {sorted(_ALLOWED_AGGREGATES)})"
             )
+        if "collect_limit" in value:
+            limit = value["collect_limit"]
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+                raise ValueError(
+                    f"derived property {property_name!r}: collect_limit must be a positive integer"
+                )
+        path = _link_aggregate_path(value)
+        if (
+            not path
+            or len(path) > _MAX_LINK_AGGREGATE_HOPS
+            or not all(isinstance(hop, str) and hop for hop in path)
+        ):
+            raise ValueError(
+                f"derived property {property_name!r}: link_aggregate requires 'path' (1–"
+                f"{_MAX_LINK_AGGREGATE_HOPS} link names) or a single 'relation'"
+            )
         if relation_types is None:
             relation_types = await list_relation_types(pool, tenant_id)
-        relation = _find_relation_by_link_name(relation_types, object_type_name, value.get("relation"))
-        if relation is None:
-            raise ValueError(f"derived property {property_name!r} names unknown relation {value.get('relation')!r}")
+        current_type = object_type_name
+        related_urn: Optional[str] = None
+        for hop in path:
+            relation = _find_relation_by_link_name(relation_types, current_type, hop)
+            if relation is None:
+                raise ValueError(
+                    f"derived property {property_name!r} names unknown relation {hop!r} "
+                    f"from ObjectType {current_type!r}"
+                )
+            source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
+            if source_name == current_type:
+                related_urn = relation["target_object_type_urn"]
+            else:
+                related_urn = relation["source_object_type_urn"]
+            current_type = related_urn.rsplit(":", 1)[-1]
         if aggregate != "count":
             related_property = value.get("property")
             if not related_property:
                 raise ValueError(f"derived property {property_name!r}: aggregate {aggregate!r} requires a 'property'")
-            source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
-            related_urn = (
-                relation["target_object_type_urn"] if source_name == object_type_name else relation["source_object_type_urn"]
-            )
+            assert related_urn is not None
             related_definition = await get_object_type(pool, related_urn)
             if related_definition is None or related_property not in related_definition["property_mapping"]:
                 raise ValueError(
@@ -368,6 +404,47 @@ def _validate_conditional_formats(
 
 
 _ALLOWED_PROPERTY_TYPE_KINDS = {"value_type", "shared_property_type", "struct", "array"}
+_ALLOWED_RENDER_HINTS = frozenset({"searchable", "sortable", "selectable", "identifier"})
+_ALLOWED_TYPE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def _validate_property_control_metadata(property_name: str, rule: dict, *, nested: bool) -> None:
+    """Top-level-only Foundry-style property control metadata."""
+    if nested and any(k in rule for k in ("editable", "required", "visibility", "render_hints", "type_classes")):
+        raise ValueError(
+            f"property_types entry for {property_name!r}: control metadata "
+            f"(editable/required/visibility/render_hints/type_classes) only applies to a top-level property"
+        )
+    if nested:
+        return
+    for flag in ("editable", "required"):
+        if flag in rule and not isinstance(rule[flag], bool):
+            raise ValueError(f"property_types entry for {property_name!r}: {flag!r} must be a boolean")
+    if "visibility" in rule and rule["visibility"] not in ("prominent", "normal", "hidden"):
+        raise ValueError(
+            f"property_types entry for {property_name!r}: visibility must be "
+            f"'prominent', 'normal', or 'hidden'"
+        )
+    if "render_hints" in rule:
+        hints = rule["render_hints"]
+        if not isinstance(hints, list) or not all(isinstance(h, str) for h in hints):
+            raise ValueError(f"property_types entry for {property_name!r}: render_hints must be a list of strings")
+        unknown = set(hints) - _ALLOWED_RENDER_HINTS
+        if unknown:
+            raise ValueError(
+                f"property_types entry for {property_name!r}: unknown render_hints {sorted(unknown)} "
+                f"(expected subset of {sorted(_ALLOWED_RENDER_HINTS)})"
+            )
+    if "type_classes" in rule:
+        classes = rule["type_classes"]
+        if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
+            raise ValueError(f"property_types entry for {property_name!r}: type_classes must be a list of strings")
+        for cls in classes:
+            if not _ALLOWED_TYPE_CLASS_RE.match(cls):
+                raise ValueError(
+                    f"property_types entry for {property_name!r}: invalid type class {cls!r} "
+                    f"(expected lowercase identifier, e.g. 'priority')"
+                )
 
 
 async def _validate_property_types(
@@ -386,10 +463,14 @@ async def _validate_property_types(
     needed for this — `core.py`'s `_parse_struct_or_array` already
     `json.loads`s any array shape generically.
 
-    A top-level entry may also carry `editable`/`required` (bool,
-    property control) — checked structurally here (well-formed, and
-    only ever on a top-level entry), enforced against real Action edits
-    in `actions/declarative.py`'s `request_generic_action`.
+    A top-level entry may also carry `editable`/`required`/`visibility`
+    (property control), plus Foundry-style `render_hints` (list of
+    searchable/sortable/selectable/identifier) and `type_classes`
+    (lowercase identifier strings) — checked structurally here
+    (well-formed, and only ever on a top-level entry), enforced against
+    real Action edits in `actions/declarative.py`'s
+    `request_generic_action`. Render hints also drive unified-search
+    indexing (`search.index_rows`).
     """
     from . import shared_property_types as shared_property_types_module
     from . import value_types as value_types_module
@@ -399,17 +480,14 @@ async def _validate_property_types(
     async def _validate_leaf(property_name: str, rule: dict, *, in_struct: bool = False, in_array: bool = False) -> None:
         nested = in_struct or in_array
         kind = rule.get("kind")
+        _validate_property_control_metadata(property_name, rule, nested=nested)
+        # Metadata-only entry (visibility / editable / required / hints without a typed kind).
+        if kind is None:
+            if nested:
+                raise ValueError(f"property_types entry for {property_name!r}: nested fields require a kind")
+            return
         if kind not in _ALLOWED_PROPERTY_TYPE_KINDS:
             raise ValueError(f"property_types entry for {property_name!r} has unknown kind {kind!r} (expected one of {sorted(_ALLOWED_PROPERTY_TYPE_KINDS)})")
-        if nested and ("editable" in rule or "required" in rule):
-            raise ValueError(
-                f"property_types entry for {property_name!r}: 'editable'/'required' only apply to a top-level "
-                f"property, not a nested struct/array field"
-            )
-        if not nested:
-            for flag in ("editable", "required"):
-                if flag in rule and not isinstance(rule[flag], bool):
-                    raise ValueError(f"property_types entry for {property_name!r}: {flag!r} must be a boolean")
         if kind == "value_type":
             value_type_name = rule.get("value_type")
             if await value_types_module.get_value_type(pool, tenant_id, value_type_name) is None:
@@ -479,6 +557,12 @@ async def propose_object_type_version(
     property_formats: Optional[dict[str, dict]] = None,
     conditional_formats: Optional[dict[str, list]] = None,
     property_types: Optional[dict[str, dict]] = None,
+    primary_key: Optional[str] = None,
+    title_key: Optional[str] = None,
+    plural_display_name: Optional[str] = None,
+    lifecycle_status: Optional[str] = None,
+    visibility: Optional[str] = None,
+    icon: Optional[str] = None,
 ) -> dict:
     """Creates a `draft` version — never touches the live `object_type`
     row (everything else in this build keeps reading the current
@@ -517,18 +601,35 @@ async def propose_object_type_version(
     new_property_types = (
         property_types if property_types is not None else (current.get("property_types") or {})
     )
+    new_primary_key = primary_key if primary_key is not None else (current.get("primary_key") or "id")
+    new_title_key = title_key if title_key is not None else current.get("title_key")
+    new_plural = plural_display_name if plural_display_name is not None else (current.get("plural_display_name") or "")
+    new_lifecycle = lifecycle_status if lifecycle_status is not None else (current.get("lifecycle_status") or "experimental")
+    new_visibility = visibility if visibility is not None else (current.get("visibility") or "normal")
+    new_icon = icon if icon is not None else current.get("icon")
+
+    validate_ot_metadata(
+        property_mapping=new_mapping,
+        primary_key=new_primary_key,
+        title_key=new_title_key,
+        lifecycle_status=new_lifecycle,
+        visibility=new_visibility,
+    )
 
     await pool.execute(
         """
         INSERT INTO object_type_version
             (object_type_urn, tenant_id, version, property_mapping, description, implements, derived_properties,
-             project_urn, markings, property_formats, conditional_formats, property_types, status)
-        VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, 'draft')
+             project_urn, markings, property_formats, conditional_formats, property_types,
+             primary_key, title_key, plural_display_name, lifecycle_status, visibility, icon, status)
+        VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
+                $13, $14, $15, $16, $17, $18, 'draft')
         """,
         object_type_urn, current["tenant_id"], next_version,
         json.dumps(new_mapping), new_description, json.dumps(new_implements), json.dumps(new_derived_properties),
         new_project_urn, json.dumps(new_markings), json.dumps(new_property_formats),
         json.dumps(new_conditional_formats), json.dumps(new_property_types),
+        new_primary_key, new_title_key, new_plural, new_lifecycle, new_visibility, new_icon,
     )
     return await get_object_type_version(pool, object_type_urn, next_version)
 
@@ -537,6 +638,7 @@ async def _run_publish_validations(
     pool: asyncpg.Pool,
     *,
     draft: dict,
+    current: dict | None,
     object_type_name: str,
     implements: list,
     derived_properties: dict,
@@ -555,6 +657,24 @@ async def _run_publish_validations(
     (`_validate_property_formats`, `_validate_conditional_formats`) are
     also called here without `await`.
     """
+    primary_key = draft.get("primary_key") or "id"
+    title_key = draft.get("title_key")
+    lifecycle_status = draft.get("lifecycle_status") or "experimental"
+    visibility = draft.get("visibility") or "normal"
+    validate_ot_metadata(
+        property_mapping=draft["property_mapping"],
+        primary_key=primary_key,
+        title_key=title_key,
+        lifecycle_status=lifecycle_status,
+        visibility=visibility,
+    )
+    if current and (current.get("lifecycle_status") or "experimental") == "active":
+        live_pk = current.get("primary_key") or "id"
+        if primary_key != live_pk:
+            raise ValueError(
+                f"cannot change primary_key from {live_pk!r} to {primary_key!r} while "
+                f"lifecycle_status is active — deprecate or keep the existing key"
+            )
     if implements:
         await _validate_implements(
             pool,
@@ -648,12 +768,17 @@ async def _write_publish(
         """
         UPDATE object_type SET version = $1, property_mapping = $2::jsonb, description = $3,
             implements = $4::jsonb, derived_properties = $5::jsonb, project_urn = $6, markings = $7::jsonb,
-            property_formats = $8::jsonb, conditional_formats = $9::jsonb, property_types = $10::jsonb
-        WHERE urn = $11
+            property_formats = $8::jsonb, conditional_formats = $9::jsonb, property_types = $10::jsonb,
+            primary_key = $11, title_key = $12, plural_display_name = $13,
+            lifecycle_status = $14, visibility = $15, icon = $16
+        WHERE urn = $17
         """,
         version, json.dumps(draft["property_mapping"]), draft["description"],
         json.dumps(implements), json.dumps(derived_properties), project_urn, json.dumps(markings),
-        json.dumps(property_formats), json.dumps(conditional_formats), json.dumps(property_types), object_type_urn,
+        json.dumps(property_formats), json.dumps(conditional_formats), json.dumps(property_types),
+        draft.get("primary_key") or "id", draft.get("title_key"), draft.get("plural_display_name") or "",
+        draft.get("lifecycle_status") or "experimental", draft.get("visibility") or "normal", draft.get("icon"),
+        object_type_urn,
     )
     event_id = uuid.uuid4().hex
     event = EventEnvelope(
@@ -722,6 +847,7 @@ async def publish_object_type_version(
     await _run_publish_validations(
         pool,
         draft=draft,
+        current=current,
         object_type_name=object_type_name,
         implements=implements,
         derived_properties=derived_properties,

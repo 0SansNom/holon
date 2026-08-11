@@ -34,16 +34,17 @@ router = APIRouter()
 
 
 async def _generic_object_type_or_404(object_type: str, principal: Principal) -> dict:
-    if object_type in core.OBJECT_TYPE_URNS:
+    if object_type in core.OBJECT_TYPE_URNS and principal.tenant_id == core.TENANT_ID:
         # Already served by a specific route in `seeded.py`; reaching
         # here would mean registration order broke, not that this name
-        # is unknown.
+        # is unknown. (Other tenants never hit the seeded routes' ReBAC
+        # on bootstrap URNs — they resolve via catalogue below.)
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
-    urn = ontology.object_type_urn(principal.tenant_id, core.WORKSPACE_ID, object_type)
-    definition = await ontology.get_object_type(core.pool, urn)
-    if definition is None:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
-    return definition
+    types = await ontology.list_object_types(core.pool, principal.tenant_id)
+    for definition in types:
+        if definition.get("name") == object_type or definition["urn"].rsplit(":", 1)[-1] == object_type:
+            return definition
+    raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
 
 
 async def _merge_declarative_edits(rows: list[dict], object_type: str, tenant_id: str) -> list[dict]:
@@ -86,7 +87,10 @@ async def list_generic_objects(object_type: str, principal: Principal = Depends(
     dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
     fetch_fn = functools.partial(resolver.fetch_generic, dataset_name)
     rows = await core._resolve_many(object_type, principal.tenant_id, fetch_fn, principal=principal)
-    return await _merge_declarative_edits(rows, object_type, principal.tenant_id)
+    rows = await _merge_declarative_edits(rows, object_type, principal.tenant_id)
+    for row in rows:
+        row["title"] = ontology.title_of(row, definition)
+    return rows
 
 
 @router.get("/objects/{object_type}/{instance_id}")
@@ -100,7 +104,9 @@ async def get_generic_object(
     row = await core._resolve_one(object_type, principal.tenant_id, instance_id, fetch_fn, "id_value", principal=principal)
     if row is None:
         raise HTTPException(status_code=404, detail=f"{object_type}/{instance_id} not found")
-    return (await _merge_declarative_edits([row], object_type, principal.tenant_id))[0]
+    merged = (await _merge_declarative_edits([row], object_type, principal.tenant_id))[0]
+    merged["title"] = ontology.title_of(merged, definition)
+    return merged
 
 
 class InvokeActionRequest(BaseModel):
@@ -112,7 +118,7 @@ class InvokeActionRequest(BaseModel):
 @router.post("/objects/{object_type}/{instance_id}/actions/{action_name}")
 async def invoke_generic_action(
     object_type: str, instance_id: str, action_name: str, request: InvokeActionRequest,
-    principal: Principal = Depends(core.current_principal),
+    principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
     """The generic invocation endpoint for a declarative Action Type —
     alongside the two hardcoded Customer action endpoints in
@@ -135,7 +141,7 @@ async def invoke_generic_action(
     # seeded-or-self-serve-agnostic resolver every other cross-cutting
     # route (e.g. the revert endpoint below) already uses instead.
     try:
-        object_type_urn = await core._object_type_urn_for(object_type)
+        object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
     action_type = await ontology.get_action_type(core.pool, principal.tenant_id, action_name)
@@ -147,7 +153,7 @@ async def invoke_generic_action(
             core.pool,
             action_name=action_name,
             tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID,
+            workspace_id=workspace_id,
             object_type=object_type,
             instance_id=instance_id,
             principal=principal,
@@ -162,7 +168,9 @@ async def invoke_generic_action(
 
 
 @router.post("/action-invocations/{invocation_id}/revert")
-async def revert_action_invocation(invocation_id: int, principal: Principal = Depends(core.current_principal)) -> dict:
+async def revert_action_invocation(
+    invocation_id: int, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
     """The backing endpoint for a Timeline "Undo" button — a
     user-initiated single-invocation revert, not a saga compensator (see
     `revert_declarative_action`'s own docstring for that distinction).
@@ -181,7 +189,7 @@ async def revert_action_invocation(invocation_id: int, principal: Principal = De
         raise HTTPException(status_code=404, detail=f"action invocation {invocation_id} not found")
     object_type, _ = _object_type_and_instance_id_from_instance_urn(row["instance_urn"])
     try:
-        object_type_urn = await core._object_type_urn_for(object_type)
+        object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
     action_type = await ontology.get_action_type(core.pool, principal.tenant_id, row["action_name"])
@@ -190,7 +198,7 @@ async def revert_action_invocation(invocation_id: int, principal: Principal = De
     try:
         return await revert_declarative_action(
             core.pool, invocation_id=invocation_id, tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID, actor=principal,
+            workspace_id=workspace_id, actor=principal,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -30,6 +30,7 @@ import httpx
 from prometheus_client import Counter
 
 from .auth import Principal
+from .audit import emit_audit
 from .observability import CircuitBreaker
 
 logger = logging.getLogger("holon_common.authz")
@@ -116,9 +117,9 @@ class PermissionClient:
                 {
                     "operation": "OPERATION_TOUCH",
                     "relationship": {
-                        "resource": {"object_type": resource_type, "object_id": _object_id(resource_urn)},
+                        "resource": {"objectType": resource_type, "objectId": _object_id(resource_urn)},
                         "relation": relation,
-                        "subject": {"object": {"object_type": subject_type, "object_id": _object_id(subject_urn)}},
+                        "subject": {"object": {"objectType": subject_type, "objectId": _object_id(subject_urn)}},
                     },
                 }
             ]
@@ -282,6 +283,15 @@ class PermissionClient:
         if not granted:
             decision = Decision(False, f"rebac_denied: {principal.urn} has no '{permission}' on {resource_urn}")
             logger.info("authz: %s", decision.reason)
+            emit_audit(
+                action="authz.decide",
+                outcome="deny" if not decision.allowed else "allow",
+                tenant_id=principal.tenant_id,
+                actor_urn=principal.urn,
+                resource_type=resource_type,
+                resource_urn=resource_urn,
+                reason=decision.reason,
+            )
             return decision
 
         if principal.on_behalf_of is not None:
@@ -295,16 +305,43 @@ class PermissionClient:
                     f"which has no '{permission}' on {resource_urn}",
                 )
                 logger.info("authz: %s", decision.reason)
+                emit_audit(
+                    action="authz.decide",
+                    outcome="deny",
+                    tenant_id=principal.tenant_id,
+                    actor_urn=principal.urn,
+                    resource_type=resource_type,
+                    resource_urn=resource_urn,
+                    reason=decision.reason,
+                )
                 return decision
 
         allowed_by_policy = await self.check_abac(principal, resource_attributes or {})
         if not allowed_by_policy:
             decision = Decision(False, f"abac_denied: policy restricted '{permission}' on {resource_urn}")
             logger.info("authz: %s", decision.reason)
+            emit_audit(
+                action="authz.decide",
+                outcome="deny",
+                tenant_id=principal.tenant_id,
+                actor_urn=principal.urn,
+                resource_type=resource_type,
+                resource_urn=resource_urn,
+                reason=decision.reason,
+            )
             return decision
 
         decision = Decision(True, f"granted: {principal.urn} -> {permission} on {resource_urn}")
         logger.info("authz: %s", decision.reason)
+        emit_audit(
+            action="authz.decide",
+            outcome="allow",
+            tenant_id=principal.tenant_id,
+            actor_urn=principal.urn,
+            resource_type=resource_type,
+            resource_urn=resource_urn,
+            reason=decision.reason,
+        )
         return decision
 
 

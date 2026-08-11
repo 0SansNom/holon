@@ -20,13 +20,15 @@ from holon_common.authz import PermissionClient
 _DDL = """
 CREATE TABLE IF NOT EXISTS tenant (
     tenant_id TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS workspace (
     workspace_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenant(tenant_id),
-    display_name TEXT NOT NULL
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS principal (
@@ -36,12 +38,18 @@ CREATE TABLE IF NOT EXISTS principal (
     display_name TEXT NOT NULL,
     on_behalf_of TEXT,
     country TEXT,
-    client_secret TEXT NOT NULL DEFAULT 'unset'
+    client_secret TEXT NOT NULL DEFAULT 'unset',
+    status TEXT NOT NULL DEFAULT 'active',
+    oidc_sub TEXT
 );
 
 -- additive migrations for databases seeded before these columns existed
 ALTER TABLE principal ADD COLUMN IF NOT EXISTS country TEXT;
 ALTER TABLE principal ADD COLUMN IF NOT EXISTS client_secret TEXT NOT NULL DEFAULT 'unset';
+ALTER TABLE principal ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE principal ADD COLUMN IF NOT EXISTS oidc_sub TEXT;
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE workspace ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 
 -- Org/Space/Project hierarchy — one tier below Workspace,
 -- created at runtime via governance (unlike tenant/workspace, which are
@@ -51,6 +59,21 @@ CREATE TABLE IF NOT EXISTS project (
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS principal_oidc_sub_uidx
+    ON principal (oidc_sub) WHERE oidc_sub IS NOT NULL;
+
+-- OIDC authorization-code + PKCE state, keyed by the `state` param —
+-- Postgres instead of in-process memory so `/oidc/login` and
+-- `/oidc/callback` can land on different `identity` replicas (ADR 026,
+-- multi-replica follow-up). Short-lived (10 min, see oidc.py's cleanup
+-- query) and single-use (deleted by exchange_code on first read).
+CREATE TABLE IF NOT EXISTS oidc_pending_state (
+    state TEXT PRIMARY KEY,
+    verifier TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
@@ -191,6 +214,110 @@ async def get_project(pool: asyncpg.Pool, urn: str) -> Optional[dict]:
 async def list_projects(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     rows = await pool.fetch("SELECT * FROM project WHERE tenant_id = $1 ORDER BY name", tenant_id)
     return [dict(row) for row in rows]
+
+
+async def create_tenant(pool: asyncpg.Pool, *, tenant_id: str, display_name: str) -> dict:
+    await pool.execute(
+        """
+        INSERT INTO tenant (tenant_id, display_name, status)
+        VALUES ($1, $2, 'active')
+        """,
+        tenant_id,
+        display_name,
+    )
+    return await get_tenant(pool, tenant_id)
+
+
+async def get_tenant(pool: asyncpg.Pool, tenant_id: str) -> Optional[dict]:
+    row = await pool.fetchrow("SELECT * FROM tenant WHERE tenant_id = $1", tenant_id)
+    return dict(row) if row else None
+
+
+async def list_tenants(pool: asyncpg.Pool) -> list[dict]:
+    rows = await pool.fetch("SELECT * FROM tenant ORDER BY tenant_id")
+    return [dict(row) for row in rows]
+
+
+async def set_tenant_status(pool: asyncpg.Pool, tenant_id: str, status: str) -> Optional[dict]:
+    await pool.execute("UPDATE tenant SET status = $2 WHERE tenant_id = $1", tenant_id, status)
+    return await get_tenant(pool, tenant_id)
+
+
+async def create_workspace(
+    pool: asyncpg.Pool, *, tenant_id: str, workspace_id: str, display_name: str
+) -> dict:
+    await pool.execute(
+        """
+        INSERT INTO workspace (workspace_id, tenant_id, display_name, status)
+        VALUES ($1, $2, $3, 'active')
+        """,
+        workspace_id,
+        tenant_id,
+        display_name,
+    )
+    return await get_workspace(pool, workspace_id)
+
+
+async def get_workspace(pool: asyncpg.Pool, workspace_id: str) -> Optional[dict]:
+    row = await pool.fetchrow("SELECT * FROM workspace WHERE workspace_id = $1", workspace_id)
+    return dict(row) if row else None
+
+
+async def list_workspaces(pool: asyncpg.Pool, tenant_id: Optional[str] = None) -> list[dict]:
+    if tenant_id is None:
+        rows = await pool.fetch("SELECT * FROM workspace ORDER BY tenant_id, workspace_id")
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM workspace WHERE tenant_id = $1 ORDER BY workspace_id", tenant_id
+        )
+    return [dict(row) for row in rows]
+
+
+async def set_workspace_status(pool: asyncpg.Pool, workspace_id: str, status: str) -> Optional[dict]:
+    await pool.execute(
+        "UPDATE workspace SET status = $2 WHERE workspace_id = $1", workspace_id, status
+    )
+    return await get_workspace(pool, workspace_id)
+
+
+async def insert_principal(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    type: str,
+    local_name: str,
+    display_name: str,
+    country: Optional[str] = None,
+    on_behalf_of: Optional[str] = None,
+    client_secret: Optional[str] = None,
+    oidc_sub: Optional[str] = None,
+) -> dict:
+    type_segment = {"service_account": "service-account", "service-account": "service-account"}.get(type, type)
+    urn = build_urn(tenant_id, "global", type_segment, local_name)
+    secret = client_secret if client_secret is not None else client_secret_for(local_name)
+    db_type = "service_account" if type in ("service_account", "service-account") else type
+    await pool.execute(
+        """
+        INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret, status, oidc_sub)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8)
+        """,
+        urn,
+        db_type,
+        tenant_id,
+        display_name,
+        on_behalf_of,
+        country,
+        secret,
+        oidc_sub,
+    )
+    row = await pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
+    return dict(row)
+
+
+async def set_principal_status(pool: asyncpg.Pool, urn: str, status: str) -> Optional[dict]:
+    await pool.execute("UPDATE principal SET status = $2 WHERE urn = $1", urn, status)
+    row = await pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
+    return dict(row) if row else None
 
 
 async def ensure_authz_seeded(client: PermissionClient, schema_path: str, tenant_id: str, workspace_id: str) -> None:

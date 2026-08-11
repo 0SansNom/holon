@@ -54,25 +54,47 @@ type PropertyTypeLeaf =
   | { kind: "value_type"; value_type: string }
   | { kind: "shared_property_type"; shared_property_type: string };
 
-// `editable`/`required` (property control) only ever apply at this
-// top level — never inside a nested `struct.properties`/`array.element`
-// entry, which stays a plain `PropertyTypeLeaf`.
-export type PropertyTypeRule = { editable?: boolean; required?: boolean } & (
+// `editable`/`required`/`visibility`/`render_hints`/`type_classes` (property
+// control) only ever apply at this top level — never inside a nested
+// `struct.properties`/`array.element` entry, which stays a plain
+// `PropertyTypeLeaf`.
+// `kind` may be omitted for metadata-only entries (visibility etc.).
+export type PropertyRenderHint = "searchable" | "sortable" | "selectable" | "identifier";
+
+export type PropertyTypeRule = {
+  editable?: boolean;
+  required?: boolean;
+  visibility?: "prominent" | "normal" | "hidden";
+  /** Foundry-style render hints. Absent ⇒ searchable by default at index time. */
+  render_hints?: PropertyRenderHint[];
+  /** Free-form type classes (e.g. "priority", "important"). */
+  type_classes?: string[];
+} & (
+  | { kind?: undefined }
   | PropertyTypeLeaf
   | { kind: "struct"; properties: Record<string, PropertyTypeLeaf> }
-  | { kind: "array"; element: PropertyTypeLeaf }
+  | {
+      kind: "array";
+      element: PropertyTypeLeaf | { kind: "struct"; properties: Record<string, PropertyTypeLeaf> };
+    }
 );
 
 // A derived property is either a Function plugin name (string) or a
-// Foundry-style reducer over a RelationType — `relation` matches the
-// same forward-local-name-or-target_property convention the `/links`
-// endpoint resolves server-side; `property` names a property on the
-// *related* ObjectType and is required unless `aggregate` is "count".
+// Foundry-style reducer over a RelationType — `relation` (1 hop) or
+// `path` (1–3 hops) matches the same forward-local-name-or-target_property
+// convention the `/links` endpoint resolves server-side; `property` names
+// a property on the *final* related ObjectType and is required unless
+// `aggregate` is "count".
 export interface DerivedPropertyLinkAggregate {
   kind: "link_aggregate";
-  relation: string;
-  aggregate: "sum" | "count" | "avg" | "min" | "max";
+  /** @deprecated Prefer `path`; kept for one-hop configs. */
+  relation?: string;
+  /** Link accessor names, 1–3 hops (Foundry multi-hop derived properties). */
+  path?: string[];
+  aggregate: "sum" | "count" | "avg" | "min" | "max" | "collect_list" | "collect_set";
   property?: string;
+  /** Cap for collect_list / collect_set (default 10). */
+  collect_limit?: number;
 }
 
 // A reducer over one of *this* ObjectType's own array properties
@@ -107,6 +129,12 @@ export interface ObjectType {
   created_at: string;
   column_classification?: Record<string, string>;
   project_urn?: string | null;
+  primary_key?: string;
+  title_key?: string | null;
+  plural_display_name?: string;
+  lifecycle_status?: "experimental" | "active" | "deprecated";
+  visibility?: "prominent" | "normal" | "hidden";
+  icon?: string | null;
 }
 
 export type ValueTypeBaseType =
@@ -239,6 +267,12 @@ export interface ObjectTypeVersion {
   property_formats: Record<string, PropertyFormatRule>;
   conditional_formats: Record<string, ConditionalFormatRule[]>;
   property_types: Record<string, PropertyTypeRule>;
+  primary_key?: string;
+  title_key?: string | null;
+  plural_display_name?: string;
+  lifecycle_status?: "experimental" | "active" | "deprecated";
+  visibility?: "prominent" | "normal" | "hidden";
+  icon?: string | null;
 }
 
 // The `ontology_branch` table backs both the ObjectType-specific branch
@@ -370,6 +404,27 @@ export interface RelationType {
   source_property: string;
   target_property: string;
   cardinality: string;
+  storage_kind?: "foreign_key" | "join_dataset" | "object_backed";
+  join_dataset_urn?: string | null;
+  join_source_column?: string | null;
+  join_target_column?: string | null;
+  mid_object_type_urn?: string | null;
+  mid_source_property?: string | null;
+  mid_target_property?: string | null;
+}
+
+export interface ObjectSet {
+  urn: string;
+  tenant_id: string;
+  workspace_id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  object_type_urn: string;
+  definition: { all: Array<{ property: string; op: string; value: unknown }> };
+  lifecycle_status: "experimental" | "active" | "deprecated";
+  visibility: "prominent" | "normal" | "hidden";
+  created_at: string;
 }
 
 export interface TimelineEvent {
@@ -388,7 +443,9 @@ export interface ObjectLinksResponse {
   relation: string;
   direction: "toward_one" | "toward_many" | null;
   cardinality: string;
+  storage_kind?: string;
   items: Array<Record<string, unknown>>;
+  link_objects?: Array<{ object_type: string | null; object: Record<string, unknown> }>;
 }
 
 export interface ObjectTypeGroup {

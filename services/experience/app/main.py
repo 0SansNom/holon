@@ -23,6 +23,7 @@ from holon_common import (
     CircuitBreakerOpenError,
     InvalidURNError,
     Principal,
+    active_jwt,
     build_urn,
     configure_json_logging,
     create_pool,
@@ -48,7 +49,7 @@ KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
-JWT_SECRET = os.environ["HOLON_JWT_SECRET"]
+JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
 OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
 
@@ -73,7 +74,9 @@ def _agent_app_session_token(on_behalf_of_urn: str) -> str:
     principal = Principal(
         urn=AGENT_URN, type="agent", tenant_id=TENANT_ID, display_name="Ingest Bot", on_behalf_of=on_behalf_of_urn,
     )
-    return issue_token(principal, JWT_SECRET, ttl_seconds=300)
+    return issue_token(
+        principal, JWT_SECRET, ttl_seconds=300, kid=JWT_ACTIVE_KID, secrets=JWT_SECRETS
+    )
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -131,7 +134,7 @@ instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
-current_principal = make_principal_dependency(JWT_SECRET)
+current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 
 class TokenRequest(BaseModel):

@@ -28,7 +28,7 @@ async def _approval_object_type_urn(approval: dict) -> str:
     Action Type's approval to be authorizable at all.
     """
     definition = await actions._get_action_definition(core.pool, approval["tenant_id"], approval["action_name"])
-    return await core._object_type_urn_for(definition["target_object_type"])
+    return await core._object_type_urn_for(definition["target_object_type"], tenant_id=approval["tenant_id"])
 
 
 class ActionRequest(BaseModel):

@@ -4,12 +4,27 @@ x-app-env: &app-env
   HOLON_TENANT_ID: acme
   HOLON_WORKSPACE_ID: demo
   HOLON_JWT_SECRET: ${HOLON_JWT_SECRET}
+  HOLON_JWT_SECRETS: ${HOLON_JWT_SECRETS:-}
+  HOLON_JWT_ACTIVE_KID: ${HOLON_JWT_ACTIVE_KID:-}
+  HOLON_SECRET_BACKEND: ${HOLON_SECRET_BACKEND:-env}
   HOLON_KAFKA_BOOTSTRAP: redpanda:9092
   HOLON_SPICEDB_URL: http://spicedb:8443
   HOLON_SPICEDB_PRESHARED_KEY: ${HOLON_SPICEDB_PRESHARED_KEY}
   HOLON_SPICEDB_SCHEMA_PATH: /app/spicedb-schema.zed
   HOLON_OPA_URL: http://opa:8181
-  HOLON_OTLP_ENDPOINT: http://jaeger:4318
+  # Point at your collector when you have one; without a listener the
+  # OTLP exporter soft-fails (logged, non-blocking) — no bundled Jaeger.
+  HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-http://127.0.0.1:4318}
+  # OIDC (identity reads these; empty issuer keeps demo secret login only).
+  HOLON_OIDC_ISSUER: ${HOLON_OIDC_ISSUER:-}
+  HOLON_OIDC_CLIENT_ID: ${HOLON_OIDC_CLIENT_ID:-}
+  HOLON_OIDC_CLIENT_SECRET: ${HOLON_OIDC_CLIENT_SECRET:-}
+  HOLON_OIDC_REDIRECT_URI: ${HOLON_OIDC_REDIRECT_URI:-http://localhost:8001/oidc/callback}
+  HOLON_OIDC_SCOPES: ${HOLON_OIDC_SCOPES:-openid profile email groups}
+  HOLON_OIDC_TENANT_CLAIM: ${HOLON_OIDC_TENANT_CLAIM:-tenant_id}
+  HOLON_OIDC_TENANT_GROUP_PREFIX: ${HOLON_OIDC_TENANT_GROUP_PREFIX:-tenant:}
+  HOLON_OIDC_WORKSPACE_GROUP_PREFIX: ${HOLON_OIDC_WORKSPACE_GROUP_PREFIX:-workspace:}
+  HOLON_OIDC_POST_LOGIN_REDIRECT: ${HOLON_OIDC_POST_LOGIN_REDIRECT:-http://localhost:5173/objects}
 
 services:
   # ---- Infrastructure ----------------------------------------------------
@@ -87,15 +102,37 @@ services:
     ports:
       - "8181:8181"
 
+  # One-shot: the postgres datastore engine below refuses every request
+  # ("datastore is not migrated") until this has run once against a fresh
+  # `holon_spicedb` database — same service_completed_successfully gate
+  # `minio-init` already uses for `iceberg-rest`. Re-running against an
+  # already-migrated database is a safe no-op.
+  spicedb-migrate:
+    image: authzed/spicedb:latest
+    command:
+      - datastore
+      - migrate
+      - head
+      - --datastore-engine=postgres
+      - --datastore-conn-uri=postgres://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_spicedb?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   spicedb:
     image: authzed/spicedb:latest
     command:
       - serve
       - --grpc-preshared-key=${HOLON_SPICEDB_PRESHARED_KEY}
       - --http-enabled
+      - --datastore-engine=postgres
+      - --datastore-conn-uri=postgres://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_spicedb?sslmode=disable
     ports:
       - "50051:50051"
       - "8443:8443"
+    depends_on:
+      spicedb-migrate:
+        condition: service_completed_successfully
 
   opa:
     image: openpolicyagent/opa:latest
@@ -183,73 +220,17 @@ services:
       # 2.12+'s security plugin demands this even with the plugin disabled
       # flag above (its own bootstrap check runs first) — a fixed dev-only
       # value, same treatment as SpiceDB's preshared key elsewhere in this
-      # compose file.
+      # compose file. Production chart enables OpenSearch security.
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
     ports:
       - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
     healthcheck:
       test: [ "CMD-SHELL", "curl -su admin:${OPENSEARCH_ADMIN_PASSWORD} http://localhost:9200/_cluster/health | grep -q '\"status\":\"'" ]
       interval: 5s
       timeout: 5s
       retries: 30
-
-  # Traces (Jaeger, receives OTLP), metrics scrape+store
-  # (Prometheus), and a shared UI (Grafana) to actually look at both.
-  # Every app service already exposes `/metrics` and emits OTLP traces to
-  # `jaeger:4318` unconditionally — these three containers
-  # are what make that data queryable rather than just present.
-  #
-  # `profiles: [dev]`: opt-in, not part of the default `docker compose
-  # up` — a company deploying this is expected to point the same
-  # standard `/metrics` + OTLP output at its *own* observability stack
-  # (Datadog, Grafana Cloud, an existing Prometheus), not run a second
-  # bundled Grafana instance. No app service depends on any of these
-  # three at startup (`HOLON_OTLP_ENDPOINT` is just a URL string — the
-  # OTLP exporter degrades to logged, non-blocking export failures if
-  # Jaeger isn't there, never a startup dependency or a blocked
-  # request), so leaving them out of the default profile is safe. Bring
-  # them up locally with `docker compose --profile dev up`.
-  jaeger:
-    image: jaegertracing/all-in-one:1.60
-    restart: unless-stopped
-    profiles: [ "dev" ]
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    ports:
-      - "16686:16686"
-      - "4318:4318"
-
-  prometheus:
-    image: prom/prometheus:v2.55.1
-    restart: unless-stopped
-    profiles: [ "dev" ]
-    volumes:
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    ports:
-      - "9090:9090"
-    depends_on:
-      - identity
-      - connectivity
-      - knowledge
-      - experience
-      - automation
-
-  grafana:
-    image: grafana/grafana:11.3.0
-    restart: unless-stopped
-    profiles: [ "dev" ]
-    environment:
-      # Anonymous admin access — dev-only convenience, same posture as
-      # this build's other fixed dev credentials (SpiceDB's preshared
-      # key, OpenSearch's admin password) — not for a real deployment.
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-    volumes:
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
-    ports:
-      - "3000:3000"
-    depends_on:
-      - prometheus
 
   # Semantic retrieval's vector store (metadata
   # only, never bulk instance vectorization). No auth needed for a
@@ -260,6 +241,8 @@ services:
     restart: unless-stopped
     ports:
       - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
 
   # ---- Holon platforms -----------------
 
@@ -513,3 +496,5 @@ volumes:
   pg-data:
   minio-data:
   mongo-data:
+  opensearch-data:
+  qdrant-data:

@@ -1,4 +1,4 @@
-import { Suspense, useState, useTransition } from "react";
+import { Suspense, useEffect, useState, useTransition } from "react";
 import { Tab, Tabs, type TabId } from "@blueprintjs/core";
 import { ObjectTypesTab } from "./ObjectTypesTab";
 import { InterfacesTab } from "./InterfacesTab";
@@ -7,6 +7,7 @@ import { ValueTypesTab } from "./ValueTypesTab";
 import { SharedPropertyTypesTab } from "./SharedPropertyTypesTab";
 import { ActionTypesTab } from "./ActionTypesTab";
 import { ObjectTypeGroupsTab } from "./ObjectTypeGroupsTab";
+import { ObjectSetsTab } from "./ObjectSetsTab";
 import { HealthCheckTab } from "./HealthCheckTab";
 import { usePaletteIntentStore } from "../../store/paletteIntent";
 import { RegistryPage } from "../common/PageLayout";
@@ -19,6 +20,7 @@ const TAB_BY_INTENT: Partial<Record<string, TabId>> = {
   "create-shared-property-type": "shared-property-types",
   "create-action-type": "action-types",
   "create-object-type-group": "object-type-groups",
+  "create-object-set": "object-sets",
 };
 
 const TAB_SKELETON = <RegistryTabSkeleton />;
@@ -27,6 +29,11 @@ export function OntologyPage() {
   const intent = usePaletteIntentStore((s) => s.intent);
   const [selectedTabId, setSelectedTabId] = useState<TabId>(() => TAB_BY_INTENT[intent ?? ""] ?? "object-types");
   const [isPending, startTransition] = useTransition();
+
+  useEffect(() => {
+    const tab = intent ? TAB_BY_INTENT[intent] : undefined;
+    if (tab) startTransition(() => setSelectedTabId(tab));
+  }, [intent]);
 
   function selectTab(tabId: TabId) {
     startTransition(() => setSelectedTabId(tabId));
@@ -37,9 +44,9 @@ export function OntologyPage() {
       title="Ontology"
       description={
         <>
-          Define ObjectTypes, Interfaces, RelationTypes, Value Types, Shared Property Types, and Action Types — no
-          code required. The same governance actions the CLI's <code>holon ontology</code> commands and the raw API
-          already wrap.
+          Define ObjectTypes, Interfaces, RelationTypes, Value Types, Shared Property Types, Action Types, and Object
+          Sets — no code required. The same governance actions the CLI's <code>holon ontology</code> commands and the
+          raw API already wrap.
         </>
       }
     >
@@ -51,6 +58,7 @@ export function OntologyPage() {
         <Tab id="shared-property-types" title="Shared Property Types" panel={<Suspense fallback={TAB_SKELETON}><SharedPropertyTypesTab /></Suspense>} />
         <Tab id="action-types" title="Action Types" panel={<Suspense fallback={TAB_SKELETON}><ActionTypesTab /></Suspense>} />
         <Tab id="object-type-groups" title="Object Type Groups" panel={<Suspense fallback={TAB_SKELETON}><ObjectTypeGroupsTab /></Suspense>} />
+        <Tab id="object-sets" title="Object Sets" panel={<Suspense fallback={TAB_SKELETON}><ObjectSetsTab /></Suspense>} />
         <Tab id="health-check" title="Health Check" panel={<HealthCheckTab />} />
       </Tabs>
       {isPending && <div className="hl-mt-sm hl-skeleton" style={{ width: 120, height: 16 }} aria-hidden />}

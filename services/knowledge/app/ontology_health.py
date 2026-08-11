@@ -181,6 +181,41 @@ async def _check_time_machine(object_types: list[dict]) -> list[dict]:
     return findings
 
 
+async def _check_metadata_gaps(object_types: list[dict], relation_types: list[dict]) -> list[dict]:
+    findings: list[dict] = []
+    for object_type in object_types:
+        mapping = object_type.get("property_mapping") or {}
+        pk = object_type.get("primary_key") or "id"
+        if pk not in mapping:
+            findings.append(_finding(
+                "missing_primary_key", object_type["name"],
+                f"primary_key {pk!r} is not in property_mapping — instances may not resolve reliably.",
+            ))
+        if not object_type.get("title_key"):
+            findings.append(_finding(
+                "missing_title_key", object_type["name"],
+                "No title_key configured — explorers fall back to primary_key/id.",
+            ))
+    for relation in relation_types:
+        storage = relation.get("storage_kind") or "foreign_key"
+        if relation.get("cardinality") == "many_to_many" and storage == "foreign_key":
+            findings.append(_finding(
+                "mn_without_join", relation["name"],
+                "many_to_many declared with foreign_key storage — use join_dataset or object_backed.",
+            ))
+        if storage == "join_dataset" and not relation.get("join_dataset_urn"):
+            findings.append(_finding(
+                "join_dataset_incomplete", relation["name"],
+                "storage_kind=join_dataset but join_dataset_urn is empty.",
+            ))
+        if storage == "object_backed" and not relation.get("mid_object_type_urn"):
+            findings.append(_finding(
+                "object_backed_incomplete", relation["name"],
+                "storage_kind=object_backed but mid_object_type_urn is empty.",
+            ))
+    return findings
+
+
 async def run_health_check(principal: Principal) -> list[dict]:
     """Orchestrates every check. Metadata-only checks (Action Sprawl,
     Misnomer, DRY duplication, Time Machine) run over the already-fetched
@@ -189,6 +224,7 @@ async def run_health_check(principal: Principal) -> list[dict]:
     """
     object_types = await ontology.list_object_types(core.pool, principal.tenant_id)
     action_types = await ontology.list_action_types(core.pool, principal.tenant_id)
+    relation_types = await ontology.list_relation_types(core.pool, principal.tenant_id)
 
     findings: list[dict] = []
     findings += await _check_action_sprawl(object_types, action_types)
@@ -196,4 +232,5 @@ async def run_health_check(principal: Principal) -> list[dict]:
     findings += await _check_misnomer(object_types)
     findings += await _check_dry_duplication(object_types)
     findings += await _check_time_machine(object_types)
+    findings += await _check_metadata_gaps(object_types, relation_types)
     return findings
