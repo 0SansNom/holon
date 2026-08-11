@@ -132,7 +132,19 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         status, detail = client.request("GET", f"{knowledge_url}/ontology/{name}", token=token)
         if status != 200:
             raise RuntimeError(f"GET /ontology/{name} failed ({status}): {detail}")
-        property_types = {k: _parse_property_type(v) for k, v in (detail.get("property_types") or {}).items()}
+        # A top-level entry may be metadata-only — visibility/editable/
+        # required/render_hints/type_classes with no `kind` at all
+        # (`ontology/publishing.py`'s `_validate_property_types` allows
+        # this explicitly). It contributes nothing structural to codegen,
+        # so it's skipped here rather than passed to `_parse_property_type`
+        # (which still requires `kind` for every entry it *does* see,
+        # including every nested struct/array leaf — those are never
+        # metadata-only server-side).
+        property_types = {
+            k: _parse_property_type(v)
+            for k, v in (detail.get("property_types") or {}).items()
+            if v.get("kind") is not None
+        }
         object_types.append(ObjectTypeSchema(
             name=detail["name"], description=detail["description"],
             property_mapping=detail["property_mapping"], property_types=property_types,

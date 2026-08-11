@@ -1,7 +1,24 @@
 import { useMemo, useState } from "react";
-import { Button, Callout, Card, Dialog, DialogBody, DialogFooter, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
-import { usePrincipals, useGrantWorkspaceAccess, useRevokeWorkspaceAccess } from "../../api/hooks";
-import type { IdentityPrincipal, AccessRelation } from "../../api/identity";
+import {
+  Button,
+  Callout,
+  Card,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  FormGroup,
+  HTMLSelect,
+  InputGroup,
+  Tag,
+} from "@blueprintjs/core";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import {
+  usePrincipals,
+  useGrantWorkspaceAccess,
+  useRevokeWorkspaceAccess,
+  useCreatePrincipal,
+} from "../../api/hooks";
+import { identityApi, type IdentityPrincipal, type AccessRelation } from "../../api/identity";
 import { ApiError } from "../../api/client";
 import { CardGrid, EmptyState, ErrorCallout } from "../common/ListPrimitives";
 import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
@@ -31,10 +48,6 @@ function ManageAccessDialog({ principal, onClose }: { principal: IdentityPrincip
     <Dialog isOpen title={`Workspace access — ${principal.display_name}`} onClose={onClose}>
       <DialogBody>
         <p className="hl-mono hl-text-muted">{principal.urn}</p>
-        <p className="hl-text-muted">
-          Grants/revokes are workspace-tier governance — only a principal already holding workspace{" "}
-          <code>approve</code> (admin) can do this; everyone else gets a 403 from Identity.
-        </p>
         <HTMLSelect
           fill
           value={relation}
@@ -66,9 +79,16 @@ function ManageAccessDialog({ principal, onClose }: { principal: IdentityPrincip
 
 export function PrincipalsTab() {
   const { data } = usePrincipals();
+  const { data: me } = useSuspenseQuery({ queryKey: ["whoami"], queryFn: identityApi.whoami });
+  const create = useCreatePrincipal();
   const [managing, setManaging] = useState<IdentityPrincipal | null>(null);
   const [filter, setFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [localName, setLocalName] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createdSecret, setCreatedSecret] = useState<string | null>(null);
 
   const types = useMemo(() => Array.from(new Set((data ?? []).map((p) => p.type))).sort(), [data]);
 
@@ -81,14 +101,30 @@ export function PrincipalsTab() {
     });
   }, [data, filter, typeFilter]);
 
+  async function submitCreate() {
+    setCreateError(null);
+    setCreatedSecret(null);
+    try {
+      const row = await create.mutateAsync({
+        tenant_id: me.tenant_id,
+        type: "user",
+        local_name: localName,
+        display_name: displayName,
+      });
+      setCreatedSecret(row.client_secret ?? null);
+      setLocalName("");
+      setDisplayName("");
+    } catch (err) {
+      setCreateError(err instanceof ApiError ? err.message : "Request failed");
+    }
+  }
+
   return (
     <div>
       <OntologyTabHeader
         description={
           <>
-            Every seeded principal in this tenant — agents and service accounts included, not just human users.
-            Workspace-level access (the base ReBAC grant every ObjectType's <code>read</code>/<code>write</code>/
-            <code>approve</code> permission cascades from) is managed here.
+            Principals in your tenant only (multi-org isolation). Workspace-level access is managed here.
           </>
         }
       />
@@ -109,6 +145,9 @@ export function PrincipalsTab() {
             </option>
           ))}
         </HTMLSelect>
+        <Button icon="plus" intent="primary" onClick={() => setCreateOpen(true)}>
+          Create principal
+        </Button>
         <Tag minimal className="hl-self-center">
           {filtered.length} of {data?.length ?? 0}
         </Tag>
@@ -135,6 +174,30 @@ export function PrincipalsTab() {
         {filtered.length === 0 && <EmptyState>No principals match this filter.</EmptyState>}
       </CardGrid>
       {managing && <ManageAccessDialog principal={managing} onClose={() => setManaging(null)} />}
+
+      <Dialog isOpen={createOpen} title="Create principal" onClose={() => setCreateOpen(false)}>
+        <DialogBody>
+          <FormGroup label="Local name">
+            <InputGroup value={localName} onChange={(e) => setLocalName(e.target.value)} placeholder="jdupont" />
+          </FormGroup>
+          <FormGroup label="Display name">
+            <InputGroup value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          </FormGroup>
+          {createdSecret && (
+            <Callout intent="warning" className="hl-mt-sm">
+              Client secret (shown once): <code>{createdSecret}</code>
+            </Callout>
+          )}
+          {createError && <ErrorCallout>{createError}</ErrorCallout>}
+        </DialogBody>
+        <DialogFooter
+          actions={
+            <Button intent="primary" loading={create.isPending} onClick={() => void submitCreate()}>
+              Create
+            </Button>
+          }
+        />
+      </Dialog>
     </div>
   );
 }

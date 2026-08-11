@@ -21,11 +21,10 @@ real Python plugin's job, not this one's — the point isn't to replace
 plugins, it's to remove the "write and deploy Python" requirement for
 the common case.
 
-Secret handling: `auth_header_value` is stored as plain text in Postgres —
-the same trust level this build already gives every other config value
-(env vars, seeded client_secrets). Real secret-at-rest encryption is a
-known, documented gap before this could hold production API keys, not
-silently assumed solved.
+Secret handling: prefer `secret_ref` (`env:…` / `vault:…` / `k8s:…` /
+`aws:…`) resolved at sync-time via `holon_common.secrets`. Inline
+`auth_header_value` remains supported for local demo only — do not store
+production API keys as plaintext.
 """
 
 from __future__ import annotations
@@ -35,6 +34,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncpg
 import httpx
+
+from holon_common.secrets import resolve_optional
 
 DDL = """
 CREATE TABLE IF NOT EXISTS generic_rest_source (
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS generic_rest_source (
 
 -- additive migration for databases seeded before this column existed
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS next_page_path TEXT;
+ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS secret_ref TEXT;
 
 -- Reusable auth, separate from any one source (the n8n/Activepieces
 -- idea): connect three endpoints on the same API and configure the
@@ -64,12 +66,13 @@ CREATE TABLE IF NOT EXISTS generic_rest_connection (
     tenant_id TEXT NOT NULL,
     name TEXT NOT NULL,
     auth_header_name TEXT NOT NULL,
-    auth_header_value TEXT NOT NULL,
+    auth_header_value TEXT NOT NULL DEFAULT '',
     created_by_urn TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, name)
 );
 
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS secret_ref TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS connection_name TEXT;
 
 -- Scheduling (the Kestra idea: decouple "when" from "how") — an
@@ -295,14 +298,22 @@ async def register_source(
 
 
 async def list_scheduled_sources(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
-    """Every active source with a schedule — `main.py`'s scheduler loop
-    joins this against its own `sync_run` table (owned there, not here)
-    to decide which are actually due.
+    """Every active source with a schedule for one tenant — see
+    `list_all_scheduled_sources` for the cross-tenant scheduler path.
     """
     rows = await pool.fetch(
         "SELECT name, schedule_interval_minutes FROM generic_rest_source "
         "WHERE tenant_id = $1 AND status = 'active' AND schedule_interval_minutes IS NOT NULL",
         tenant_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def list_all_scheduled_sources(pool: asyncpg.Pool) -> list[dict]:
+    """Active scheduled sources across every tenant (scheduler loop)."""
+    rows = await pool.fetch(
+        "SELECT tenant_id, name, schedule_interval_minutes FROM generic_rest_source "
+        "WHERE status = 'active' AND schedule_interval_minutes IS NOT NULL"
     )
     return [dict(row) for row in rows]
 
@@ -426,7 +437,7 @@ def _add_query_param(url: str, key: str, value: str) -> str:
 
 async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
     row = await pool.fetchrow(
-        "SELECT base_url, auth_header_name, auth_header_value, record_path, next_page_path, connection_name, "
+        "SELECT base_url, auth_header_name, auth_header_value, secret_ref, record_path, next_page_path, connection_name, "
         "cursor_property, incremental_param, last_cursor_value "
         "FROM generic_rest_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
         tenant_id, name,
@@ -436,20 +447,20 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
 
     headers: dict[str, str] = {}
     if row["connection_name"]:
-        # Not `get_connection` (its `_CONNECTION_PUBLIC_COLUMNS` never
-        # includes the secret) — this is the one place the real value is
-        # actually read back, for the request itself, not for display.
         connection = await pool.fetchrow(
-            "SELECT auth_header_name, auth_header_value FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
+            "SELECT auth_header_name, auth_header_value, secret_ref FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
             tenant_id, row["connection_name"],
         )
         if connection is None:
             raise SourceFetchError(
                 f"source {name!r} references connection {row['connection_name']!r}, which no longer exists"
             )
-        headers[connection["auth_header_name"]] = connection["auth_header_value"]
-    elif row["auth_header_name"] and row["auth_header_value"]:
-        headers[row["auth_header_name"]] = row["auth_header_value"]
+        value = resolve_optional(connection["secret_ref"]) or connection["auth_header_value"]
+        headers[connection["auth_header_name"]] = value
+    elif row["auth_header_name"]:
+        value = resolve_optional(row["secret_ref"]) or row["auth_header_value"]
+        if value:
+            headers[row["auth_header_name"]] = value
 
     records: list[dict] = []
     url: Optional[str] = row["base_url"]

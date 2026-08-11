@@ -20,6 +20,7 @@ import type {
   ValueTypeConstraint,
   SharedPropertyType,
   RelationType,
+  ObjectSet,
   PropertyFormatRule,
   ConditionalFormatRule,
   PropertyTypeRule,
@@ -46,6 +47,12 @@ export const knowledgeApi = {
     property_mapping: Record<string, string>;
     description?: string;
     column_classification?: Record<string, string>;
+    primary_key?: string;
+    title_key?: string | null;
+    plural_display_name?: string;
+    lifecycle_status?: string;
+    visibility?: string;
+    icon?: string | null;
   }) => api.post<ObjectType>(`${KNOWLEDGE_URL}/object-types`, body),
   listObjectTypeVersions: (name: string) => api.get<ObjectTypeVersion[]>(`${KNOWLEDGE_URL}/ontology/${name}/versions`),
 
@@ -89,6 +96,12 @@ export const knowledgeApi = {
       derived_properties?: Record<string, DerivedPropertyValue>;
       markings?: string[];
       project_urn?: string;
+      primary_key?: string;
+      title_key?: string | null;
+      plural_display_name?: string;
+      lifecycle_status?: string;
+      visibility?: string;
+      icon?: string | null;
     },
   ) => api.post<ObjectTypeVersion>(`${KNOWLEDGE_URL}/ontology/${name}/versions`, body),
   publishObjectTypeVersion: (name: string, version: number) =>
@@ -143,12 +156,31 @@ export const knowledgeApi = {
     name: string;
     source_object_type: string;
     target_object_type: string;
-    source_property: string;
+    source_property?: string;
     target_property: string;
     cardinality: string;
+    storage_kind?: string;
+    join_dataset_urn?: string;
+    join_source_column?: string;
+    join_target_column?: string;
+    mid_object_type?: string;
+    mid_source_property?: string;
+    mid_target_property?: string;
   }) => api.post<RelationType>(`${KNOWLEDGE_URL}/relation-types`, body),
-  updateRelationType: (name: string, body: { target_property?: string; cardinality?: string }) =>
-    api.put<RelationType>(`${KNOWLEDGE_URL}/relation-types/${name}`, body),
+  updateRelationType: (
+    name: string,
+    body: {
+      target_property?: string;
+      cardinality?: string;
+      storage_kind?: string;
+      join_dataset_urn?: string;
+      join_source_column?: string;
+      join_target_column?: string;
+      mid_object_type?: string;
+      mid_source_property?: string;
+      mid_target_property?: string;
+    },
+  ) => api.put<RelationType>(`${KNOWLEDGE_URL}/relation-types/${name}`, body),
 
   getObjectLinks: (objectType: string, id: string | number, linkName: string) =>
     api.get<ObjectLinksResponse>(
@@ -158,6 +190,31 @@ export const knowledgeApi = {
   listObjectTypeGroups: () => api.get<ObjectTypeGroup[]>(`${KNOWLEDGE_URL}/object-type-groups`),
   createObjectTypeGroup: (body: { name: string; description?: string; object_types: string[] }) =>
     api.post<ObjectTypeGroup>(`${KNOWLEDGE_URL}/object-type-groups`, body),
+
+  listObjectSets: () => api.get<ObjectSet[]>(`${KNOWLEDGE_URL}/object-sets`),
+  createObjectSet: (body: {
+    name: string;
+    object_type: string;
+    definition: object;
+    display_name?: string;
+    description?: string;
+    lifecycle_status?: string;
+    visibility?: string;
+  }) => api.post<ObjectSet>(`${KNOWLEDGE_URL}/object-sets`, body),
+  updateObjectSet: (
+    name: string,
+    body: {
+      definition?: object;
+      display_name?: string;
+      description?: string;
+      lifecycle_status?: string;
+      visibility?: string;
+    },
+  ) => api.put<ObjectSet>(`${KNOWLEDGE_URL}/object-sets/${name}`, body),
+  evaluateObjectSet: (name: string) =>
+    api.get<{ object_set: string; object_type: string; count: number; items: Array<Record<string, unknown>> }>(
+      `${KNOWLEDGE_URL}/object-sets/${name}/objects`,
+    ),
 
   listValueTypes: () => api.get<ValueType[]>(`${KNOWLEDGE_URL}/value-types`),
   createValueType: (body: {

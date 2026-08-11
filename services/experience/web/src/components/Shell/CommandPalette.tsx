@@ -2,9 +2,10 @@ import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { MenuItem, type IconName } from "@blueprintjs/core";
 import { Omnibar } from "@blueprintjs/select";
-import { useObjectTypes, useApplications } from "../../api/hooks";
+import { useObjectTypes, useApplications, useObjectSets } from "../../api/hooks";
 import { NAV_ITEMS, SEQUENTIAL_SHORTCUTS } from "./navigation";
 import { usePaletteIntentStore, type PaletteIntent } from "../../store/paletteIntent";
+import { objectSetBrowsePath, urnShortName } from "../ObjectExplorer/objectExplorerUtils";
 
 const SHORTCUT_BY_PATH: Partial<Record<(typeof NAV_ITEMS)[number]["to"], string>> = Object.fromEntries(
   Object.entries(SEQUENTIAL_SHORTCUTS).map(([key, to]) => [to, `G ${key.toUpperCase()}`]),
@@ -29,6 +30,7 @@ const ACTIONS: Array<{ id: string; label: string; icon: IconName; intent: Palett
     intent: "create-object-type-group",
     to: "/ontology",
   },
+  { id: "action-object-set", label: "New Object Set", icon: "add", intent: "create-object-set", to: "/ontology" },
   { id: "action-project", label: "New Project", icon: "add", intent: "create-project", to: "/admin" },
   { id: "action-connect-source", label: "Connect a source", icon: "add", intent: "connect-source", to: "/sources" },
   { id: "action-connection", label: "New connection", icon: "add", intent: "create-connection", to: "/sources" },
@@ -48,6 +50,7 @@ export function CommandPalette({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const navigate = useNavigate();
   const { data: objectTypes } = useObjectTypes();
   const { data: applications } = useApplications();
+  const { data: objectSets = [] } = useObjectSets();
   const triggerIntent = usePaletteIntentStore((s) => s.trigger);
 
   const items = useMemo<PaletteItem[]>(() => {
@@ -65,6 +68,19 @@ export function CommandPalette({ isOpen, onClose }: { isOpen: boolean; onClose: 
       icon: "cube",
       onSelect: () => void navigate({ to: "/objects/$type", params: { type: ot.name } }),
     }));
+    const objectSetItems: PaletteItem[] = objectSets
+      .filter((os) => os.visibility !== "hidden")
+      .map((os) => {
+        const typeName = urnShortName(os.object_type_urn);
+        const path = objectSetBrowsePath(typeName, os.name);
+        return {
+          id: `object-set-${os.name}`,
+          label: os.display_name || os.name,
+          hint: `Object set · ${typeName}`,
+          icon: "filter" as IconName,
+          onSelect: () => void navigate({ to: path.to, params: path.params, search: path.search }),
+        };
+      });
     const applicationItems: PaletteItem[] = (applications ?? []).map((app) => ({
       id: `application-${app.name}`,
       label: app.name,
@@ -82,8 +98,8 @@ export function CommandPalette({ isOpen, onClose }: { isOpen: boolean; onClose: 
         void navigate({ to: action.to });
       },
     }));
-    return [...navItems, ...actionItems, ...objectTypeItems, ...applicationItems];
-  }, [objectTypes, applications, navigate, triggerIntent]);
+    return [...navItems, ...actionItems, ...objectTypeItems, ...objectSetItems, ...applicationItems];
+  }, [objectTypes, objectSets, applications, navigate, triggerIntent]);
 
   function handleItemSelect(item: PaletteItem) {
     item.onSelect();

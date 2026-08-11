@@ -1,0 +1,82 @@
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: holon-{{ $name }}
+  labels:
+    app.kubernetes.io/name: holon
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  replicas: {{ $svc.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: holon
+        app.kubernetes.io/component: {{ $name }}
+    spec:
+      containers:
+        - name: {{ $name }}
+          image: "{{ $.Values.image.registry }}/{{ $.Values.image.repository }}/{{ $name }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: holon-config
+            - secretRef:
+                name: {{ $.Values.existingSecret }}
+          env:
+            # K8s expands $(VAR) from env vars defined on this container.
+            # existingSecret must provide POSTGRES_PASSWORD (and optionally
+            # POSTGRES_USER). Prefer putting a full HOLON_DB_URL_* per
+            # service in the secret instead if passwords contain special chars.
+            - name: POSTGRES_USER
+              value: {{ $.Values.external.postgresUser | default "holon" | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret }}
+                  key: POSTGRES_PASSWORD
+            - name: HOLON_DB_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ $.Values.external.postgresHost }}:5432/holon_{{ $name }}"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          {{- if or (eq $name "identity") (eq $name "knowledge") (eq $name "experience") }}
+          volumeMounts:
+            - name: spicedb-schema
+              mountPath: /app/spicedb-schema.zed
+              subPath: schema.zed
+              readOnly: true
+      volumes:
+        - name: spicedb-schema
+          configMap:
+            name: holon-spicedb-schema
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: holon-{{ $name }}
+spec:
+  selector:
+    app.kubernetes.io/component: {{ $name }}
+  ports:
+    - port: {{ $svc.port }}
+      targetPort: http
+      name: http
+{{- end }}

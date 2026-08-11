@@ -17,23 +17,33 @@ enforced; event-sourcing convergence is polled for and confirmed, not
 assumed; the no-code connector and self-serve ObjectType creation are
 exercised end to end. 332 integration tests, no unit-test theater.
 
-It is **not** production-ready as-is. Known gaps, in the order they'd
-actually bite:
+It is **not** production-ready as-is. Scope is **OSS self-host** (see
+[ADR 026](docs/adr/026-oss-self-host-scope.md)): we ship branchable
+artefacts; we never operate inside a customer's SI. Multi-org
+(**filiales** as `tenant`s on one instance) is in scope; SaaS pooled
+multi-customer hosting is not.
 
-- **Single tenant per deployment** — no multi-tenant isolation model.
-- **Dev-only secrets everywhere** (`*-dev-secret`, a plaintext `.env`)
-  and no SSO — just the seeded demo principals.
+Known gaps, in the order they'd actually bite for a self-hosting
+enterprise:
+
+- **Runtime still bootstraps a single tenant** (`HOLON_TENANT_ID`) for
+  demo fixtures (connectors / seeded ObjectTypes). Multi-org APIs
+  (`POST /tenants|/workspaces|/principals`), JWT tenant binding, and
+  `require_urn_tenant_match` on Knowledge ObjectType paths are in; filiale
+  tenants must provision their own sources/ontology (bootstrap Iceberg
+  demos stay on the bootstrap tenant).
+- **SSO / secrets** — OIDC client + pluggable `SecretProvider` + JWT
+  `kid` rotation land in-tree; running Vault/IdP for the customer is not.
+  Prefer connector `secret_ref` over plaintext headers.
 - **No load testing at real scale.** Everything here has only ever run
   on a 2-CPU/4GB local VM; two real missing-timeout bugs (S3, Qdrant)
   were found there, under trivial load, not synthetic production
   traffic.
-- **CI runs tests, nothing else** — no build/push/deploy pipeline.
-- **No backup/disaster-recovery story** for Postgres or the
-  Iceberg/MinIO warehouse.
-
-The bundled Prometheus/Grafana/Jaeger (see below) are for local dev —
-a real deployment is expected to point its own observability stack at
-the same `/metrics` and OTLP output every service already emits.
+- **Operator pack** — see `docs/ops/`, `SECURITY.md`, Helm under
+  `deploy/helm/holon/`, and `.github/workflows/publish.yml` for OCI+SBOM.
+  Customer ArgoCD/Flux remains theirs.
+Services expose `/metrics` (Prometheus text) and OTLP traces; point
+your own observability stack at them (see `docs/ops/deploy.md`).
 
 ## What's here
 
@@ -50,8 +60,7 @@ Six services, each its own FastAPI modulith with its own Postgres database:
 
 Plus infrastructure: Postgres, MinIO (S3), Iceberg REST catalog, Redpanda
 (Kafka-compatible event bus), SpiceDB (ReBAC), OPA (ABAC), OpenSearch,
-Qdrant (semantic index), and the dev-only Prometheus/Grafana/Jaeger
-mentioned above.
+and Qdrant (semantic index).
 
 Shared code (URN scheme, event envelope, transactional outbox, auth
 primitives, plugin registry) lives in `libs/holon_common`.
@@ -60,8 +69,7 @@ primitives, plugin registry) lives in `libs/holon_common`.
 
 ```bash
 cp .env.example .env   # fill in real values — never commit .env
-docker compose up -d --build            # core services only
-docker compose --profile dev up -d --build   # + Prometheus/Grafana/Jaeger (also what `make up` does)
+docker compose up -d --build   # or `make up`
 ```
 
 The frontend is served by `experience` at `http://localhost:8004`. For

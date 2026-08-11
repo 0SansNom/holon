@@ -1,0 +1,14 @@
+# identity/knowledge/experience all read HOLON_SPICEDB_SCHEMA_PATH at
+# startup (identity writes it to SpiceDB; knowledge/experience re-seed
+# their own authz relationships against it) — without this mounted, all
+# three crash on first boot. Copied into the chart at
+# files/spicedb-schema.zed from docker/spicedb/schema.zed; the chart's
+# packaging step must re-copy it on every change to that source file —
+# Helm can't reference a file outside its own chart directory.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: holon-spicedb-schema
+data:
+  schema.zed: |
+{{ .Files.Get "files/spicedb-schema.zed" | indent 4 }}

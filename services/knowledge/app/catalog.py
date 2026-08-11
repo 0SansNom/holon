@@ -381,6 +381,7 @@ async def _materialize_sync(
         property_mapping=property_mapping,
         rows=rows,
         allowed_countries=allowed_countries,
+        property_types=object_type.get("property_types") or {},
     )
 
 

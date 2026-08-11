@@ -32,6 +32,7 @@ from holon_common import (
     EventEnvelope,
     EventProducer,
     Principal,
+    active_jwt,
     build_urn,
     issue_token,
     outbox,
@@ -40,6 +41,18 @@ from holon_common import (
 logger = logging.getLogger("automation.workflow")
 
 _TIMEOUT_SECONDS = 10.0
+
+
+def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> str:
+    """Prefer `active_jwt()` so rotation kids are stamped; fall back to the
+    call-site secret when env is unset (unit tests).
+    """
+    try:
+        secret, kid, secrets_map = active_jwt()
+        return issue_token(principal, secret, ttl_seconds=ttl_seconds, kid=kid, secrets=secrets_map)
+    except RuntimeError:
+        return issue_token(principal, jwt_secret, ttl_seconds=ttl_seconds)
+
 
 # The Workflow resource — one entry, matching the one Action in this
 # build whose approval needs an external step.
@@ -89,7 +102,7 @@ async def _notify_source_system(
     connectivity_url: str,
     jwt_secret: str,
 ) -> None:
-    token = issue_token(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
     async def _do() -> httpx.Response:
         response = await client.post(
@@ -116,7 +129,7 @@ async def _fetch_writeback_dataset(
     way `WORKFLOW_DEFINITIONS` itself already duplicates Knowledge's
     `WORKFLOW_DELEGATED_ACTIONS`.
     """
-    token = issue_token(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
     response = await client.get(f"{knowledge_url}/actions/{action_name}", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
     return response.json().get("writeback_dataset")
@@ -141,7 +154,7 @@ async def _notify_generic_write_target(
     on the triggering event — this function never needs to know what
     the properties *mean*, only to forward them.
     """
-    token = issue_token(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
     async def _do() -> httpx.Response:
         response = await client.post(
@@ -170,7 +183,7 @@ async def _request_compensation(
     concern (it reverts *its* overlay), so Automation just tells it to,
     the same way it tells Connectivity to apply Step 2.
     """
-    token = issue_token(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
     async def _do() -> httpx.Response:
         response = await client.post(

@@ -28,6 +28,7 @@ from holon_common import (
     EventEnvelope,
     EventProducer,
     Principal,
+    active_jwt,
     build_urn,
     configure_json_logging,
     create_pool,
@@ -38,6 +39,7 @@ from holon_common import (
     issue_token,
     make_principal_dependency,
     outbox,
+    require_tenant_match,
 )
 
 from . import (
@@ -60,7 +62,7 @@ logger = logging.getLogger("connectivity.scheduler")
 
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
-JWT_SECRET = os.environ["HOLON_JWT_SECRET"]
+JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
 SOURCE_DB_URL = os.environ["HOLON_SOURCE_DB_URL"]
 MONGO_URL = os.environ["HOLON_MONGO_URL"]
@@ -159,6 +161,7 @@ CREATE TABLE IF NOT EXISTS sync_run (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await create_pool(DB_URL)
+    app.state.quiesced = False
     async with app.state.pool.acquire() as conn:
         await conn.execute(_DDL)
         await outbox.ensure_schema(conn)
@@ -199,7 +202,7 @@ instrument_cors(app)  # Sources page (Experience) calls this service directly fr
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
-current_principal = make_principal_dependency(JWT_SECRET)
+current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 
 class SyncRequest(BaseModel):
@@ -227,7 +230,22 @@ async def live() -> dict:
 @app.get("/ready")
 async def ready() -> dict:
     await app.state.pool.fetchval("SELECT 1")
-    return {"status": "ok"}
+    return {"status": "ok", "quiesced": bool(getattr(app.state, "quiesced", False))}
+
+
+class QuiesceRequest(BaseModel):
+    quiesced: bool = True
+
+
+@app.post("/admin/quiesce")
+async def admin_quiesce(body: QuiesceRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """Freeze scheduled ingestion for a consistent snapshot (operator
+    backup). Does not stop in-flight HTTP `/sync` — deployer should drain
+    those separately. See docs/ops/backup-restore.md.
+    """
+    require_tenant_match(principal, TENANT_ID)  # bootstrap admins only for instance quiesce
+    app.state.quiesced = body.quiesced
+    return {"quiesced": app.state.quiesced}
 
 
 async def _finalize_sync(
@@ -239,32 +257,31 @@ async def _finalize_sync(
     finished_at: datetime,
     actor: EventActor,
     source_dataset_version_urn: Optional[str] = None,
+    tenant_id: str = TENANT_ID,
+    workspace_id: str = WORKSPACE_ID,
 ) -> SyncResult:
     """Shared by `run_sync`, `stream_connector`'s background task, and
     each `POST /pipelines/{name}/run` TransformStep — event
     construction, `sync_run` bookkeeping, and outbox enqueue don't care
     which triggered the sync, only what it produced.
 
-    `source_dataset_version_urn` is the one  addition: set only by
-    a pipeline step's output, never by an ordinary connector sync (which
-    has no upstream *dataset*, only a source system) — carried on the
-    event so `catalog._catalogue_sync` can record a real `derived_from`
-    lineage edge, not just the `maps_to` edge every synced dataset
-    already gets.
+    `tenant_id`/`workspace_id` default to the bootstrap env values for
+    demo connectors and background tasks; HTTP callers that sync a
+    per-filiale generic source pass `principal.tenant_id` (ADR 026).
     """
-    dataset_urn = build_urn(TENANT_ID, WORKSPACE_ID, "dataset", dataset_name)
-    dataset_version_urn = build_urn(TENANT_ID, WORKSPACE_ID, "dataset-version", str(result.snapshot_id))
+    dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
+    dataset_version_urn = build_urn(tenant_id, workspace_id, "dataset-version", str(result.snapshot_id))
     event_id = uuid.uuid4().hex
 
     event = EventEnvelope(
         event_id=event_id,
         event_type="connectivity.sync.completed",
-        tenant_id=TENANT_ID,
-        workspace_id=WORKSPACE_ID,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
         aggregate_type="Connector",
         aggregate_id=connector_urn,
         correlation_id=event_id,
-        partition_key=f"{TENANT_ID}/{dataset_urn}",
+        partition_key=f"{tenant_id}/{dataset_urn}",
         producer="connectivity-platform@0.1.0",
         actor=actor,
         payload={
@@ -291,7 +308,7 @@ async def _finalize_sync(
                     started_at, finished_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
-                TENANT_ID,
+                tenant_id,
                 connector_urn,
                 dataset_urn,
                 dataset_version_urn,
@@ -313,7 +330,9 @@ async def _finalize_sync(
     )
 
 
-async def _run_sync_for_dataset(dataset_name: str, *, actor: EventActor) -> SyncResult:
+async def _run_sync_for_dataset(
+    dataset_name: str, *, actor: EventActor, tenant_id: str = TENANT_ID, workspace_id: str = WORKSPACE_ID
+) -> SyncResult:
     """The actual sync — dispatch, fetch, write, finalize. Factored out
     of the `/sync` route so the scheduler background task (below) can
     trigger the identical path under its own service-account actor,
@@ -322,30 +341,32 @@ async def _run_sync_for_dataset(dataset_name: str, *, actor: EventActor) -> Sync
     scheduler is not a request handler — it's just a plain exception
     carrying a status code and message there, caught and logged like any
     other error, never turned into an actual HTTP response.
+
+    Built-in `DATASET_READERS` connectors are bootstrap-tenant demo
+    fixtures (module-level URNs). Per-filiale work uses generic REST /
+    plugins keyed by `tenant_id` (ADR 026).
     """
     spec = DATASET_READERS.get(dataset_name)
     if spec is not None:
+        if tenant_id != TENANT_ID:
+            raise HTTPException(
+                status_code=403,
+                detail="built-in demo connectors are scoped to the bootstrap tenant; "
+                "provision per-filiale sources via /sources",
+            )
         connector_urn = spec["connector_urn"]
         read = spec["read"]
     else:
-        # Falls through to a registered Python plugin next, then to a
-        # no-code generic REST source — three tiers, same zero-arg
-        # `read()` shape, so everything below this dispatch (Iceberg
-        # write, outbox event, catalog, dashboards) needs no changes
-        # regardless of which one actually owns the dataset.
         plugin = await plugin_registry.load_active_plugin_for_dataset(app.state.pool, dataset_name)
         if plugin is not None:
-            connector_urn = build_urn(TENANT_ID, "global", "connector", f"plugin-{plugin.manifest.name}")
+            connector_urn = build_urn(tenant_id, "global", "connector", f"plugin-{plugin.manifest.name}")
             read = plugin.fetch
-        elif await generic_source_registry.is_registered(app.state.pool, TENANT_ID, dataset_name):
-            connector_urn = build_urn(TENANT_ID, "global", "connector", f"generic-rest-{dataset_name}")
-            read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, TENANT_ID, dataset_name)
+        elif await generic_source_registry.is_registered(app.state.pool, tenant_id, dataset_name):
+            connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
+            read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
         else:
-            source = await generic_source_registry.get_source(app.state.pool, TENANT_ID, dataset_name)
+            source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
             if source is not None:
-                # Exists but not active — a clearer 409 than the blanket
-                # "unknown dataset" a truly nonexistent name gets, so
-                # disabling a source doesn't read as if it vanished.
                 raise HTTPException(status_code=409, detail=f"source {dataset_name!r} is disabled — enable it first")
             raise HTTPException(status_code=404, detail=f"unknown dataset: {dataset_name}")
 
@@ -353,18 +374,12 @@ async def _run_sync_for_dataset(dataset_name: str, *, actor: EventActor) -> Sync
     try:
         rows = await read()
     except generic_source_registry.SourceFetchError as exc:
-        # A misconfigured URL/record_path is a user mistake to fix and
-        # retry, not a platform error — surfaced as 400 with the actual
-        # reason, not the opaque 500 letting this propagate would give.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=400, detail=f"source returned {exc.response.status_code}: {exc.response.text[:300]}"
         ) from exc
     except httpx.RequestError as exc:
-        # Unreachable host, connection refused, timeout — a config
-        # mistake (wrong URL) to fix and retry, same "surface the real
-        # reason" treatment as the two exceptions above, not a raw 500.
         raise HTTPException(status_code=400, detail=f"could not reach the source: {exc}") from exc
     result = await asyncio.to_thread(iceberg_writer.write_snapshot, rows, dataset_name, **ICEBERG_CONFIG)
     finished_at = datetime.now(timezone.utc)
@@ -376,13 +391,19 @@ async def _run_sync_for_dataset(dataset_name: str, *, actor: EventActor) -> Sync
         started_at=started_at,
         finished_at=finished_at,
         actor=actor,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
 
 
 @app.post("/sync", response_model=SyncResult)
 async def run_sync(request: SyncRequest = SyncRequest(), principal: Principal = Depends(current_principal)) -> SyncResult:
+    if request.dataset in DATASET_READERS:
+        require_tenant_match(principal, TENANT_ID)
     actor = EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of)
-    return await _run_sync_for_dataset(request.dataset, actor=actor)
+    return await _run_sync_for_dataset(
+        request.dataset, actor=actor, tenant_id=principal.tenant_id, workspace_id=WORKSPACE_ID
+    )
 
 
 async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
@@ -404,24 +425,39 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
     actor = EventActor(type="service_account", urn=SCHEDULER_ACTOR_URN, on_behalf_of=None)
     while True:
         try:
-            sources = await generic_source_registry.list_scheduled_sources(pool, TENANT_ID)
+            if getattr(app.state, "quiesced", False):
+                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                continue
+            sources = await generic_source_registry.list_all_scheduled_sources(pool)
             for source in sources:
                 dataset_name = source["name"]
+                tenant_id = source["tenant_id"]
                 interval = timedelta(minutes=source["schedule_interval_minutes"])
-                dataset_urn = build_urn(TENANT_ID, WORKSPACE_ID, "dataset", dataset_name)
+                dataset_urn = build_urn(tenant_id, WORKSPACE_ID, "dataset", dataset_name)
                 last_finished_at = await pool.fetchval(
                     "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
                     "ORDER BY finished_at DESC LIMIT 1",
-                    TENANT_ID, dataset_urn,
+                    tenant_id, dataset_urn,
                 )
                 due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
                 if not due:
                     continue
                 try:
-                    result = await _run_sync_for_dataset(dataset_name, actor=actor)
-                    logger.info("scheduled sync completed for %r: %d rows", dataset_name, result.row_count)
+                    result = await _run_sync_for_dataset(
+                        dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=WORKSPACE_ID
+                    )
+                    logger.info(
+                        "scheduled sync completed for %r (tenant=%s): %d rows",
+                        dataset_name,
+                        tenant_id,
+                        result.row_count,
+                    )
                 except Exception:
-                    logger.exception("scheduled sync failed for %r — will retry next poll", dataset_name)
+                    logger.exception(
+                        "scheduled sync failed for %r (tenant=%s) — will retry next poll",
+                        dataset_name,
+                        tenant_id,
+                    )
         except Exception:
             logger.exception("scheduler loop iteration failed — will retry")
         await asyncio.sleep(SCHEDULER_POLL_SECONDS)
@@ -450,7 +486,9 @@ def _function_invocation_token() -> str:
         urn=PIPELINE_FUNCTION_CALLER_URN, type="service_account", tenant_id=TENANT_ID,
         display_name="Connectivity Pipeline Runner",
     )
-    return issue_token(principal, JWT_SECRET, ttl_seconds=60)
+    return issue_token(
+        principal, JWT_SECRET, ttl_seconds=60, kid=JWT_ACTIVE_KID, secrets=JWT_SECRETS
+    )
 
 
 async def _latest_dataset_version_urn(dataset_name: str) -> Optional[str]:
@@ -660,7 +698,7 @@ async def register_connection(body: RegisterConnectionRequest, principal: Princi
     """
     return await generic_source_registry.register_connection(
         app.state.pool,
-        tenant_id=TENANT_ID,
+        tenant_id=principal.tenant_id,
         name=body.name,
         auth_header_name=body.auth_header_name,
         auth_header_value=body.auth_header_value,
@@ -670,15 +708,15 @@ async def register_connection(body: RegisterConnectionRequest, principal: Princi
 
 @app.get("/connections")
 async def list_connections(principal: Principal = Depends(current_principal)) -> list[dict]:
-    return await generic_source_registry.list_connections(app.state.pool, TENANT_ID)
+    return await generic_source_registry.list_connections(app.state.pool, principal.tenant_id)
 
 
 @app.delete("/connections/{name}")
 async def delete_connection(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    if await generic_source_registry.get_connection(app.state.pool, TENANT_ID, name) is None:
+    if await generic_source_registry.get_connection(app.state.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"no connection registered as {name!r}")
     try:
-        await generic_source_registry.delete_connection(app.state.pool, TENANT_ID, name)
+        await generic_source_registry.delete_connection(app.state.pool, principal.tenant_id, name)
     except generic_source_registry.ConnectionInUseError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"deleted": name}
@@ -707,7 +745,7 @@ async def register_source(body: RegisterSourceRequest, principal: Principal = De
     try:
         return await generic_source_registry.register_source(
             app.state.pool,
-            tenant_id=TENANT_ID,
+            tenant_id=principal.tenant_id,
             name=body.name,
             base_url=body.base_url,
             created_by_urn=principal.urn,
@@ -729,7 +767,7 @@ async def register_source(body: RegisterSourceRequest, principal: Principal = De
 
 @app.get("/sources")
 async def list_sources(principal: Principal = Depends(current_principal)) -> list[dict]:
-    return await generic_source_registry.list_sources(app.state.pool, TENANT_ID)
+    return await generic_source_registry.list_sources(app.state.pool, principal.tenant_id)
 
 
 def _source_not_found(name: str) -> HTTPException:
@@ -742,26 +780,26 @@ async def disable_source(name: str, principal: Principal = Depends(current_princ
     matches an `active` row, so this takes effect on the very next sync
     attempt, same as `/plugins/{name}/disable`.
     """
-    source = await generic_source_registry.get_source(app.state.pool, TENANT_ID, name)
+    source = await generic_source_registry.get_source(app.state.pool, principal.tenant_id, name)
     if source is None:
         raise _source_not_found(name)
-    return await generic_source_registry.set_source_status(app.state.pool, TENANT_ID, name, "disabled")
+    return await generic_source_registry.set_source_status(app.state.pool, principal.tenant_id, name, "disabled")
 
 
 @app.post("/sources/{name}/enable")
 async def enable_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    source = await generic_source_registry.get_source(app.state.pool, TENANT_ID, name)
+    source = await generic_source_registry.get_source(app.state.pool, principal.tenant_id, name)
     if source is None:
         raise _source_not_found(name)
-    return await generic_source_registry.set_source_status(app.state.pool, TENANT_ID, name, "active")
+    return await generic_source_registry.set_source_status(app.state.pool, principal.tenant_id, name, "active")
 
 
 @app.delete("/sources/{name}")
 async def delete_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    source = await generic_source_registry.get_source(app.state.pool, TENANT_ID, name)
+    source = await generic_source_registry.get_source(app.state.pool, principal.tenant_id, name)
     if source is None:
         raise _source_not_found(name)
-    await generic_source_registry.delete_source(app.state.pool, TENANT_ID, name)
+    await generic_source_registry.delete_source(app.state.pool, principal.tenant_id, name)
     return {"deleted": name}
 
 
@@ -774,7 +812,8 @@ async def delete_source(name: str, principal: Principal = Depends(current_princi
 # `current_principal` alone proves a valid tenant-scoped JWT, which any
 # authenticated principal has — it does NOT prove the caller is the workflow engine.
 CLOSE_ACCOUNT_FAILURE_SENTINEL = "__simulate_failure__"
-WORKFLOW_ENGINE_URN = build_urn(TENANT_ID, "global", "service-account", "automation-workflow-engine")
+WORKFLOW_ENGINE_LOCAL_NAME = "automation-workflow-engine"
+WORKFLOW_ENGINE_URN = build_urn(TENANT_ID, "global", "service-account", WORKFLOW_ENGINE_LOCAL_NAME)
 
 
 class CloseAccountRequest(BaseModel):
@@ -782,7 +821,11 @@ class CloseAccountRequest(BaseModel):
 
 
 def _require_workflow_engine(principal: Principal) -> None:
-    if principal.type != "service_account" or principal.urn != WORKFLOW_ENGINE_URN:
+    """Accept the Automation Workflow Engine for any tenant (URN local name
+    is fixed; tenant segment follows the action's tenant_id).
+    """
+    expected_suffix = f":global:service-account:{WORKFLOW_ENGINE_LOCAL_NAME}"
+    if principal.type != "service_account" or not principal.urn.endswith(expected_suffix):
         raise HTTPException(
             status_code=403,
             detail="close-account is restricted to Automation's Workflow Engine — use the approval flow",
@@ -849,7 +892,7 @@ async def register_write_target(
     try:
         return await write_target_registry.register_write_target(
             app.state.pool,
-            tenant_id=TENANT_ID,
+            tenant_id=principal.tenant_id,
             dataset_name=request.dataset_name,
             table_name=request.table_name,
             id_column=request.id_column,
@@ -862,12 +905,12 @@ async def register_write_target(
 
 @app.get("/write-targets")
 async def list_write_targets(principal: Principal = Depends(current_principal)) -> list[dict]:
-    return await write_target_registry.list_write_targets(app.state.pool, TENANT_ID)
+    return await write_target_registry.list_write_targets(app.state.pool, principal.tenant_id)
 
 
 @app.get("/write-targets/{dataset_name}")
 async def get_write_target(dataset_name: str, principal: Principal = Depends(current_principal)) -> dict:
-    target = await write_target_registry.get_write_target(app.state.pool, TENANT_ID, dataset_name)
+    target = await write_target_registry.get_write_target(app.state.pool, principal.tenant_id, dataset_name)
     if target is None:
         raise HTTPException(status_code=404, detail=f"no write target registered for dataset {dataset_name!r}")
     return target
@@ -891,7 +934,7 @@ async def write_source(
     try:
         return await write_target_registry.apply_write(
             app.state.pool, SOURCE_DB_URL,
-            tenant_id=TENANT_ID, dataset_name=dataset_name, instance_id=instance_id, edits=request.edits,
+            tenant_id=principal.tenant_id, dataset_name=dataset_name, instance_id=instance_id, edits=request.edits,
         )
     except write_target_registry.UnknownWriteTargetError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

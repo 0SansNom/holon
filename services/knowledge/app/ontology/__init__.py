@@ -43,6 +43,8 @@ from .object_types import (
     RELATION_TYPES,
     SUPPLIER_PROPERTY_MAPPING,
     SUPPORT_TICKET_PROPERTY_MAPPING,
+    VALID_LIFECYCLE_STATUSES,
+    VALID_VISIBILITIES,
     create_object_type,
     delete_object_type,
     ensure_schema,
@@ -53,7 +55,9 @@ from .object_types import (
     get_property_classifications,
     list_object_type_versions,
     list_object_types,
+    title_of,
     upsert_property_classification,
+    validate_ot_metadata,
 )
 from .interfaces import create_interface_type, get_interface_type, list_interface_types, update_interface_type
 from .markings import create_marking, get_instance_markings_bulk, get_marking, list_markings, set_instance_markings
@@ -69,12 +73,21 @@ from .publishing import propose_object_type_version, publish_object_type_version
 from .branching import create_branch, get_branch, list_branch_reviews, list_branches, review_branch, update_branch_draft
 from .relation_types import (
     VALID_CARDINALITIES,
+    VALID_STORAGE_KINDS,
     create_relation_type,
     get_relation_type,
     list_relation_types,
     update_relation_type,
 )
 from .object_type_groups import create_object_type_group, get_object_type_group, list_object_type_groups
+from .object_sets import (
+    create_object_set,
+    get_object_set,
+    list_object_sets,
+    matches_predicates,
+    object_set_urn,
+    update_object_set,
+)
 from .authz_seed import ensure_authz_seeded
 from .resource_branching import (
     ALLOWED_RESOURCE_TYPES,
@@ -97,6 +110,11 @@ __all__ = [
     "INITIAL_CLASSIFICATION",
     "DDL",
     "VALID_CARDINALITIES",
+    "VALID_STORAGE_KINDS",
+    "VALID_LIFECYCLE_STATUSES",
+    "VALID_VISIBILITIES",
+    "title_of",
+    "validate_ot_metadata",
     "object_type_urn",
     "relation_type_urn",
     "customer_object_type_urn",
@@ -153,6 +171,12 @@ __all__ = [
     "create_object_type_group",
     "get_object_type_group",
     "list_object_type_groups",
+    "create_object_set",
+    "get_object_set",
+    "list_object_sets",
+    "update_object_set",
+    "object_set_urn",
+    "matches_predicates",
     "ensure_authz_seeded",
     "ALLOWED_RESOURCE_TYPES",
     "create_resource_branch",

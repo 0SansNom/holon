@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
-import { Button, HTMLSelect, Icon, InputGroup, Tag } from "@blueprintjs/core";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Button, Callout, HTMLSelect, Icon, InputGroup, Tag } from "@blueprintjs/core";
 import {
   useReactTable,
   getCoreRowModel,
@@ -11,22 +11,38 @@ import {
   createColumnHelper,
   type SortingState,
 } from "@tanstack/react-table";
-import { useObjectType, useObjects, usePrincipals, useActions, useValueTypes, useInvokeAction } from "../../api/hooks";
+import {
+  useActions,
+  useEvaluateObjectSet,
+  useInvokeAction,
+  useObjectSets,
+  useObjectType,
+  useObjects,
+  usePrincipals,
+  useValueTypes,
+} from "../../api/hooks";
 import { FormattedValue } from "../common/PropertyFormat";
 import { applyConditionalStyle, camelToSnake } from "../common/propertyFormatUtils";
 import { DetailPage } from "../common/PageLayout";
 import type { PropertyFormatRule, ConditionalFormatRule } from "../../api/knowledge";
 import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
-import { OBJECT_METADATA_KEYS, computeInlineEditableActions } from "./objectExplorerUtils";
+import { OBJECT_METADATA_KEYS, computeInlineEditableActions, urnShortName } from "./objectExplorerUtils";
 import { InlineEditableCell } from "./InlineEditableCell";
+import { isPropertyHidden, sortPropertiesByVisibility } from "../Ontology/propertyEditorUtils";
 
 type Row = Record<string, unknown>;
 
 export function ObjectTablePage() {
   const { type } = useParams({ from: "/shell/objects/$type" });
+  const { set: setName } = useSearch({ from: "/shell/objects/$type" });
   const navigate = useNavigate();
   const { data: objectType } = useObjectType(type);
-  const { data: rows } = useObjects(type);
+  const { data: allRows } = useObjects(type);
+  const { data: objectSets = [] } = useObjectSets();
+  const { data: evaluated, isFetching: evaluating, error: evaluateError } = useEvaluateObjectSet(
+    setName ?? "",
+    !!setName,
+  );
   const { data: principals } = usePrincipals();
   const { data: allActions = [] } = useActions();
   const { data: valueTypes = [] } = useValueTypes();
@@ -34,6 +50,24 @@ export function ObjectTablePage() {
 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
+
+  const setsForType = useMemo(
+    () =>
+      objectSets.filter(
+        (os) => urnShortName(os.object_type_urn) === type && os.visibility !== "hidden",
+      ),
+    [objectSets, type],
+  );
+
+  const activeSet = setName ? objectSets.find((os) => os.name === setName) : undefined;
+  const setTypeMismatch =
+    !!setName && !!evaluated && evaluated.object_type !== type;
+
+  const rows = useMemo(() => {
+    if (!setName) return allRows ?? [];
+    if (setTypeMismatch) return [];
+    return evaluated?.items ?? [];
+  }, [setName, allRows, evaluated, setTypeMismatch]);
 
   const inlineEditableBySourceKey = useMemo(
     () => computeInlineEditableActions(type, objectType?.implements ?? [], allActions),
@@ -65,7 +99,13 @@ export function ObjectTablePage() {
   const columns = useMemo(() => {
     const helper = createColumnHelper<Row>();
     const first = rows?.[0];
-    const keys = first ? Object.keys(first).filter((k) => !OBJECT_METADATA_KEYS.has(k)) : [];
+    const keys = first
+      ? sortPropertiesByVisibility(
+          Object.keys(first).filter((k) => !OBJECT_METADATA_KEYS.has(k)),
+          objectType?.property_types,
+          objectType?.property_mapping,
+        ).filter((k) => !isPropertyHidden(k, objectType?.property_types, objectType?.property_mapping))
+      : [];
     return keys.map((key) => {
       const inlineAction = inlineEditableBySourceKey.get(key);
       const inlineParameterBaseType = inlineAction
@@ -101,7 +141,7 @@ export function ObjectTablePage() {
         },
       });
     });
-  }, [rows, formatsBySourceKey, principalsByUrn, inlineEditableBySourceKey, valueTypes, invokeAction]);
+  }, [rows, formatsBySourceKey, principalsByUrn, inlineEditableBySourceKey, valueTypes, invokeAction, objectType]);
 
   const table = useReactTable({
     data: rows ?? [],
@@ -116,20 +156,92 @@ export function ObjectTablePage() {
     initialState: { pagination: { pageSize: 25 } },
   });
 
+  function selectSet(next: string) {
+    void navigate({
+      to: "/objects/$type",
+      params: { type },
+      search: next ? { set: next } : {},
+    });
+  }
+
   return (
     <DetailPage
-      breadcrumbs={[{ label: "Objects", to: "/objects" }, { label: type }]}
-      title={type}
-      description={objectType?.description}
+      breadcrumbs={[
+        { label: "Objects", to: "/objects" },
+        { label: type, ...(setName ? { to: "/objects/$type", params: { type } } : {}) },
+        ...(activeSet ? [{ label: activeSet.display_name || activeSet.name }] : []),
+      ]}
+      title={activeSet ? activeSet.display_name || activeSet.name : type}
+      description={
+        activeSet ? (
+          <>
+            Object Set on <span className="hl-mono">{type}</span>
+            {activeSet.description ? ` — ${activeSet.description}` : null}
+          </>
+        ) : (
+          objectType?.description
+        )
+      }
       actions={
-        <Button
-          icon="diagram-tree"
-          onClick={() => void navigate({ to: "/lineage/$urn", params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` } })}
-        >
-          View lineage
-        </Button>
+        <div className="hl-flex-row hl-items-center hl-gap-sm">
+          {setsForType.length > 0 && (
+            <HTMLSelect value={setName ?? ""} onChange={(e) => selectSet(e.target.value)}>
+              <option value="">All {type}</option>
+              {setsForType.map((os) => (
+                <option key={os.name} value={os.name}>
+                  {os.display_name || os.name}
+                </option>
+              ))}
+            </HTMLSelect>
+          )}
+          <Button
+            icon="diagram-tree"
+            onClick={() =>
+              void navigate({
+                to: "/lineage/$urn",
+                params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` },
+              })
+            }
+          >
+            View lineage
+          </Button>
+        </div>
       }
     >
+      {setName && evaluating && (
+        <Callout className="hl-mb-md" icon="refresh">
+          Evaluating Object Set…
+        </Callout>
+      )}
+      {evaluateError && (
+        <Callout intent="danger" className="hl-mb-md">
+          {(evaluateError as Error).message}
+        </Callout>
+      )}
+      {setTypeMismatch && (
+        <Callout intent="warning" className="hl-mb-md">
+          Object Set “{setName}” targets {evaluated?.object_type}, not {type}.
+        </Callout>
+      )}
+      {activeSet && (
+        <div className="hl-tag-row hl-mb-md">
+          <Tag minimal intent="primary" icon="filter">
+            Object Set
+          </Tag>
+          <Tag minimal>{activeSet.lifecycle_status}</Tag>
+          {(activeSet.definition?.all ?? []).map((pred, i) => (
+            <Tag key={i} minimal className="hl-mono">
+              {pred.property} {pred.op} {Array.isArray(pred.value) ? pred.value.join(",") : String(pred.value)}
+            </Tag>
+          ))}
+          {(activeSet.definition?.all ?? []).length === 0 && (
+            <Tag minimal>all instances</Tag>
+          )}
+          <Button minimal small icon="cross" onClick={() => selectSet("")}>
+            Clear set
+          </Button>
+        </div>
+      )}
       <InputGroup
         leftIcon="filter"
         placeholder="Filter rows..."

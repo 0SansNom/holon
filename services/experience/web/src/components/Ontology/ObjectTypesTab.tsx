@@ -1,5 +1,17 @@
 import { useState } from "react";
-import { Button, Callout, Card, Checkbox, Dialog, DialogBody, DialogFooter, FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
+import {
+  Button,
+  Callout,
+  Card,
+  Checkbox,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  FormGroup,
+  HTMLSelect,
+  InputGroup,
+  Tag,
+} from "@blueprintjs/core";
 import Editor from "@monaco-editor/react";
 import { useMonacoEditorTheme } from "../../hooks/useMonacoEditorTheme";
 import {
@@ -11,6 +23,10 @@ import {
   useMarkings,
   useProjects,
   useObjectTypeGroups,
+  useValueTypes,
+  useSharedPropertyTypes,
+  useCreateSharedPropertyType,
+  useRelationTypes,
 } from "../../api/hooks";
 import type { ObjectType } from "../../api/knowledge";
 import { ApiError } from "../../api/client";
@@ -18,6 +34,19 @@ import { CardGrid, EmptyState, ErrorCallout } from "../common/ListPrimitives";
 import { ResourceActionsMenu, ResourceTagBadges } from "../common/ResourceActionsMenu";
 import { BranchesDialog } from "./BranchesDialog";
 import { OntologyTabHeader } from "./OntologyTabLayout";
+import { DerivedPropertiesEditor } from "./DerivedPropertiesEditor";
+import {
+  buildEditableDerived,
+  type EditableDerivedProperty,
+  serializeDerivedProperties,
+} from "./derivedEditorUtils";
+import { ObjectTypePropertyEditor } from "./PropertyEditor";
+import {
+  buildEditableProperties,
+  type EditableProperty,
+  serializePropertyEditor,
+  suggestSharedApiName,
+} from "./propertyEditorUtils";
 
 function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectType; onClose: () => void }) {
   const monacoTheme = useMonacoEditorTheme();
@@ -25,22 +54,48 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
   const { data: interfaces = [] } = useInterfaces();
   const { data: markings = [] } = useMarkings();
   const { data: projects = [] } = useProjects();
+  const { data: valueTypes = [] } = useValueTypes();
+  const { data: sharedPropertyTypes = [] } = useSharedPropertyTypes();
+  const { data: relationTypes = [] } = useRelationTypes();
+  const { data: allObjectTypes = [] } = useObjectTypes();
+  const createSharedPropertyType = useCreateSharedPropertyType();
   const propose = useProposeObjectTypeVersion(objectType.name);
   const publish = usePublishObjectTypeVersion(objectType.name);
 
   const [description, setDescription] = useState(objectType.description);
   const [projectUrn, setProjectUrn] = useState(objectType.project_urn ?? "");
+  const [primaryKey, setPrimaryKey] = useState(objectType.primary_key ?? "id");
+  const [titleKey, setTitleKey] = useState(objectType.title_key ?? "");
+  const [pluralDisplayName, setPluralDisplayName] = useState(objectType.plural_display_name ?? "");
+  const [lifecycleStatus, setLifecycleStatus] = useState(objectType.lifecycle_status ?? "experimental");
+  const [visibility, setVisibility] = useState(objectType.visibility ?? "normal");
+  const [icon, setIcon] = useState(objectType.icon ?? "");
   const [implementsSet, setImplementsSet] = useState<Set<string>>(new Set(objectType.implements ?? []));
   const [markingsSet, setMarkingsSet] = useState<Set<string>>(new Set(objectType.markings ?? []));
-  const [propertyTypesJson, setPropertyTypesJson] = useState(JSON.stringify(objectType.property_types ?? {}, null, 2));
-  const [derivedPropertiesJson, setDerivedPropertiesJson] = useState(JSON.stringify(objectType.derived_properties ?? {}, null, 2));
-  const [propertyFormatsJson, setPropertyFormatsJson] = useState(JSON.stringify(objectType.property_formats ?? {}, null, 2));
+  const [properties, setProperties] = useState<EditableProperty[]>(() =>
+    buildEditableProperties(
+      objectType.property_mapping ?? {},
+      objectType.property_types ?? {},
+      objectType.property_formats ?? {},
+    ),
+  );
+  const [selectedProperty, setSelectedProperty] = useState<string | null>(
+    () => Object.keys(objectType.property_mapping ?? {})[0] ?? null,
+  );
+  const [derivedProperties, setDerivedProperties] = useState<EditableDerivedProperty[]>(() =>
+    buildEditableDerived(objectType.derived_properties ?? {}),
+  );
+  const [selectedDerived, setSelectedDerived] = useState<string | null>(
+    () => Object.keys(objectType.derived_properties ?? {})[0] ?? null,
+  );
   const [conditionalFormatsJson, setConditionalFormatsJson] = useState(
     JSON.stringify(objectType.conditional_formats ?? {}, null, 2),
   );
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [publishingVersion, setPublishingVersion] = useState<number | null>(null);
+
+  const propertyNames = properties.map((p) => p.name).filter(Boolean);
 
   function toggle(set: Set<string>, setSet: (s: Set<string>) => void, value: string) {
     const next = new Set(set);
@@ -52,14 +107,25 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
   async function proposeVersion() {
     setError(null);
     setOk(null);
-    let property_types, derived_properties, property_formats, conditional_formats;
+    let conditional_formats;
     try {
-      property_types = JSON.parse(propertyTypesJson);
-      derived_properties = JSON.parse(derivedPropertiesJson);
-      property_formats = JSON.parse(propertyFormatsJson);
       conditional_formats = JSON.parse(conditionalFormatsJson);
     } catch {
-      setError("Property types / derived properties / property formats / conditional formats must each be valid JSON.");
+      setError("Conditional formats must be valid JSON.");
+      return;
+    }
+    const { property_mapping, property_types, property_formats } = serializePropertyEditor(properties);
+    const derived_properties = serializeDerivedProperties(derivedProperties);
+    if (Object.keys(property_mapping).length === 0) {
+      setError("At least one property with an API name and backing column is required.");
+      return;
+    }
+    if (!property_mapping[primaryKey]) {
+      setError(`Primary key "${primaryKey}" must be one of the mapped properties.`);
+      return;
+    }
+    if (titleKey && !property_mapping[titleKey]) {
+      setError(`Title key "${titleKey}" must be one of the mapped properties.`);
       return;
     }
     try {
@@ -67,11 +133,18 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
         description,
         implements: [...implementsSet],
         markings: [...markingsSet],
+        property_mapping,
         property_types,
         derived_properties,
         property_formats,
         conditional_formats,
         project_urn: projectUrn || undefined,
+        primary_key: primaryKey,
+        title_key: titleKey || null,
+        plural_display_name: pluralDisplayName,
+        lifecycle_status: lifecycleStatus,
+        visibility,
+        icon: icon || null,
       });
       setOk(`Proposed version ${draft.version} (draft) — publish it below when ready.`);
     } catch (err) {
@@ -94,7 +167,7 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
   }
 
   return (
-    <Dialog isOpen title={`${objectType.name} — versions`} onClose={onClose} style={{ width: 620 }}>
+    <Dialog isOpen title={`${objectType.name} — versions`} onClose={onClose} style={{ width: 820 }}>
       <DialogBody>
         <div className="hl-mb-md">
           <div className="hl-section-title hl-mb-sm">Version history</div>
@@ -102,7 +175,10 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
             {versions.map((v) => (
               <div key={v.id} className="hl-version-row">
                 <span>
-                  v{v.version} <Tag minimal intent={v.status === "published" ? "success" : "none"}>{v.status}</Tag>
+                  v{v.version}{" "}
+                  <Tag minimal intent={v.status === "published" ? "success" : "none"}>
+                    {v.status}
+                  </Tag>
                 </span>
                 {v.status === "draft" && (
                   <Button small loading={publishingVersion === v.version} onClick={() => void publishVersion(v.version)}>
@@ -118,6 +194,49 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
         <div className="hl-section-title hl-mb-sm">Propose a new version</div>
         <FormGroup label="Description">
           <InputGroup value={description} onChange={(e) => setDescription(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Primary key">
+          <HTMLSelect fill value={primaryKey} onChange={(e) => setPrimaryKey(e.target.value)}>
+            {propertyNames.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="Title key" helperText="Display name property for instances">
+          <HTMLSelect fill value={titleKey} onChange={(e) => setTitleKey(e.target.value)}>
+            <option value="">(fallback to primary key)</option>
+            {propertyNames.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="Plural display name">
+          <InputGroup value={pluralDisplayName} onChange={(e) => setPluralDisplayName(e.target.value)} />
+        </FormGroup>
+        <FormGroup label="Lifecycle status">
+          <HTMLSelect
+            fill
+            value={lifecycleStatus}
+            onChange={(e) => setLifecycleStatus(e.target.value as typeof lifecycleStatus)}
+          >
+            <option value="experimental">experimental</option>
+            <option value="active">active</option>
+            <option value="deprecated">deprecated</option>
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="ObjectType visibility">
+          <HTMLSelect fill value={visibility} onChange={(e) => setVisibility(e.target.value as typeof visibility)}>
+            <option value="prominent">prominent</option>
+            <option value="normal">normal</option>
+            <option value="hidden">hidden</option>
+          </HTMLSelect>
+        </FormGroup>
+        <FormGroup label="Icon" helperText="Blueprint icon name">
+          <InputGroup value={icon} onChange={(e) => setIcon(e.target.value)} placeholder="people" />
         </FormGroup>
         <FormGroup label="Project" helperText="Narrows access to this project's members, additive on top of workspace access">
           <HTMLSelect fill value={projectUrn} onChange={(e) => setProjectUrn(e.target.value)}>
@@ -156,55 +275,71 @@ function ManageObjectTypeDialog({ objectType, onClose }: { objectType: ObjectTyp
           </FormGroup>
         )}
 
-        <FormGroup
-          label="Property types"
-          helperText={
-            <span className="hl-mono">
-              {"{"}property: {"{"}kind: "value_type"|"shared_property_type"|"struct"|"array", editable?, required?,
-              ...{"}"}{"}"}
-            </span>
-          }
-        >
-          <div className="hl-json-editor">
-            <Editor height="110px" defaultLanguage="json" theme={monacoTheme} value={propertyTypesJson} onChange={(v) => setPropertyTypesJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
-          </div>
+        <FormGroup label="Properties" helperText="Edit type, format, visibility, and backing column — then propose.">
+          <ObjectTypePropertyEditor
+            properties={properties}
+            selectedName={selectedProperty}
+            onSelect={setSelectedProperty}
+            onChange={setProperties}
+            primaryKey={primaryKey}
+            valueTypes={valueTypes}
+            sharedPropertyTypes={sharedPropertyTypes}
+            convertPending={createSharedPropertyType.isPending}
+            onConvertToShared={async (prop) => {
+              const apiName = suggestSharedApiName(prop.name);
+              try {
+                await createSharedPropertyType.mutateAsync({
+                  api_name: apiName,
+                  display_name: prop.name,
+                  value_type: prop.valueType,
+                  description: `Shared from ${objectType.name}.${prop.name}`,
+                });
+                setProperties((current) =>
+                  current.map((p) =>
+                    p.name === prop.name
+                      ? { ...p, typeKind: "shared_property_type", sharedPropertyType: apiName, valueType: "" }
+                      : p,
+                  ),
+                );
+                setOk(`Created shared property "${apiName}" and attached it to ${prop.name}.`);
+              } catch (err) {
+                setError(err instanceof ApiError ? err.message : "Could not convert to shared property");
+              }
+            }}
+          />
         </FormGroup>
+
         <FormGroup
           label="Derived properties"
-          helperText={
-            <span className="hl-mono">
-              {"{"}property: functionPluginName | {"{"}kind: "link_aggregate", relation, aggregate:
-              "sum"|"count"|"avg"|"min"|"max", property?{"}"} | {"{"}kind: "struct_reducer", property, reducer:
-              "first"|"last"|"latest"|"earliest"|"max"|"min", by?{"}"}{"}"}
-            </span>
-          }
+          helperText="Function plugin, multi-hop link aggregate (≤3), or struct/array reducer."
         >
-          <div className="hl-json-editor">
-            <Editor height="90px" defaultLanguage="json" theme={monacoTheme} value={derivedPropertiesJson} onChange={(v) => setDerivedPropertiesJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
-          </div>
+          <DerivedPropertiesEditor
+            objectType={objectType}
+            properties={derivedProperties}
+            selectedName={selectedDerived}
+            onSelect={setSelectedDerived}
+            onChange={setDerivedProperties}
+            relationTypes={relationTypes}
+            objectTypes={allObjectTypes}
+          />
         </FormGroup>
         <FormGroup
-          label="Property formats"
+          label="Conditional formats (advanced)"
           helperText={
             <span className="hl-mono">
-              {"{"}property: {"{"}kind: "currency"|"badge"|"numeric"|"datetime"|"principal"|"resource-link", ...{"}"}{"}"}
+              {"{"}property: [{"{"}condition, style{"}"}, ...]{"}"}
             </span>
           }
         >
           <div className="hl-json-editor">
-            <Editor height="90px" defaultLanguage="json" theme={monacoTheme} value={propertyFormatsJson} onChange={(v) => setPropertyFormatsJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
-          </div>
-        </FormGroup>
-        <FormGroup
-          label="Conditional formats"
-          helperText={
-            <span className="hl-mono">
-              {"{"}property: [{"{"}condition: {"{"}type, ...{"}"}, style: {"{"}color, backgroundColor, textAlign{"}"}{"}"}, ...]{"}"}
-            </span>
-          }
-        >
-          <div className="hl-json-editor">
-            <Editor height="90px" defaultLanguage="json" theme={monacoTheme} value={conditionalFormatsJson} onChange={(v) => setConditionalFormatsJson(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12 }} />
+            <Editor
+              height="90px"
+              defaultLanguage="json"
+              theme={monacoTheme}
+              value={conditionalFormatsJson}
+              onChange={(v) => setConditionalFormatsJson(v ?? "")}
+              options={{ minimap: { enabled: false }, fontSize: 12 }}
+            />
           </div>
         </FormGroup>
 
@@ -272,6 +407,18 @@ export function ObjectTypesTab() {
             <div className="hl-tag-row hl-mt-xs">
               <Tag minimal>{ot.classification}</Tag>
               <Tag minimal>v{ot.version}</Tag>
+              {ot.lifecycle_status && (
+                <Tag
+                  minimal
+                  intent={
+                    ot.lifecycle_status === "active" ? "success" : ot.lifecycle_status === "deprecated" ? "warning" : "none"
+                  }
+                >
+                  {ot.lifecycle_status}
+                </Tag>
+              )}
+              {ot.visibility && ot.visibility !== "normal" && <Tag minimal>{ot.visibility}</Tag>}
+              {ot.title_key && <Tag minimal>title:{ot.title_key}</Tag>}
               {(ot.implements ?? []).map((i) => (
                 <Tag key={i} minimal icon="link">
                   {i}

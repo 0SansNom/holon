@@ -22,6 +22,9 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
   const { data: preview, isLoading: previewLoading, error: previewError } = useDatasetPreview(source.name);
   const [name, setName] = useState(toPascalCase(source.name));
   const [description, setDescription] = useState("");
+  const [primaryKey, setPrimaryKey] = useState("id");
+  const [titleKey, setTitleKey] = useState("");
+  const [pluralDisplayName, setPluralDisplayName] = useState("");
   const [propertyNames, setPropertyNames] = useState<Record<string, string>>({});
   const [classifications, setClassifications] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +62,18 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
     return mapping;
   }, [propertyNames]);
 
+  const propertyKeys = useMemo(() => Object.keys(propertyMapping), [propertyMapping]);
+
+  useEffect(() => {
+    if (propertyKeys.length === 0) return;
+    if (!propertyKeys.includes(primaryKey)) {
+      setPrimaryKey(propertyKeys.includes("id") ? "id" : propertyKeys[0]!);
+    }
+    if (titleKey && !propertyKeys.includes(titleKey)) {
+      setTitleKey("");
+    }
+  }, [propertyKeys, primaryKey, titleKey]);
+
   async function create() {
     setError(null);
     try {
@@ -73,6 +88,9 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
         property_mapping: propertyMapping,
         description,
         column_classification: columnClassification,
+        primary_key: primaryKey,
+        title_key: titleKey || null,
+        plural_display_name: pluralDisplayName || undefined,
       });
       await sync.mutateAsync(source.name);
       setCreated(name);
@@ -122,6 +140,36 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
         <FormGroup label="Description (optional)">
           <InputGroup value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What is this?" />
         </FormGroup>
+        <FormGroup label="Plural display name (optional)">
+          <InputGroup
+            value={pluralDisplayName}
+            onChange={(e) => setPluralDisplayName(e.target.value)}
+            placeholder="e.g. Customers"
+          />
+        </FormGroup>
+        {propertyKeys.length > 0 && (
+          <>
+            <FormGroup label="Primary key" helperText="Must be one of the mapped properties">
+              <HTMLSelect fill value={primaryKey} onChange={(e) => setPrimaryKey(e.target.value)}>
+                {propertyKeys.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </HTMLSelect>
+            </FormGroup>
+            <FormGroup label="Title key" helperText="Property shown as the instance label in explorers">
+              <HTMLSelect fill value={titleKey} onChange={(e) => setTitleKey(e.target.value)}>
+                <option value="">(fallback to primary key)</option>
+                {propertyKeys.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </HTMLSelect>
+            </FormGroup>
+          </>
+        )}
 
         {previewLoading && (
           <div aria-busy aria-label="Loading columns">
@@ -191,7 +239,14 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
             <Button
               intent="primary"
               loading={busy}
-              disabled={!name || !preview || preview.columns.length === 0 || Object.keys(propertyMapping).length === 0}
+              disabled={
+                !name ||
+                !preview ||
+                preview.columns.length === 0 ||
+                Object.keys(propertyMapping).length === 0 ||
+                !primaryKey ||
+                !propertyKeys.includes(primaryKey)
+              }
               onClick={() => void create()}
             >
               Create

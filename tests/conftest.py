@@ -31,8 +31,6 @@ EXPERIENCE = "http://localhost:8004"
 AUTOMATION = "http://localhost:8005"
 INTELLIGENCE = "http://localhost:8006"
 OPENSEARCH = "http://localhost:9200"
-PROMETHEUS = "http://localhost:9090"
-JAEGER = "http://localhost:16686"
 
 TENANT_ID = "acme"
 

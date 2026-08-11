@@ -44,7 +44,9 @@ def _identity_validation_token() -> str:
         tenant_id=core.TENANT_ID,
         display_name="Knowledge Project Validator",
     )
-    return issue_token(principal, core.JWT_SECRET, ttl_seconds=60)
+    return issue_token(
+        principal, core.JWT_SECRET, ttl_seconds=60, kid=core.JWT_ACTIVE_KID, secrets=core.JWT_SECRETS
+    )
 
 
 @router.get("/catalog/datasets")
@@ -94,38 +96,40 @@ async def get_ontology_health_check(principal: Principal = Depends(core.current_
 
 
 @router.get("/ontology/{name}")
-async def get_ontology_definition(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
+async def get_ontology_definition(name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Inspects an ObjectType *definition* — property mapping, computed
     classification — as opposed to `/objects/{name}` which resolves its
     *instances*. Metadata, not data: gated by authentication only, like
     `/catalog/datasets`, not by the PDP (row/column security has
     nothing to enforce on a definition with no rows).
     """
-    object_type_urn = core.OBJECT_TYPE_URNS.get(name) or ontology.object_type_urn(principal.tenant_id, core.WORKSPACE_ID, name)
+    object_type_urn = core.OBJECT_TYPE_URNS.get(name) or ontology.object_type_urn(principal.tenant_id, workspace_id, name)
     object_type = await ontology.get_object_type(core.pool, object_type_urn)
     if object_type is None:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     return object_type
 
 
-async def _authorize_ontology_governance(principal: Principal) -> None:
+async def _authorize_ontology_governance(principal: Principal, workspace_id: str) -> None:
     """Ontology lifecycle changes (versioning/publication) are a
     governance action, same tier as `create_relation_type` — the
     workspace's own `approve` permission (admin-only), not
     `_authorize_object_type` (there's no read/write of instance data
-    happening here).
+    happening here). `workspace_id` comes from `core.current_workspace` —
+    the caller-specified workspace, never the bootstrap constant, so this
+    check means something for a non-bootstrap tenant too.
     """
     decision = await core.authz.authorize(
         principal,
         resource_type="workspace",
-        resource_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
         permission="approve",
     )
     if not decision.allowed:
         raise HTTPException(status_code=403, detail=decision.reason)
 
 
-async def _authorize_ontology_write(principal: Principal) -> None:
+async def _authorize_ontology_write(principal: Principal, workspace_id: str) -> None:
     """Branch creation is a lighter-weight governance action than
     publishing — workspace `write` (editor+), not `approve` (admin-only).
     This is what makes review meaningful: the same role separation
@@ -135,7 +139,7 @@ async def _authorize_ontology_write(principal: Principal) -> None:
     decision = await core.authz.authorize(
         principal,
         resource_type="workspace",
-        resource_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
         permission="write",
     )
     if not decision.allowed:
@@ -151,10 +155,16 @@ class CreateObjectTypeRequest(BaseModel):
     property_mapping: dict[str, str]
     description: str = ""
     column_classification: dict[str, str] = {}
+    primary_key: str = "id"
+    title_key: Optional[str] = None
+    plural_display_name: str = ""
+    lifecycle_status: str = "experimental"
+    visibility: str = "normal"
+    icon: Optional[str] = None
 
 
 @router.post("/object-types", status_code=201)
-async def create_object_type(request: CreateObjectTypeRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_object_type(request: CreateObjectTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """The self-serve half of the no-code connector: an already-synced
     Dataset (see `connectivity`'s `/sources`) becomes a real, browsable
     ObjectType — same governance tier as publishing a version
@@ -167,7 +177,7 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
     `POST /ontology/{name}/versions` (+ publish) / branches — same path
     a seeded type uses.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if not request.property_mapping:
         raise HTTPException(status_code=400, detail="property_mapping must name at least one property")
     bad_values = set(request.column_classification.values()) - _ALLOWED_CLASSIFICATIONS
@@ -180,15 +190,21 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
         object_type = await ontology.create_object_type(
             core.pool,
             tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID,
+            workspace_id=workspace_id,
             name=request.name,
             source_dataset_urn=request.source_dataset_urn,
             property_mapping=request.property_mapping,
             description=request.description,
             column_classification=request.column_classification,
+            primary_key=request.primary_key,
+            title_key=request.title_key,
+            plural_display_name=request.plural_display_name,
+            lifecycle_status=request.lifecycle_status,
+            visibility=request.visibility,
+            icon=request.icon,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
 
     # Without this, `_authorize_object_type` denies everyone, including
     # the creator — `object_type.read/write/approve` all reduce to
@@ -202,7 +218,7 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
             resource_urn=object_type["urn"],
             relation="parent_workspace",
             subject_type="workspace",
-            subject_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
+            subject_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
         )
     except Exception as exc:
         logger.exception("SpiceDB parent_workspace write failed for %s — compensating PG delete", object_type["urn"])
@@ -230,11 +246,17 @@ class ProposeObjectTypeVersionRequest(BaseModel):
     property_formats: Optional[dict[str, dict]] = None
     conditional_formats: Optional[dict[str, list]] = None
     property_types: Optional[dict[str, dict]] = None
+    primary_key: Optional[str] = None
+    title_key: Optional[str] = None
+    plural_display_name: Optional[str] = None
+    lifecycle_status: Optional[str] = None
+    visibility: Optional[str] = None
+    icon: Optional[str] = None
 
 
 @router.post("/ontology/{name}/versions", status_code=201)
 async def propose_object_type_version(
-    name: str, request: ProposeObjectTypeVersionRequest, principal: Principal = Depends(core.current_principal)
+    name: str, request: ProposeObjectTypeVersionRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Ontology lifecycle versioning. Creates a `draft` — never
     touches the live definition every other read path uses until
@@ -242,9 +264,9 @@ async def propose_object_type_version(
     Workspace `write` (editor+), same tier as branch creation — publishing
     and review stay `approve` (admin-only).
     """
-    await _authorize_ontology_write(principal)
+    await _authorize_ontology_write(principal, workspace_id)
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     try:
@@ -260,6 +282,12 @@ async def propose_object_type_version(
             property_formats=request.property_formats,
             conditional_formats=request.conditional_formats,
             property_types=request.property_types,
+            primary_key=request.primary_key,
+            title_key=request.title_key,
+            plural_display_name=request.plural_display_name,
+            lifecycle_status=request.lifecycle_status,
+            visibility=request.visibility,
+            icon=request.icon,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -274,14 +302,14 @@ class ValueTypeRequest(BaseModel):
 
 
 @router.post("/value-types", status_code=201)
-async def create_value_type(request: ValueTypeRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_value_type(request: ValueTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Registering a Value Type is ontology governance, same tier as
     registering an Interface or a Marking — the workspace's own
     `approve` permission. A separate registry from `property_formats`
     (display-only) — this one is real data typing, referenced by
     `property_types` (below) and by declarative Action parameters.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_value_type(core.pool, principal.tenant_id, request.name) is not None:
         raise HTTPException(status_code=409, detail=f"value type already exists: {request.name}")
     try:
@@ -319,13 +347,13 @@ class UpdateValueTypeRequest(BaseModel):
 
 @router.put("/value-types/{name}")
 async def update_value_type(
-    name: str, request: UpdateValueTypeRequest, principal: Principal = Depends(core.current_principal)
+    name: str, request: UpdateValueTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Editing a Value Type is the same governance tier as registering
     one. `base_type`/`name` aren't accepted here — see
     `ontology/value_types.py`'s `update_value_type` docstring.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_value_type(core.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"unknown value type: {name}")
     try:
@@ -350,7 +378,7 @@ class SharedPropertyTypeRequest(BaseModel):
 
 @router.post("/shared-property-types", status_code=201)
 async def create_shared_property_type(
-    request: SharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal)
+    request: SharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Registering a Shared Property Type is ontology governance, same
     tier as registering a Value Type. Distinct registry from
@@ -358,7 +386,7 @@ async def create_shared_property_type(
     display_name + description), not just the underlying data shape —
     see `shared_property_types.py`'s module docstring.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_shared_property_type(core.pool, principal.tenant_id, request.api_name) is not None:
         raise HTTPException(status_code=409, detail=f"shared property type already exists: {request.api_name}")
     try:
@@ -394,13 +422,13 @@ class UpdateSharedPropertyTypeRequest(BaseModel):
 
 @router.put("/shared-property-types/{api_name}")
 async def update_shared_property_type(
-    api_name: str, request: UpdateSharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal)
+    api_name: str, request: UpdateSharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """`value_type`/`api_name` aren't accepted here — see
     `ontology/shared_property_types.py`'s `update_shared_property_type`
     docstring.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name) is None:
         raise HTTPException(status_code=404, detail=f"unknown shared property type: {api_name}")
     try:
@@ -436,7 +464,7 @@ class ActionTypeRequest(BaseModel):
 
 
 @router.post("/action-types", status_code=201)
-async def create_action_type(request: ActionTypeRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_action_type(request: ActionTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Registering an Action Type is ontology governance, same tier as
     an Interface or a Value Type — the workspace's own `approve`
     permission. The no-code counterpart to writing a Python
@@ -446,7 +474,7 @@ async def create_action_type(request: ActionTypeRequest, principal: Principal = 
     `value_type` or `target_object_type` existing, are checked at
     invocation time by `actions.request_generic_action`, not here).
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_action_type(core.pool, principal.tenant_id, request.name) is not None:
         raise HTTPException(status_code=409, detail=f"action type already exists: {request.name}")
     try:
@@ -486,7 +514,7 @@ async def get_action_type(name: str, principal: Principal = Depends(core.current
 
 @router.put("/action-types/{name}")
 async def update_action_type(
-    name: str, request: ActionTypeRequest, principal: Principal = Depends(core.current_principal)
+    name: str, request: ActionTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """`create_action_type`'s SQL is already `ON CONFLICT (tenant_id,
     name) DO UPDATE` — this endpoint is a full-replace edit (matches the
@@ -494,7 +522,7 @@ async def update_action_type(
     underneath), gated on the same existence direction `create` isn't:
     404 if it's *not* there yet, instead of `create`'s 409 if it is.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_action_type(core.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"unknown action type: {name}")
     try:
@@ -527,13 +555,13 @@ class InterfaceTypeRequest(BaseModel):
 
 
 @router.post("/interfaces", status_code=201)
-async def create_interface_type(request: InterfaceTypeRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_interface_type(request: InterfaceTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Registering an Interface is ontology governance, same tier as
     RelationType registration and ObjectType-version publication — the
     workspace's own `approve` permission, not a per-ObjectType check
     (an interface isn't owned by any single ObjectType).
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_interface_type(core.pool, principal.tenant_id, request.name) is not None:
         raise HTTPException(status_code=409, detail=f"interface already exists: {request.name}")
     return await ontology.create_interface_type(
@@ -570,12 +598,12 @@ class UpdateInterfaceTypeRequest(BaseModel):
 
 @router.put("/interfaces/{name}")
 async def update_interface_type(
-    name: str, request: UpdateInterfaceTypeRequest, principal: Principal = Depends(core.current_principal)
+    name: str, request: UpdateInterfaceTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """`name` isn't accepted here — it's the key referenced from every
     ObjectType's `implements` list.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_interface_type(core.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"unknown interface: {name}")
     try:
@@ -621,7 +649,7 @@ class MarkingRequest(BaseModel):
 
 
 @router.post("/markings", status_code=201)
-async def create_marking(request: MarkingRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_marking(request: MarkingRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Registering a Marking is ontology governance, same tier as
     registering an Interface — the workspace's own `approve` permission.
     A marking is a *label registry entry*, not a grant: creating "PII"
@@ -629,7 +657,7 @@ async def create_marking(request: MarkingRequest, principal: Principal = Depends
     below does — same two-step shape Identity's own Project access
     already uses (create, then grant per-principal).
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_marking(core.pool, principal.tenant_id, request.name) is not None:
         raise HTTPException(status_code=409, detail=f"marking already exists: {request.name}")
     return await ontology.create_marking(
@@ -652,7 +680,7 @@ async def get_marking(name: str, principal: Principal = Depends(core.current_pri
 
 @router.post("/markings/{name}/principals/{principal_urn:path}/access/grant")
 async def grant_marking_access(
-    name: str, principal_urn: str, principal: Principal = Depends(core.current_principal)
+    name: str, principal_urn: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Grants `hold` on `marking:{name}` — the SpiceDB-level clearance
     `_authorize_markings` checks at read time. Governance-gated the same
@@ -660,7 +688,7 @@ async def grant_marking_access(
     holds a clearance label, same tier Identity's own project-access
     grant uses one level up the hierarchy.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_marking(core.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"unknown marking: {name}")
     marking_urn = build_urn(principal.tenant_id, "global", "marking", name)
@@ -672,9 +700,9 @@ async def grant_marking_access(
 
 @router.post("/markings/{name}/principals/{principal_urn:path}/access/revoke")
 async def revoke_marking_access(
-    name: str, principal_urn: str, principal: Principal = Depends(core.current_principal)
+    name: str, principal_urn: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_marking(core.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"unknown marking: {name}")
     marking_urn = build_urn(principal.tenant_id, "global", "marking", name)
@@ -690,7 +718,8 @@ class SetInstanceMarkingsRequest(BaseModel):
 
 @router.post("/objects/{object_type}/{instance_id}/markings")
 async def set_instance_markings(
-    object_type: str, instance_id: str, request: SetInstanceMarkingsRequest, principal: Principal = Depends(core.current_principal)
+    object_type: str, instance_id: str, request: SetInstanceMarkingsRequest,
+    principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
     """The other attachment point (alongside ObjectType-wide `markings`
     above): labeling one specific instance. Write-tier gated like any
@@ -700,7 +729,7 @@ async def set_instance_markings(
     around it by trying to label an individual instance either.
     """
     try:
-        object_type_urn = await core._object_type_urn_for(object_type)
+        object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
     await core._authorize_object_type(principal, object_type_urn, "write")
@@ -718,9 +747,11 @@ async def set_instance_markings(
 
 
 @router.get("/ontology/{name}/versions")
-async def list_object_type_versions(name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def list_object_type_versions(
+    name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> list[dict]:
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     return await ontology.list_object_type_versions(core.pool, object_type_urn)
@@ -802,15 +833,15 @@ async def _link_object_type_to_project(object_type_urn: str, project_urn: Option
 
 @router.post("/ontology/{name}/versions/{version}/publish")
 async def publish_object_type_version(
-    name: str, version: int, principal: Principal = Depends(core.current_principal)
+    name: str, version: int, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Publishes transactional outbox event `knowledge.objecttype.published`
     and updates the live `object_type` row — the only thing that
     ever does, past its bootstrap-seeded state.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     try:
@@ -867,14 +898,14 @@ class ReviewBranchRequest(BaseModel):
 
 
 @router.post("/ontology/{name}/branches", status_code=201)
-async def create_branch(name: str, request: CreateBranchRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_branch(name: str, request: CreateBranchRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Branching + review: a named, ongoing line of ontology
     work — same `write`-tier (editor+) gate `propose_object_type_version`
     itself uses, one level up.
     """
-    await _authorize_ontology_write(principal)
+    await _authorize_ontology_write(principal, workspace_id)
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     try:
@@ -898,18 +929,22 @@ async def create_branch(name: str, request: CreateBranchRequest, principal: Prin
 
 
 @router.get("/ontology/{name}/branches")
-async def list_branches(name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def list_branches(
+    name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> list[dict]:
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     return await ontology.list_branches(core.pool, object_type_urn)
 
 
 @router.get("/ontology/{name}/branches/{branch_name}")
-async def get_branch(name: str, branch_name: str, principal: Principal = Depends(core.current_principal)) -> dict:
+async def get_branch(
+    name: str, branch_name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     branch = await ontology.get_branch(core.pool, object_type_urn, branch_name)
@@ -920,14 +955,14 @@ async def get_branch(name: str, branch_name: str, principal: Principal = Depends
 
 @router.post("/ontology/{name}/branches/{branch_name}/draft")
 async def update_branch_draft(
-    name: str, branch_name: str, request: UpdateBranchDraftRequest, principal: Principal = Depends(core.current_principal)
+    name: str, branch_name: str, request: UpdateBranchDraftRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Follow-up to a `changes_requested` review: proposes a new draft
     version and moves the branch's pointer to it — the branch stays open.
     """
-    await _authorize_ontology_write(principal)
+    await _authorize_ontology_write(principal, workspace_id)
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     try:
@@ -951,7 +986,7 @@ async def update_branch_draft(
 
 @router.post("/ontology/{name}/branches/{branch_name}/review")
 async def review_branch(
-    name: str, branch_name: str, request: ReviewBranchRequest, principal: Principal = Depends(core.current_principal)
+    name: str, branch_name: str, request: ReviewBranchRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """The merge gate — workspace `approve` (admin-only), same tier as
     `publish_object_type_version` directly. `decision == "approved"`
@@ -959,9 +994,9 @@ async def review_branch(
     (`implements`/`derived_properties`) and the `knowledge.objecttype.published`
     event still apply unchanged.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     try:
@@ -993,9 +1028,11 @@ async def review_branch(
 
 
 @router.get("/ontology/{name}/branches/{branch_name}/reviews")
-async def list_branch_reviews(name: str, branch_name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def list_branch_reviews(
+    name: str, branch_name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> list[dict]:
     try:
-        object_type_urn = await core._object_type_urn_for(name)
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
     branch = await ontology.get_branch(core.pool, object_type_urn, branch_name)
@@ -1023,7 +1060,7 @@ class UpdateResourceBranchDraftRequest(BaseModel):
 
 @router.post("/ontology-resources/{resource_type}/{resource_name}/branches", status_code=201)
 async def create_resource_branch(
-    resource_type: str, resource_name: str, request: CreateResourceBranchRequest, principal: Principal = Depends(core.current_principal)
+    resource_type: str, resource_name: str, request: CreateResourceBranchRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Generic branch/review for the 4 registries that aren't ObjectType
     (`ontology/resource_branching.py`) — same `write`-tier gate
@@ -1034,7 +1071,7 @@ async def create_resource_branch(
     registry's `create_*`/`update_*`.
     """
     _validate_resource_type(resource_type)
-    await _authorize_ontology_write(principal)
+    await _authorize_ontology_write(principal, workspace_id)
     try:
         return await ontology.create_resource_branch(
             core.pool,
@@ -1078,10 +1115,10 @@ async def update_resource_branch_draft(
     resource_name: str,
     branch_name: str,
     request: UpdateResourceBranchDraftRequest,
-    principal: Principal = Depends(core.current_principal),
+    principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
     _validate_resource_type(resource_type)
-    await _authorize_ontology_write(principal)
+    await _authorize_ontology_write(principal, workspace_id)
     try:
         return await ontology.update_resource_branch_draft(
             core.pool,
@@ -1101,7 +1138,7 @@ async def review_resource_branch(
     resource_name: str,
     branch_name: str,
     request: ReviewBranchRequest,
-    principal: Principal = Depends(core.current_principal),
+    principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
     """The merge gate — workspace `approve` (admin-only), same tier as
     `review_branch` (ObjectType's own version). `decision == "approved"`
@@ -1110,7 +1147,7 @@ async def review_resource_branch(
     already do still applies unchanged.
     """
     _validate_resource_type(resource_type)
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     try:
         return await ontology.review_resource_branch(
             core.pool,
@@ -1121,7 +1158,7 @@ async def review_resource_branch(
             decision=request.decision,
             note=request.note,
             tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID,
+            workspace_id=workspace_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1207,9 +1244,16 @@ class RelationTypeRequest(BaseModel):
     name: str
     source_object_type: str
     target_object_type: str
-    source_property: str
+    source_property: str = ""
     target_property: str
     cardinality: str
+    storage_kind: str = "foreign_key"
+    join_dataset_urn: Optional[str] = None
+    join_source_column: Optional[str] = None
+    join_target_column: Optional[str] = None
+    mid_object_type: Optional[str] = None
+    mid_source_property: Optional[str] = None
+    mid_target_property: Optional[str] = None
 
 
 @router.get("/relation-types")
@@ -1223,36 +1267,50 @@ async def list_relation_types(principal: Principal = Depends(core.current_princi
 class UpdateRelationTypeRequest(BaseModel):
     target_property: Optional[str] = None
     cardinality: Optional[str] = None
+    storage_kind: Optional[str] = None
+    join_dataset_urn: Optional[str] = None
+    join_source_column: Optional[str] = None
+    join_target_column: Optional[str] = None
+    mid_object_type: Optional[str] = None
+    mid_source_property: Optional[str] = None
+    mid_target_property: Optional[str] = None
 
 
 @router.put("/relation-types/{name}")
 async def update_relation_type(
-    name: str, request: UpdateRelationTypeRequest, principal: Principal = Depends(core.current_principal)
+    name: str, request: UpdateRelationTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Source/target ObjectType and `source_property` aren't accepted
     here — they're the structural identity of the link. See
     `ontology/relation_types.py`'s `update_relation_type` docstring.
     """
-    await _authorize_ontology_governance(principal)
-    urn = ontology.relation_type_urn(principal.tenant_id, core.WORKSPACE_ID, name)
+    await _authorize_ontology_governance(principal, workspace_id)
+    urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
     if await ontology.get_relation_type(core.pool, urn) is None:
         raise HTTPException(status_code=404, detail=f"unknown RelationType: {name}")
     try:
         return await ontology.update_relation_type(
             core.pool,
             tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID,
+            workspace_id=workspace_id,
             name=name,
             target_property=request.target_property,
             cardinality=request.cardinality,
+            storage_kind=request.storage_kind,
+            join_dataset_urn=request.join_dataset_urn,
+            join_source_column=request.join_source_column,
+            join_target_column=request.join_target_column,
+            mid_object_type=request.mid_object_type,
+            mid_source_property=request.mid_source_property,
+            mid_target_property=request.mid_target_property,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/relation-types/{name}")
-async def get_relation_type(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
-    urn = ontology.relation_type_urn(principal.tenant_id, core.WORKSPACE_ID, name)
+async def get_relation_type(name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
+    urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
     relation_type = await ontology.get_relation_type(core.pool, urn)
     if relation_type is None:
         raise HTTPException(status_code=404, detail=f"unknown RelationType: {name}")
@@ -1260,7 +1318,7 @@ async def get_relation_type(name: str, principal: Principal = Depends(core.curre
 
 
 @router.post("/relation-types", status_code=201)
-async def create_relation_type(request: RelationTypeRequest, principal: Principal = Depends(core.current_principal)) -> dict:
+async def create_relation_type(request: RelationTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Registering a new RelationType is an ontology governance action, not
     a data read/write — gated on the workspace's own `approve` permission
     (admin-only, the same tier that decides high-risk Actions), not
@@ -1270,13 +1328,13 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
     decision = await core.authz.authorize(
         principal,
         resource_type="workspace",
-        resource_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
         permission="approve",
     )
     if not decision.allowed:
         raise HTTPException(status_code=403, detail=decision.reason)
 
-    urn = ontology.relation_type_urn(principal.tenant_id, core.WORKSPACE_ID, request.name)
+    urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, request.name)
     if await ontology.get_relation_type(core.pool, urn) is not None:
         raise HTTPException(status_code=409, detail=f"RelationType already exists: {request.name}")
 
@@ -1284,13 +1342,20 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
         return await ontology.create_relation_type(
             core.pool,
             tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID,
+            workspace_id=workspace_id,
             name=request.name,
             source_object_type=request.source_object_type,
             target_object_type=request.target_object_type,
             source_property=request.source_property,
             target_property=request.target_property,
             cardinality=request.cardinality,
+            storage_kind=request.storage_kind,
+            join_dataset_urn=request.join_dataset_urn,
+            join_source_column=request.join_source_column,
+            join_target_column=request.join_target_column,
+            mid_object_type=request.mid_object_type,
+            mid_source_property=request.mid_source_property,
+            mid_target_property=request.mid_target_property,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1304,17 +1369,17 @@ class ObjectTypeGroupRequest(BaseModel):
 
 @router.post("/object-type-groups", status_code=201)
 async def create_object_type_group(
-    request: ObjectTypeGroupRequest, principal: Principal = Depends(core.current_principal)
+    request: ObjectTypeGroupRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """A purely navigational registry — same governance tier as
     Interfaces/Markings/Value Types, not its own permission concept.
     """
-    await _authorize_ontology_governance(principal)
+    await _authorize_ontology_governance(principal, workspace_id)
     try:
         return await ontology.create_object_type_group(
             core.pool,
             tenant_id=principal.tenant_id,
-            workspace_id=core.WORKSPACE_ID,
+            workspace_id=workspace_id,
             name=request.name,
             description=request.description,
             object_types=request.object_types,
@@ -1326,3 +1391,108 @@ async def create_object_type_group(
 @router.get("/object-type-groups")
 async def list_object_type_groups(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     return await ontology.list_object_type_groups(core.pool, principal.tenant_id)
+
+
+class ObjectSetRequest(BaseModel):
+    name: str
+    object_type: str
+    definition: dict
+    display_name: str = ""
+    description: str = ""
+    lifecycle_status: str = "experimental"
+    visibility: str = "normal"
+
+
+class UpdateObjectSetRequest(BaseModel):
+    definition: Optional[dict] = None
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    lifecycle_status: Optional[str] = None
+    visibility: Optional[str] = None
+
+
+@router.get("/object-sets")
+async def list_object_sets(principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    return await ontology.list_object_sets(core.pool, principal.tenant_id)
+
+
+@router.post("/object-sets", status_code=201)
+async def create_object_set(request: ObjectSetRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        return await ontology.create_object_set(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            name=request.name,
+            object_type=request.object_type,
+            definition=request.definition,
+            display_name=request.display_name,
+            description=request.description,
+            lifecycle_status=request.lifecycle_status,
+            visibility=request.visibility,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/object-sets/{name}")
+async def get_object_set(name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
+    urn = ontology.object_set_urn(principal.tenant_id, workspace_id, name)
+    row = await ontology.get_object_set(core.pool, urn)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"unknown object set: {name}")
+    return row
+
+
+@router.put("/object-sets/{name}")
+async def update_object_set(
+    name: str, request: UpdateObjectSetRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        return await ontology.update_object_set(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            name=name,
+            definition=request.definition,
+            display_name=request.display_name,
+            description=request.description,
+            lifecycle_status=request.lifecycle_status,
+            visibility=request.visibility,
+        )
+    except ValueError as exc:
+        status = 404 if "unknown" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@router.get("/object-sets/{name}/objects")
+async def evaluate_object_set(name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
+    """Evaluate the set filter against live instances — PDP-gated via `_resolve_many`."""
+    urn = ontology.object_set_urn(principal.tenant_id, workspace_id, name)
+    obj_set = await ontology.get_object_set(core.pool, urn)
+    if obj_set is None:
+        raise HTTPException(status_code=404, detail=f"unknown object set: {name}")
+    if obj_set.get("visibility") == "hidden":
+        # Still readable by admins with ontology approve; others get 404.
+        try:
+            await _authorize_ontology_governance(principal, workspace_id)
+        except HTTPException:
+            raise HTTPException(status_code=404, detail=f"unknown object set: {name}")
+
+    object_type = obj_set["object_type_urn"].rsplit(":", 1)[-1]
+    handle = await core._type_handle(object_type, principal.tenant_id)
+    if handle is None:
+        raise HTTPException(status_code=404, detail=f"backing ObjectType {object_type!r} missing")
+    await core._authorize_object_type(principal, handle["urn"], "read")
+    ot = await ontology.get_object_type(core.pool, obj_set["object_type_urn"])
+    rows = await core._resolve_many(
+        object_type, principal.tenant_id, handle["fetch_fn"], principal=principal,
+    )
+    mapping = (ot or {}).get("property_mapping") or {}
+    matched = [r for r in rows if ontology.matches_predicates(r, obj_set["definition"], mapping)]
+    for row in matched:
+        row["title"] = ontology.title_of(row, ot)
+    return {"object_set": name, "object_type": object_type, "count": len(matched), "items": matched}
+

@@ -26,6 +26,19 @@ export interface IdentityPrincipal {
   country: string | null;
 }
 
+export interface Tenant {
+  tenant_id: string;
+  display_name: string;
+  status: string;
+}
+
+export interface Workspace {
+  workspace_id: string;
+  tenant_id: string;
+  display_name: string;
+  status: string;
+}
+
 export interface Project {
   urn: string;
   tenant_id: string;
@@ -38,6 +51,37 @@ export type AccessRelation = "viewer" | "editor" | "admin";
 
 export const identityApi = {
   listPrincipals: () => api.get<IdentityPrincipal[]>(`${IDENTITY_URL}/principals`),
+  createPrincipal: (body: {
+    tenant_id: string;
+    type: "user" | "agent" | "service_account";
+    local_name: string;
+    display_name: string;
+    country?: string | null;
+  }) =>
+    api.post<IdentityPrincipal & { client_secret?: string; status: string }>(`${IDENTITY_URL}/principals`, body),
+  setPrincipalStatus: (principalUrn: string, status: "active" | "disabled") =>
+    api.post<{ urn: string; status: string }>(
+      `${IDENTITY_URL}/principals/${encodeURIComponent(principalUrn)}/status`,
+      { status },
+    ),
+
+  listTenants: () => api.get<Tenant[]>(`${IDENTITY_URL}/tenants`),
+  createTenant: (tenant_id: string, display_name: string) =>
+    api.post<Tenant>(`${IDENTITY_URL}/tenants`, { tenant_id, display_name }),
+  setTenantStatus: (tenantId: string, status: "active" | "disabled") =>
+    api.post<Tenant>(`${IDENTITY_URL}/tenants/${encodeURIComponent(tenantId)}/status`, { status }),
+
+  listWorkspaces: (tenantId?: string) =>
+    api.get<Workspace[]>(
+      tenantId ? `${IDENTITY_URL}/workspaces?tenant_id=${encodeURIComponent(tenantId)}` : `${IDENTITY_URL}/workspaces`,
+    ),
+  createWorkspace: (tenant_id: string, workspace_id: string, display_name: string, initial_admin_urn?: string) =>
+    api.post<Workspace>(`${IDENTITY_URL}/workspaces`, {
+      tenant_id,
+      workspace_id,
+      display_name,
+      ...(initial_admin_urn ? { initial_admin_urn } : {}),
+    }),
 
   whoami: () => api.get<IdentityPrincipal>(`${IDENTITY_URL}/whoami`),
 
@@ -59,4 +103,7 @@ export const identityApi = {
       `${IDENTITY_URL}/projects/${projectName}/principals/${encodeURIComponent(principalUrn)}/access/revoke`,
       { relation },
     ),
+
+  /** OIDC: returns authorize URL when SSO is configured; 404 when disabled. */
+  oidcStart: () => api.get<{ authorize_url: string }>(`${IDENTITY_URL}/oidc/login`),
 };

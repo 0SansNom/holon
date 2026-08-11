@@ -25,7 +25,7 @@ import os
 
 import httpx
 
-from holon_common import Principal, build_urn, issue_token
+from holon_common import Principal, active_jwt, build_urn, issue_token
 from holon_common.plugin import PluginManifest
 
 MODEL_NAME = "customer-value-classifier"
@@ -33,14 +33,14 @@ MODEL_NAME = "customer-value-classifier"
 
 def _caller_token() -> str:
     tenant_id = os.environ["HOLON_TENANT_ID"]
-    jwt_secret = os.environ["HOLON_JWT_SECRET"]
+    secret, kid, secrets_map = active_jwt()
     principal = Principal(
         urn=build_urn(tenant_id, "global", "service-account", "knowledge-model-caller"),
         type="service_account",
         tenant_id=tenant_id,
         display_name="Knowledge Model Caller",
     )
-    return issue_token(principal, jwt_secret, ttl_seconds=60)
+    return issue_token(principal, secret, ttl_seconds=60, kid=kid, secrets=secrets_map)
 
 
 class CustomerValueModelFunction:

@@ -24,6 +24,7 @@ from qdrant_client import AsyncQdrantClient
 from holon_common import (
     EventProducer,
     Principal,
+    active_jwt,
     build_urn,
     configure_json_logging,
     create_pool,
@@ -47,7 +48,7 @@ configure_json_logging(SERVICE_NAME)
 
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
-JWT_SECRET = os.environ["HOLON_JWT_SECRET"]
+JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
 KAFKA_BOOTSTRAP = os.environ["HOLON_KAFKA_BOOTSTRAP"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
@@ -73,7 +74,9 @@ def _indexer_token() -> str:
     principal = Principal(
         urn=INDEXER_URN, type="service_account", tenant_id=TENANT_ID, display_name="Intelligence Semantic Indexer"
     )
-    return issue_token(principal, JWT_SECRET, ttl_seconds=300)
+    return issue_token(
+        principal, JWT_SECRET, ttl_seconds=300, kid=JWT_ACTIVE_KID, secrets=JWT_SECRETS
+    )
 
 
 def _security_probe_tokens() -> tuple[str, str]:
@@ -89,7 +92,10 @@ def _security_probe_tokens() -> tuple[str, str]:
         urn=AGENT_URN, type="agent", tenant_id=TENANT_ID, display_name="Ingest Bot", on_behalf_of=JDOE_URN, country="FR"
     )
     editor = Principal(urn=JDOE_URN, type="user", tenant_id=TENANT_ID, display_name="Jane Doe", country="FR")
-    return issue_token(agent, JWT_SECRET, ttl_seconds=60), issue_token(editor, JWT_SECRET, ttl_seconds=60)
+    return (
+        issue_token(agent, JWT_SECRET, ttl_seconds=60, kid=JWT_ACTIVE_KID, secrets=JWT_SECRETS),
+        issue_token(editor, JWT_SECRET, ttl_seconds=60, kid=JWT_ACTIVE_KID, secrets=JWT_SECRETS),
+    )
 
 
 @asynccontextmanager
@@ -179,7 +185,7 @@ instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
-current_principal = make_principal_dependency(JWT_SECRET)
+current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 
 @app.get("/health")

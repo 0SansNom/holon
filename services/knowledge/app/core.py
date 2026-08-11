@@ -28,9 +28,9 @@ import os
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import HTTPException
+from fastapi import Header, HTTPException, Query
 
-from holon_common import Principal, build_urn, make_principal_dependency
+from holon_common import Principal, active_jwt, build_urn, make_principal_dependency, require_urn_tenant_match
 
 from . import function_registry, ontology, resolver, serving_store
 from pyiceberg.exceptions import NoSuchTableError
@@ -39,7 +39,7 @@ logger = logging.getLogger("knowledge")
 
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
-JWT_SECRET = os.environ["HOLON_JWT_SECRET"]
+JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 
 ICEBERG_CONFIG = dict(
     catalog_uri=os.environ["HOLON_ICEBERG_CATALOG_URI"],
@@ -56,6 +56,9 @@ SUPPORT_TICKET_OBJECT_TYPE_URN = ontology.support_ticket_object_type_urn(TENANT_
 PRODUCT_REVIEW_OBJECT_TYPE_URN = ontology.product_review_object_type_urn(TENANT_ID, WORKSPACE_ID)
 SUPPLIER_OBJECT_TYPE_URN = ontology.supplier_object_type_urn(TENANT_ID, WORKSPACE_ID)
 INVENTORY_LEVEL_OBJECT_TYPE_URN = ontology.inventory_level_object_type_urn(TENANT_ID, WORKSPACE_ID)
+# Bootstrap-tenant seeded ObjectType URNs only. Request paths for other
+# tenants must build URNs from principal.tenant_id (ADR 026) — these
+# constants are demo fixtures, not an instance-wide ceiling.
 OBJECT_TYPE_URNS = {
     "Customer": CUSTOMER_OBJECT_TYPE_URN,
     "Order": ORDER_OBJECT_TYPE_URN,
@@ -64,6 +67,14 @@ OBJECT_TYPE_URNS = {
     "Supplier": SUPPLIER_OBJECT_TYPE_URN,
     "InventoryLevel": INVENTORY_LEVEL_OBJECT_TYPE_URN,
 }
+
+
+def seeded_object_type_urn(object_type: str, tenant_id: str, workspace_id: str = WORKSPACE_ID) -> str:
+    """ObjectType URN for a tenant. Bootstrap seed data only exists for
+    HOLON_TENANT_ID; other tenants get a same-shaped URN that will 404
+    in the catalogue until they provision their own ontology.
+    """
+    return ontology.object_type_urn(tenant_id, workspace_id, object_type)
 
 # The export endpoint needs the same fetch_fn every existing
 # list endpoint already uses — one small mapping, not a new read path.
@@ -88,37 +99,53 @@ ID_KWARGS = {
     "InventoryLevel": "sku",
 }
 
-current_principal = make_principal_dependency(JWT_SECRET)
+current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
+
+
+async def current_workspace(
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    x_holon_workspace_id: Optional[str] = Header(None, alias="X-Holon-Workspace-Id"),
+) -> str:
+    """Resolves the workspace a request targets — query param, then
+    header, then `WORKSPACE_ID` (the bootstrap tenant's own workspace) as
+    the default. A caller outside the bootstrap tenant must supply one of
+    the two explicitly; there is no way for this service to guess a
+    filiale's workspace on its own (`identity` owns that registry, and
+    ADR 026 deliberately doesn't cascade tenant membership into workspace
+    access, so `knowledge` can't infer "the" workspace from `tenant_id`
+    alone even if it could reach `identity`'s table).
+
+    This resolves *which* workspace, not whether the principal may act on
+    it — every call site still runs its own ReBAC/ABAC check
+    (`_authorize_ontology_write`/`_authorize_object_type`/etc.) against
+    the workspace this returns, same as before.
+    """
+    return workspace_id or x_holon_workspace_id or WORKSPACE_ID
+
 
 # Set once by `main.py`'s `lifespan()` at startup — see module docstring.
 pool = None
 authz = None
 
 
-async def _object_type_urn_for(object_type: str) -> str:
-    """`OBJECT_TYPE_URNS` first — a plain dict lookup, no DB round-trip,
-    for the six boot-seeded types every hot path already expects to be
-    fast. Falls back to a real query only for a self-serve type created
-    at runtime (`ontology.create_object_type`), which was never known at
-    import time and so can never be in that static dict. Kept as a
-    fallback *inside* `_resolve_one`/`_resolve_many` rather than making
-    `OBJECT_TYPE_URNS` itself dynamic (e.g. DB-refreshed on a timer),
-    which would add real cache-staleness risk for a lookup this cheap to
-    just do directly. Raises `KeyError` for a name that's neither —
-    same contract the old bare `OBJECT_TYPE_URNS[object_type]` already
-    had, so every existing call site's error behavior is unchanged.
+async def _object_type_urn_for(object_type: str, tenant_id: str = TENANT_ID, workspace_id: str = WORKSPACE_ID) -> str:
+    """Resolve ObjectType URN for *this* tenant/workspace. Bootstrap seeded
+    names use the static map only when `tenant_id` is the bootstrap tenant;
+    otherwise build a per-tenant, per-workspace URN (empty catalogue until
+    provisioned there).
     """
-    static = OBJECT_TYPE_URNS.get(object_type)
-    if static is not None:
-        return static
-    urn = ontology.object_type_urn(TENANT_ID, WORKSPACE_ID, object_type)
+    if tenant_id == TENANT_ID and workspace_id == WORKSPACE_ID:
+        static = OBJECT_TYPE_URNS.get(object_type)
+        if static is not None:
+            return static
+    urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
     row = await ontology.get_object_type(pool, urn)
     if row is None:
         raise KeyError(object_type)
     return urn
 
 
-async def _type_handle(object_type: str) -> Optional[dict]:
+async def _type_handle(object_type: str, tenant_id: str = TENANT_ID, workspace_id: str = WORKSPACE_ID) -> Optional[dict]:
     """Generalizes `OBJECT_TYPE_URNS`/`FETCH_FNS`/`ID_KWARGS`'s
     hardcoded-six lookup to any ObjectType, self-serve included — built
     on `_object_type_urn_for`'s own fallback. Used wherever a caller
@@ -129,7 +156,7 @@ async def _type_handle(object_type: str) -> Optional[dict]:
     as a skip, not an error.
     """
     try:
-        urn = await _object_type_urn_for(object_type)
+        urn = await _object_type_urn_for(object_type, tenant_id, workspace_id)
     except KeyError:
         return None
     if object_type in FETCH_FNS:
@@ -156,29 +183,56 @@ def _fk_filtered_fetch(fetch_fn, filter_column: str):
     return _call
 
 
+async def _is_authorized_read(principal: Principal, object_type_urn: str) -> bool:
+    """`_authorize_object_type` for a *neighbor* type reached mid-traversal —
+    a 403 (ReBAC/ABAC/marking denial, or a cross-tenant URN) means "this
+    branch doesn't exist for this principal", the same "omit, don't abort"
+    treatment `_resolve_one` already gives a denied/missing instance one
+    level down. A 500 (miscatalogued ObjectType — a real server bug, not
+    an access decision) is deliberately not swallowed here and still
+    propagates, matching `_authorize_object_type`'s own "fail loudly rather
+    than guess a classification" for that case.
+    """
+    try:
+        await _authorize_object_type(principal, object_type_urn, "read")
+        return True
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return False
+        raise
+
+
 async def _resolve_relation_neighbors(
     relation: dict, current_type: str, current_id, current_row: dict, principal: Principal,
     *, authorized_types: set[str], property_mapping_cache: dict[str, dict],
 ) -> Optional[tuple[str, list[dict], str]]:
     """Applies one RelationType to one instance, in whichever direction
-    `current_type` sits on — `toward_one` if it's the relation's source
-    (follow the FK to the single target, cheap/PK-indexed) or
-    `toward_many` if it's the target (fan out to every source row whose
-    FK matches, via `_resolve_many`'s own `filter_column`). The
-    single-relation building block the instance-graph BFS
-    (`routers/objects/seeded.py`'s `_traverse_neighborhood`), the named
-    single-link endpoint (`get_object_link`), and a `link_aggregate`
-    derived property (`_apply_derived_properties` below) all share, so
-    FK/direction resolution is never duplicated. Works for any
-    ObjectType, seeded or self-serve, via `_type_handle`. Returns
-    `(neighbor_type, neighbor_rows, direction)`, or `None` if this
-    relation doesn't touch `current_type`, its FK column can't be
-    resolved, or the neighbor type itself no longer exists.
+    `current_type` sits on. Supports foreign_key, join_dataset (M:N), and
+    object_backed storage kinds.
     """
+    from . import resolver
+
     source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
     target_name = relation["target_object_type_urn"].rsplit(":", 1)[-1]
     if current_type not in (source_name, target_name):
         return None
+
+    storage = relation.get("storage_kind") or "foreign_key"
+
+    if storage == "join_dataset":
+        return await _resolve_join_dataset_neighbors(
+            relation, current_type, current_id, principal,
+            source_name=source_name, target_name=target_name,
+            authorized_types=authorized_types,
+        )
+
+    if storage == "object_backed":
+        return await _resolve_object_backed_neighbors(
+            relation, current_type, current_id, principal,
+            source_name=source_name, target_name=target_name,
+            authorized_types=authorized_types,
+            property_mapping_cache=property_mapping_cache,
+        )
 
     mapping = property_mapping_cache.get(relation["source_object_type_urn"])
     if mapping is None:
@@ -193,14 +247,18 @@ async def _resolve_relation_neighbors(
 
     if current_type == source_name:
         neighbor_type = target_name
-        handle = await _type_handle(neighbor_type)
+        handle = await _type_handle(neighbor_type, principal.tenant_id)
         if handle is None:
             return None
         fk_value = current_row.get(col)
         if fk_value is None:
+            # Also try api-name key on resolved rows
+            fk_value = current_row.get(relation["source_property"])
+        if fk_value is None:
             return None
         if neighbor_type not in authorized_types:
-            await _authorize_object_type(principal, handle["urn"], "read")
+            if not await _is_authorized_read(principal, handle["urn"]):
+                return None
             authorized_types.add(neighbor_type)
         neighbor_row = await _resolve_one(
             neighbor_type, principal.tenant_id, fk_value, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
@@ -208,11 +266,12 @@ async def _resolve_relation_neighbors(
         return neighbor_type, ([neighbor_row] if neighbor_row is not None else []), "toward_one"
 
     neighbor_type = source_name
-    handle = await _type_handle(neighbor_type)
+    handle = await _type_handle(neighbor_type, principal.tenant_id)
     if handle is None:
         return None
     if neighbor_type not in authorized_types:
-        await _authorize_object_type(principal, handle["urn"], "read")
+        if not await _is_authorized_read(principal, handle["urn"]):
+            return None
         authorized_types.add(neighbor_type)
     fetch_fn = handle["fetch_fn"] if neighbor_type in FETCH_FNS else _fk_filtered_fetch(handle["fetch_fn"], col)
     neighbor_rows = await _resolve_many(
@@ -220,6 +279,112 @@ async def _resolve_relation_neighbors(
         filter_column=col, filter_kwarg=col, filter_value=current_id,
     )
     return neighbor_type, neighbor_rows, "toward_many"
+
+
+async def _resolve_join_dataset_neighbors(
+    relation: dict, current_type: str, current_id, principal: Principal,
+    *, source_name: str, target_name: str, authorized_types: set[str],
+) -> Optional[tuple[str, list[dict], str]]:
+    from . import resolver
+
+    join_urn = relation.get("join_dataset_urn")
+    src_col = relation.get("join_source_column")
+    tgt_col = relation.get("join_target_column")
+    if not join_urn or not src_col or not tgt_col:
+        return None
+    dataset_name = join_urn.rsplit(":", 1)[-1]
+    try:
+        join_rows = await asyncio.to_thread(resolver.fetch_generic, dataset_name, **ICEBERG_CONFIG)
+    except NoSuchTableError:
+        return None
+
+    if current_type == source_name:
+        neighbor_type = target_name
+        neighbor_ids = [r[tgt_col] for r in join_rows if r.get(src_col) == current_id and r.get(tgt_col) is not None]
+        direction = "toward_many"
+    else:
+        neighbor_type = source_name
+        neighbor_ids = [r[src_col] for r in join_rows if r.get(tgt_col) == current_id and r.get(src_col) is not None]
+        direction = "toward_many"
+
+    handle = await _type_handle(neighbor_type, principal.tenant_id)
+    if handle is None:
+        return None
+    if neighbor_type not in authorized_types:
+        if not await _is_authorized_read(principal, handle["urn"]):
+            return None
+        authorized_types.add(neighbor_type)
+    neighbors: list[dict] = []
+    for nid in neighbor_ids:
+        row = await _resolve_one(
+            neighbor_type, principal.tenant_id, nid, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
+        )
+        if row is not None:
+            neighbors.append(row)
+    return neighbor_type, neighbors, direction
+
+
+async def _resolve_object_backed_neighbors(
+    relation: dict, current_type: str, current_id, principal: Principal,
+    *, source_name: str, target_name: str, authorized_types: set[str],
+    property_mapping_cache: dict[str, dict],
+) -> Optional[tuple[str, list[dict], str]]:
+    mid_urn = relation.get("mid_object_type_urn")
+    mid_src_prop = relation.get("mid_source_property")
+    mid_tgt_prop = relation.get("mid_target_property")
+    if not mid_urn or not mid_src_prop or not mid_tgt_prop:
+        return None
+    mid_name = mid_urn.rsplit(":", 1)[-1]
+    mid_def = await ontology.get_object_type(pool, mid_urn)
+    if mid_def is None:
+        return None
+    mid_mapping = mid_def["property_mapping"]
+    property_mapping_cache[mid_urn] = mid_mapping
+    src_col = mid_mapping.get(mid_src_prop)
+    tgt_col = mid_mapping.get(mid_tgt_prop)
+    if not src_col or not tgt_col:
+        return None
+
+    mid_handle = await _type_handle(mid_name, principal.tenant_id)
+    if mid_handle is None:
+        return None
+    if mid_name not in authorized_types:
+        if not await _is_authorized_read(principal, mid_handle["urn"]):
+            return None
+        authorized_types.add(mid_name)
+
+    if current_type == source_name:
+        filter_col, project_col, neighbor_type = src_col, tgt_col, target_name
+    else:
+        filter_col, project_col, neighbor_type = tgt_col, src_col, source_name
+
+    fetch_fn = (
+        mid_handle["fetch_fn"] if mid_name in FETCH_FNS else _fk_filtered_fetch(mid_handle["fetch_fn"], filter_col)
+    )
+    mid_rows = await _resolve_many(
+        mid_name, principal.tenant_id, fetch_fn, principal=principal,
+        filter_column=filter_col, filter_kwarg=filter_col, filter_value=current_id,
+    )
+    neighbor_ids = [r.get(project_col) for r in mid_rows if r.get(project_col) is not None]
+    handle = await _type_handle(neighbor_type, principal.tenant_id)
+    if handle is None:
+        return None
+    if neighbor_type not in authorized_types:
+        if not await _is_authorized_read(principal, handle["urn"]):
+            return None
+        authorized_types.add(neighbor_type)
+    neighbors: list[dict] = []
+    for nid in neighbor_ids:
+        row = await _resolve_one(
+            neighbor_type, principal.tenant_id, nid, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
+        )
+        if row is not None:
+            # Attach mid link object for Foundry-style object-backed metadata.
+            matching_mids = [m for m in mid_rows if m.get(project_col) == nid]
+            if matching_mids:
+                row = {**row, "_link_object": matching_mids[0], "_link_object_type": mid_name}
+            neighbors.append(row)
+    return neighbor_type, neighbors, "toward_many"
 
 
 def _find_relation_by_link_name(relation_types: list[dict], object_type: str, link_name: str) -> Optional[dict]:
@@ -249,26 +414,11 @@ producer = None
 
 
 async def _authorize_object_type(principal: Principal, object_type_urn: str, permission: str) -> None:
-    """Shared by every object-type endpoint, read or write, Customer or
-    Order (the PDP doesn't care which resource or verb it's checking —
-    only `object_type_urn` and `permission` change).
-
-    Behavior for `permission == "read"`: classification used to be passed
-    straight through as the resource attribute, so OPA's
-    `allow := false if classification == confidential and country not
-    allowed` denied the *entire* object type wholesale for a
-    disallowed-country principal — even its non-confidential properties.
-    That's now handled at the correct granularity: `_mask_confidential_properties`
-    masks only the actually-confidential fields, applied uniformly at the
-    read choke point (`_resolve_one`/`_resolve_many`).
-    ReBAC (can this principal read objects of this type at all) is unaffected —
-    only the object-level ABAC classification gate is skipped for reads,
-    since classification enforcement for reads now lives at the property
-    level. Writes/approvals (`putOnCreditHold`, `closeAccount`, approving
-    them) keep the original all-or-nothing check: masking has no meaning
-    for a mutation — you can't partially deny writing to a field the
-    request never even names them individually.
+    """Shared by every object-type endpoint. Hard tenant fence first
+    (URN tenant must equal principal.tenant_id — ADR 026), then ReBAC/ABAC.
     """
+    require_urn_tenant_match(principal, object_type_urn)
+
     object_type = await ontology.get_object_type(pool, object_type_urn)
     if object_type is None:
         # Seeded at startup (ensure_seeded) — reaching here means that failed, not that
@@ -351,7 +501,17 @@ async def _mask_confidential_properties(
     return masked_rows
 
 
-_ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max"}
+_ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max", "collect_list", "collect_set"}
+_MAX_LINK_AGGREGATE_HOPS = 3
+_DEFAULT_COLLECT_LIMIT = 10
+
+
+def _link_aggregate_path(rule: dict) -> list[str]:
+    path = rule.get("path")
+    if path is not None:
+        return path if isinstance(path, list) else []
+    relation = rule.get("relation")
+    return [relation] if isinstance(relation, str) and relation else []
 
 
 async def _compute_link_aggregate(
@@ -359,34 +519,49 @@ async def _compute_link_aggregate(
     *, relation_types: list[dict], authorized_types: set[str], property_mapping_cache: dict[str, dict],
     neighbor_property_mapping_cache: dict[str, dict],
 ) -> Optional[Any]:
-    """A Foundry-style reducer: `count`/`sum`/`avg`/`min`/`max` over the
-    related instances a RelationType's `link_name` resolves to, reusing
-    the exact traversal `_resolve_relation_neighbors` already gives the
-    instance-graph BFS and the single-link endpoint — no separate fetch
-    path for this third consumer. Returns `None` (property skipped, same
-    "degrade, don't fail the read" contract the Function path already
-    has) if the relation, neighbor type, or aggregated property can't be
-    resolved.
+    """A Foundry-style reducer over a 1–3 hop RelationType path:
+    `count`/`sum`/`avg`/`min`/`max`/`collect_list`/`collect_set`.
+    Reuses `_resolve_relation_neighbors` per hop — no separate fetch
+    path. Returns `None` (property skipped) if the path, neighbor type,
+    or aggregated property can't be resolved.
     """
-    relation = _find_relation_by_link_name(relation_types, object_type_name, rule.get("relation"))
-    if relation is None or "id" not in row:
+    path = _link_aggregate_path(rule)
+    if not path or len(path) > _MAX_LINK_AGGREGATE_HOPS or "id" not in row:
         return None
-    result = await _resolve_relation_neighbors(
-        relation, object_type_name, row["id"], row, principal,
-        authorized_types=authorized_types, property_mapping_cache=property_mapping_cache,
-    )
-    if result is None:
-        return None
-    neighbor_type, neighbor_rows, _direction = result
 
+    # Frontier of (object_type_name, row) reached so far.
+    frontier: list[tuple[str, dict]] = [(object_type_name, row)]
+    for link_name in path:
+        next_frontier: list[tuple[str, dict]] = []
+        for current_type, current_row in frontier:
+            relation = _find_relation_by_link_name(relation_types, current_type, link_name)
+            if relation is None or "id" not in current_row:
+                continue
+            result = await _resolve_relation_neighbors(
+                relation, current_type, current_row["id"], current_row, principal,
+                authorized_types=authorized_types, property_mapping_cache=property_mapping_cache,
+            )
+            if result is None:
+                continue
+            neighbor_type, neighbor_rows, _direction = result
+            for neighbor_row in neighbor_rows:
+                next_frontier.append((neighbor_type, neighbor_row))
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    neighbor_rows = [neighbor_row for _type, neighbor_row in frontier]
     aggregate = rule.get("aggregate")
     if aggregate == "count":
         return len(neighbor_rows)
+    if not frontier:
+        return None
 
+    neighbor_type = frontier[0][0]
     neighbor_property = rule.get("property")
     neighbor_mapping = neighbor_property_mapping_cache.get(neighbor_type)
     if neighbor_mapping is None:
-        neighbor_handle = await _type_handle(neighbor_type)
+        neighbor_handle = await _type_handle(neighbor_type, principal.tenant_id)
         if neighbor_handle is None:
             return None
         neighbor_definition = await ontology.get_object_type(pool, neighbor_handle["urn"])
@@ -399,17 +574,38 @@ async def _compute_link_aggregate(
         return None
 
     raw_values = [neighbor_row.get(neighbor_column) for neighbor_row in neighbor_rows]
-    values = [float(v) for v in raw_values if v is not None]
-    if not values:
+    values = [v for v in raw_values if v is not None]
+
+    if aggregate in ("collect_list", "collect_set"):
+        limit = rule.get("collect_limit", _DEFAULT_COLLECT_LIMIT)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            limit = _DEFAULT_COLLECT_LIMIT
+        if aggregate == "collect_set":
+            # Preserve encounter order while deduping.
+            seen: set[str] = set()
+            unique: list[Any] = []
+            for v in values:
+                key = json.dumps(v, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(v)
+                if len(unique) >= limit:
+                    break
+            return unique
+        return values[:limit]
+
+    numeric = [float(v) for v in values]
+    if not numeric:
         return None
     if aggregate == "sum":
-        return sum(values)
+        return sum(numeric)
     if aggregate == "avg":
-        return sum(values) / len(values)
+        return sum(numeric) / len(numeric)
     if aggregate == "min":
-        return min(values)
+        return min(numeric)
     if aggregate == "max":
-        return max(values)
+        return max(numeric)
     return None
 
 
@@ -535,7 +731,7 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
             except Exception:
                 logger.exception(
                     "derived property %r (link_aggregate over %r) failed for %s, skipping it for this row",
-                    property_name, rule.get("relation"), object_type_urn,
+                    property_name, rule.get("path") or rule.get("relation"), object_type_urn,
                 )
                 continue
             if value is not None:
@@ -682,7 +878,7 @@ async def _resolve_one(
     below) is the single read choke point, so every one of the
     dozen-plus object-read endpoints gets it without a per-endpoint call.
     """
-    object_type_urn = await _object_type_urn_for(object_type)
+    object_type_urn = await _object_type_urn_for(object_type, tenant_id)
 
     if as_of is not None:
         row = await serving_store.get_instance_as_of(pool, object_type, tenant_id, instance_id, as_of)
@@ -729,7 +925,7 @@ async def _resolve_many(
     filter_kwarg: Optional[str] = None,
     filter_value=None,
 ) -> list[dict]:
-    object_type_urn = await _object_type_urn_for(object_type)
+    object_type_urn = await _object_type_urn_for(object_type, tenant_id)
     rows = await serving_store.list_instances(
         pool, object_type, tenant_id, filter_column=filter_column, filter_value=filter_value
     )
