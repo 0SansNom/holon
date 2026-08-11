@@ -102,6 +102,23 @@ services:
     ports:
       - "8181:8181"
 
+  # One-shot: the postgres datastore engine below refuses every request
+  # ("datastore is not migrated") until this has run once against a fresh
+  # `holon_spicedb` database — same service_completed_successfully gate
+  # `minio-init` already uses for `iceberg-rest`. Re-running against an
+  # already-migrated database is a safe no-op.
+  spicedb-migrate:
+    image: authzed/spicedb:latest
+    command:
+      - datastore
+      - migrate
+      - head
+      - --datastore-engine=postgres
+      - --datastore-conn-uri=postgres://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_spicedb?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   spicedb:
     image: authzed/spicedb:latest
     command:
@@ -114,8 +131,8 @@ services:
       - "50051:50051"
       - "8443:8443"
     depends_on:
-      postgres:
-        condition: service_healthy
+      spicedb-migrate:
+        condition: service_completed_successfully
 
   opa:
     image: openpolicyagent/opa:latest
