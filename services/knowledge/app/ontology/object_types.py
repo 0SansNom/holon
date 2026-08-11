@@ -114,6 +114,9 @@ RELATION_TYPES = [
 
 INITIAL_CLASSIFICATION = "internal"
 
+VALID_LIFECYCLE_STATUSES = frozenset({"experimental", "active", "deprecated"})
+VALID_VISIBILITIES = frozenset({"prominent", "normal", "hidden"})
+
 # All JSONB columns on `object_type`; a subset (without `column_classification`)
 # covers `object_type_version`. Centralised so adding a new JSONB column only
 # requires touching this constant — not the four independent call sites below.
@@ -123,6 +126,52 @@ _OT_JSONB_KEYS: tuple[str, ...] = (
 )
 # object_type_version has no column_classification column.
 _OTV_JSONB_KEYS: tuple[str, ...] = _OT_JSONB_KEYS[:-1]
+
+# Scalar Foundry-parity+ metadata mirrored on live + version rows.
+_OT_META_KEYS: tuple[str, ...] = (
+    "primary_key", "title_key", "plural_display_name", "lifecycle_status", "visibility", "icon",
+)
+
+
+def title_of(instance: dict, object_type: dict | None = None) -> str:
+    """Display title for an object instance — title_key, else primary_key, else id/name."""
+    keys: list[str] = []
+    if object_type:
+        if object_type.get("title_key"):
+            keys.append(object_type["title_key"])
+        if object_type.get("primary_key"):
+            keys.append(object_type["primary_key"])
+    keys.extend(["name", "id"])
+    mapping = (object_type or {}).get("property_mapping") or {}
+    for key in keys:
+        if key in instance and instance[key] is not None and instance[key] != "":
+            return str(instance[key])
+        col = mapping.get(key)
+        if col and col in instance and instance[col] is not None and instance[col] != "":
+            return str(instance[col])
+    return str(instance.get("id") or "")
+
+
+def validate_ot_metadata(
+    *,
+    property_mapping: dict,
+    primary_key: str,
+    title_key: str | None,
+    lifecycle_status: str,
+    visibility: str,
+) -> None:
+    if lifecycle_status not in VALID_LIFECYCLE_STATUSES:
+        raise ValueError(
+            f"invalid lifecycle_status: {lifecycle_status!r} (must be one of {sorted(VALID_LIFECYCLE_STATUSES)})"
+        )
+    if visibility not in VALID_VISIBILITIES:
+        raise ValueError(f"invalid visibility: {visibility!r} (must be one of {sorted(VALID_VISIBILITIES)})")
+    if not primary_key:
+        raise ValueError("primary_key is required")
+    if primary_key not in property_mapping:
+        raise ValueError(f"primary_key {primary_key!r} must be a key in property_mapping")
+    if title_key and title_key not in property_mapping:
+        raise ValueError(f"title_key {title_key!r} must be a key in property_mapping")
 
 
 def _parse_jsonb_keys(row: asyncpg.Record, keys: tuple[str, ...]) -> dict:
@@ -426,6 +475,47 @@ CREATE TABLE IF NOT EXISTS shared_property_type (
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS property_types JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS property_types JSONB NOT NULL DEFAULT '{}';
 
+-- Foundry-parity+ ObjectType presentation / identity metadata (versioned).
+-- `lifecycle_status` is experimental|active|deprecated — distinct from
+-- `object_type_version.status` (draft|published).
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS primary_key TEXT NOT NULL DEFAULT 'id';
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS title_key TEXT;
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS plural_display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS icon TEXT;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS primary_key TEXT NOT NULL DEFAULT 'id';
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS title_key TEXT;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS plural_display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS icon TEXT;
+
+-- Link Type storage kinds beyond FK (Foundry join-table + object-backed).
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS storage_kind TEXT NOT NULL DEFAULT 'foreign_key';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS join_dataset_urn TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS join_source_column TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS join_target_column TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_object_type_urn TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_source_property TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_target_property TEXT;
+
+-- Object Sets: filtered collections of instances (Knowledge-owned artefact).
+CREATE TABLE IF NOT EXISTS object_set (
+    urn TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    object_type_urn TEXT NOT NULL,
+    definition JSONB NOT NULL DEFAULT '{"all":[]}',
+    lifecycle_status TEXT NOT NULL DEFAULT 'experimental',
+    visibility TEXT NOT NULL DEFAULT 'normal',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, name)
+);
+
 -- Action Types: the no-code counterpart to `actions.py`'s hardcoded
 -- `ACTION_DEFINITIONS` + `register_apply_function`. A simple upsert
 -- registry (like `interface_type`/`marking` above), not versioned —
@@ -615,6 +705,27 @@ async def ensure_seeded(pool: asyncpg.Pool, tenant_id: str, workspace_id: str) -
             relation["cardinality"],
         )
 
+    # Seed title keys for demo types (primary_key defaults to id via DDL).
+    for name, title_key, plural, icon in (
+        ("Customer", "name", "Customers", "people"),
+        ("Order", "id", "Orders", "shopping-cart"),
+        ("SupportTicket", "subject", "Support tickets", "chat"),
+        ("ProductReview", "id", "Product reviews", "star"),
+        ("Supplier", "name", "Suppliers", "office"),
+        ("InventoryLevel", "id", "Inventory levels", "box"),
+    ):
+        await pool.execute(
+            """
+            UPDATE object_type SET
+                title_key = COALESCE(title_key, $2),
+                plural_display_name = CASE WHEN plural_display_name = '' THEN $3 ELSE plural_display_name END,
+                icon = COALESCE(icon, $4),
+                lifecycle_status = CASE WHEN lifecycle_status = 'experimental' THEN 'active' ELSE lifecycle_status END
+            WHERE tenant_id = $1 AND name = $5 AND version = 1
+            """,
+            tenant_id, title_key, plural, icon, name,
+        )
+
 
 async def create_object_type(
     pool: asyncpg.Pool,
@@ -626,6 +737,12 @@ async def create_object_type(
     property_mapping: dict,
     description: str,
     column_classification: Optional[dict[str, str]] = None,
+    primary_key: str = "id",
+    title_key: Optional[str] = None,
+    plural_display_name: str = "",
+    lifecycle_status: str = "experimental",
+    visibility: str = "normal",
+    icon: Optional[str] = None,
 ) -> dict:
     """The self-serve path: turn an already-synced Dataset into a
     browsable ObjectType by name and column mapping alone — no code,
@@ -654,10 +771,26 @@ async def create_object_type(
     the relevant router owns authz-relationship writes, this package
     owns state).
     """
+    validate_ot_metadata(
+        property_mapping=property_mapping,
+        primary_key=primary_key,
+        title_key=title_key,
+        lifecycle_status=lifecycle_status,
+        visibility=visibility,
+    )
     urn = object_type_urn(tenant_id, workspace_id, name)
     if await get_object_type(pool, urn) is not None:
         raise ValueError(f"an ObjectType named {name!r} already exists")
     await _upsert_object_type(pool, urn, tenant_id, name, source_dataset_urn, property_mapping, description)
+    await pool.execute(
+        """
+        UPDATE object_type SET
+            primary_key = $1, title_key = $2, plural_display_name = $3,
+            lifecycle_status = $4, visibility = $5, icon = $6
+        WHERE urn = $7
+        """,
+        primary_key, title_key, plural_display_name or "", lifecycle_status, visibility, icon, urn,
+    )
 
     declared = column_classification or {}
     if declared:

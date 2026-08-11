@@ -1106,6 +1106,108 @@ body,
   margin-top: 6px;
 }
 
+.hl-property-editor {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.9fr) 1.4fr;
+  gap: 12px;
+  border: 1px solid var(--hl-border);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--hl-surface);
+  max-height: 420px;
+}
+
+.hl-property-editor-list {
+  overflow: auto;
+  border-right: 1px solid var(--hl-border);
+  padding-right: 8px;
+}
+
+.hl-property-editor-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  padding: 8px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+.hl-property-editor-item-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+}
+
+.hl-property-editor-item-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.hl-property-editor-item:hover {
+  background: var(--hl-hover);
+}
+
+.hl-property-editor-item.is-selected {
+  border-color: var(--hl-accent);
+  background: var(--hl-hover);
+}
+
+.hl-property-bulk {
+  padding: 8px;
+  border: 1px dashed var(--hl-border);
+  border-radius: 4px;
+  background: var(--hl-hover);
+}
+
+.hl-format-preview {
+  padding: 8px 10px;
+  border: 1px solid var(--hl-border);
+  border-radius: 4px;
+  background: var(--hl-hover);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hl-format-preview-value {
+  font-size: 1.05rem;
+}
+
+.hl-property-editor-form {
+  overflow: auto;
+  padding-left: 4px;
+}
+
+.hl-struct-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hl-struct-field-row {
+  display: grid;
+  grid-template-columns: 1fr 0.9fr 1.1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
 .hl-switch-reset.bp6-control {
   margin-bottom: 0;
 }
@@ -1295,6 +1397,24 @@ body,
 .hl-search-facets {
   width: 180px;
   flex-shrink: 0;
+}
+
+.hl-search-result {
+  display: block;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.hl-search-result:hover {
+  border-color: var(--hl-accent);
+  box-shadow: var(--hl-shadow-sm);
+}
+
+.hl-predicate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(0, 1.4fr) auto;
+  gap: var(--hl-space-2);
+  align-items: center;
 }
 
 .hl-lineage-urn {

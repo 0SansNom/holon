@@ -21,13 +21,7 @@ export function useDatasetPreview(datasetName: string) {
 export function useCreateObjectType() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: {
-      name: string;
-      source_dataset_urn: string;
-      property_mapping: Record<string, string>;
-      description?: string;
-      column_classification?: Record<string, string>;
-    }) => knowledgeApi.createObjectType(body),
+    mutationFn: (body: Parameters<typeof knowledgeApi.createObjectType>[0]) => knowledgeApi.createObjectType(body),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypes() }),
   });
 }
@@ -322,6 +316,35 @@ export function useCreateObjectTypeGroup() {
   return useMutation({
     mutationFn: (body: Parameters<typeof knowledgeApi.createObjectTypeGroup>[0]) => knowledgeApi.createObjectTypeGroup(body),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypeGroups() }),
+  });
+}
+
+export function useObjectSets() {
+  return useSuspenseQuery({ queryKey: queryKeys.objectSets(), queryFn: knowledgeApi.listObjectSets });
+}
+
+export function useCreateObjectSet() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof knowledgeApi.createObjectSet>[0]) => knowledgeApi.createObjectSet(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSets() }),
+  });
+}
+
+export function useUpdateObjectSet() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: Parameters<typeof knowledgeApi.updateObjectSet>[1] }) =>
+      knowledgeApi.updateObjectSet(name, body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSets() }),
+  });
+}
+
+export function useEvaluateObjectSet(name: string, enabled: boolean) {
+  return useQuery({
+    queryKey: [...queryKeys.objectSets(), name, "objects"],
+    queryFn: () => knowledgeApi.evaluateObjectSet(name),
+    enabled: enabled && !!name,
   });
 }
 

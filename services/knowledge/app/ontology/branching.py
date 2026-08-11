@@ -193,6 +193,7 @@ async def review_branch(
         await _run_publish_validations(
             pool,
             draft=draft,
+            current=current,
             object_type_name=object_type_name,
             implements=implements,
             derived_properties=derived_properties,

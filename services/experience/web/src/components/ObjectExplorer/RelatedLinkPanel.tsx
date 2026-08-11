@@ -26,7 +26,7 @@ export function RelatedLinkPanel({ type, id, link }: { type: string; id: string;
           )}
           {data?.items.map((item) => {
             const itemId = String(item.id);
-            const itemLabel = (item.name as string | undefined) ?? itemId;
+            const itemLabel = (item.title as string | undefined) ?? (item.name as string | undefined) ?? itemId;
             return (
               <div key={itemId} className="hl-related-link-row">
                 <Link

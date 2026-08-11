@@ -27,11 +27,46 @@ sys.modules["holon_common"].Principal = object  # noqa: F401 — attribute for t
 # Prefer the knowledge app on sys.path so `import app.ontology_health` works.
 sys.path.insert(0, str(KNOWLEDGE_APP.parent))
 
-from app.ontology_health import _ACTION_SPRAWL_THRESHOLD, _check_action_sprawl  # noqa: E402
+from app.ontology_health import (  # noqa: E402
+    _ACTION_SPRAWL_THRESHOLD,
+    _check_action_sprawl,
+    _check_metadata_gaps,
+)
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_metadata_gaps_flags_missing_pk_title_and_mn_without_join() -> None:
+    findings = _run(
+        _check_metadata_gaps(
+            [
+                {"name": "Broken", "property_mapping": {"name": "name"}, "primary_key": "id"},
+                {"name": "Ok", "property_mapping": {"id": "id", "name": "name"}, "primary_key": "id", "title_key": "name"},
+            ],
+            [
+                {
+                    "name": "A.b",
+                    "cardinality": "many_to_many",
+                    "storage_kind": "foreign_key",
+                },
+                {
+                    "name": "C.d",
+                    "cardinality": "many_to_many",
+                    "storage_kind": "join_dataset",
+                    "join_dataset_urn": None,
+                },
+            ],
+        )
+    )
+    kinds = {(f["kind"], f["object_type"]) for f in findings}
+    assert ("missing_primary_key", "Broken") in kinds
+    assert ("missing_title_key", "Broken") in kinds
+    assert ("mn_without_join", "A.b") in kinds
+    assert ("join_dataset_incomplete", "C.d") in kinds
+    assert ("missing_primary_key", "Ok") not in kinds
+    assert ("missing_title_key", "Ok") not in kinds
 
 
 def test_action_sprawl_attributes_interface_actions_to_implementing_ots() -> None:
