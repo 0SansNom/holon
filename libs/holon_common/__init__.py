@@ -1,16 +1,21 @@
 from . import outbox
 from . import event_catalog  # noqa: F401 — importing registers all payload schemas
 from . import registry
+from . import secrets as secrets_module
+from . import audit as audit_module
 from .resource import Classification, most_restrictive, union_markings
 from .urn import URN, InvalidURNError, build as build_urn, parse as parse_urn
 from .events import EventActor, EventConsumer, EventEnvelope, EventProducer
 from .auth import (
     Principal,
+    active_jwt,
     clear_session_cookie,
     decode_token,
     issue_token,
+    load_jwt_secrets,
     make_principal_dependency,
     require_tenant_match,
+    require_urn_tenant_match,
     set_session_cookie,
 )
 from .db import create_pool
@@ -43,8 +48,11 @@ __all__ = [
     "Principal",
     "decode_token",
     "issue_token",
+    "active_jwt",
+    "load_jwt_secrets",
     "make_principal_dependency",
     "require_tenant_match",
+    "require_urn_tenant_match",
     "set_session_cookie",
     "clear_session_cookie",
     "PermissionClient",
@@ -57,6 +65,8 @@ __all__ = [
     "instrument_metrics",
     "instrument_tracing",
     "retry_with_backoff",
+    "secrets_module",
+    "audit_module",
 ]
 
 

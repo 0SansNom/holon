@@ -24,6 +24,7 @@ from holon_common import (
     CircuitBreakerOpenError,
     EventConsumer,
     Principal,
+    active_jwt,
     build_urn,
     issue_token,
 )
@@ -32,6 +33,14 @@ logger = logging.getLogger("automation.agent_chain_trigger")
 
 _TIMEOUT_SECONDS = 10.0
 TRIGGERED_WORKFLOW_ENGINE_NAME = "automation-agent-chain-trigger"
+
+
+def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> str:
+    try:
+        secret, kid, secrets_map = active_jwt()
+        return issue_token(principal, secret, ttl_seconds=ttl_seconds, kid=kid, secrets=secrets_map)
+    except RuntimeError:
+        return issue_token(principal, jwt_secret, ttl_seconds=ttl_seconds)
 
 
 def _chain_trigger_principal(tenant_id: str) -> Principal:
@@ -54,7 +63,7 @@ async def _spawn_next_session(
     intelligence_url: str,
     jwt_secret: str,
 ) -> None:
-    token = issue_token(_chain_trigger_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    token = _mint(_chain_trigger_principal(tenant_id), jwt_secret, ttl_seconds=60)
     headers = {"Authorization": f"Bearer {token}"}
 
     async def _create_session() -> dict:

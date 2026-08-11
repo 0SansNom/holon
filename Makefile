@@ -12,7 +12,7 @@ build:
 	$(COMPOSE) build identity connectivity knowledge automation experience intelligence
 
 up: infra-up build
-	$(COMPOSE) --profile dev up -d
+	$(COMPOSE) up -d
 
 down:
 	$(COMPOSE) down

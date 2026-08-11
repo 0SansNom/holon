@@ -1,0 +1,6 @@
+apiVersion: v2
+name: holon
+description: Holon OSS self-host chart — app Deployments only; bring your own Postgres/Kafka/S3/SpiceDB
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

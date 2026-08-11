@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Card, H4, Radio, RadioGroup } from "@blueprintjs/core";
 import { identityApi, login } from "../../api/identity";
@@ -9,11 +9,27 @@ export function LoginScreen() {
   const [selected, setSelected] = useState(SEEDED_PRINCIPALS[0].localName);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [ssoAvailable, setSsoAvailable] = useState(false);
   const setSession = useAuthStore((s) => s.setSession);
   const clear = useAuthStore((s) => s.clear);
   const navigate = useNavigate();
 
   const principal = SEEDED_PRINCIPALS.find((p) => p.localName === selected)!;
+
+  useEffect(() => {
+    let cancelled = false;
+    void identityApi
+      .oidcStart()
+      .then(() => {
+        if (!cancelled) setSsoAvailable(true);
+      })
+      .catch(() => {
+        if (!cancelled) setSsoAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function signIn() {
     setLoading(true);
@@ -50,6 +66,19 @@ export function LoginScreen() {
         <Button intent="primary" fill loading={loading} onClick={() => void signIn()} className="hl-mt-sm">
           Sign in
         </Button>
+        {ssoAvailable && (
+          <Button
+            fill
+            className="hl-mt-sm"
+            onClick={() => {
+              void identityApi.oidcStart().then((r) => {
+                window.location.href = r.authorize_url;
+              });
+            }}
+          >
+            Sign in with SSO
+          </Button>
+        )}
       </Card>
     </div>
   );

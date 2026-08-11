@@ -17,6 +17,7 @@ export const queryKeys = {
   interfaces: () => ["interfaces"] as const,
   markings: () => ["markings"] as const,
   objectTypeGroups: () => ["objectTypeGroups"] as const,
+  objectSets: () => ["objectSets"] as const,
   ontologyHealthCheck: () => ["ontologyHealthCheck"] as const,
 
   branches: (kind: string, resourceName: string) => ["branches", kind, resourceName] as const,
@@ -45,6 +46,8 @@ export const queryKeys = {
   resourceCollections: (urn: string) => ["resourceCollections", urn] as const,
 
   principals: () => ["principals"] as const,
+  tenants: () => ["tenants"] as const,
+  workspaces: (tenantId?: string) => ["workspaces", tenantId ?? "all"] as const,
   projects: () => ["projects"] as const,
   projectPins: (projectUrn: string) => ["projectPins", projectUrn] as const,
 

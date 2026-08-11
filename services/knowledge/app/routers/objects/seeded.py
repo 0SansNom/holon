@@ -416,14 +416,42 @@ async def get_object_link(
     if matched is None:
         raise HTTPException(status_code=404, detail=f"unknown link {link_name!r} on {object_type!r}")
 
+    instance_pk = current_row.get("id")
+    ot_def = await ontology.get_object_type(core.pool, handle["urn"])
+    if ot_def and ot_def.get("primary_key"):
+        pk = ot_def["primary_key"]
+        instance_pk = current_row.get(pk, current_row.get(ot_def["property_mapping"].get(pk, "id"), instance_pk))
+
     result = await core._resolve_relation_neighbors(
-        matched, object_type, current_row["id"], current_row, principal,
+        matched, object_type, instance_pk, current_row, principal,
         authorized_types={object_type}, property_mapping_cache={},
     )
     if result is None:
-        return {"relation": matched["name"], "direction": None, "cardinality": matched["cardinality"], "items": []}
-    _neighbor_type, neighbor_rows, direction = result
-    return {"relation": matched["name"], "direction": direction, "cardinality": matched["cardinality"], "items": neighbor_rows}
+        return {"relation": matched["name"], "direction": None, "cardinality": matched["cardinality"], "storage_kind": matched.get("storage_kind") or "foreign_key", "items": []}
+    neighbor_type, neighbor_rows, direction = result
+    neighbor_ot = await ontology.get_object_type(
+        core.pool, ontology.object_type_urn(principal.tenant_id, core.WORKSPACE_ID, neighbor_type)
+    )
+    items = []
+    link_objects = []
+    for row in neighbor_rows:
+        item = dict(row)
+        link_obj = item.pop("_link_object", None)
+        link_ot = item.pop("_link_object_type", None)
+        item["title"] = ontology.title_of(item, neighbor_ot)
+        items.append(item)
+        if link_obj is not None:
+            link_objects.append({"object_type": link_ot, "object": link_obj})
+    payload = {
+        "relation": matched["name"],
+        "direction": direction,
+        "cardinality": matched["cardinality"],
+        "storage_kind": matched.get("storage_kind") or "foreign_key",
+        "items": items,
+    }
+    if link_objects:
+        payload["link_objects"] = link_objects
+    return payload
 
 
 @router.get("/objects/{object_type}/{instance_id}/timeline")

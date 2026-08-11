@@ -13,6 +13,8 @@ CREATE DATABASE holon_experience;
 -- instead of embedded SQLite, which is single-writer and subject to
 -- concurrency locks under parallel /sync requests ([SQLITE_BUSY]).
 CREATE DATABASE holon_iceberg_catalog;
+-- SpiceDB relationship store (Authzed datastore).
+CREATE DATABASE holon_spicedb;
 
 \c source_erp
 
