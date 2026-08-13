@@ -53,17 +53,12 @@ def _pkce_pair() -> tuple[str, str]:
 
 
 async def build_authorize_url(pool: asyncpg.Pool, *, redirect_uri: str) -> dict[str, str]:
-    """State lives in Postgres (`oidc_pending_state`), not process memory —
-    `/oidc/login` and the later `/oidc/callback` for the same login attempt
-    can land on different `identity` replicas behind a load balancer.
-    """
+    """Build OIDC authorization URL with PKCE state stored in DB."""
     meta = await discover()
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Opportunistic sweep of expired attempts — piggybacks on every
-            # new login instead of a separate background task.
             await conn.execute("DELETE FROM oidc_pending_state WHERE created_at < now() - interval '10 minutes'")
             await conn.execute(
                 "INSERT INTO oidc_pending_state (state, verifier, redirect_uri) VALUES ($1, $2, $3)",

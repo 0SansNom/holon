@@ -14,6 +14,7 @@ import os
 import secrets
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Response
@@ -27,6 +28,7 @@ from holon_common import (
     PermissionClient,
     Principal,
     active_jwt,
+    assert_production_posture,
     build_urn,
     clear_session_cookie,
     configure_json_logging,
@@ -39,6 +41,7 @@ from holon_common import (
     make_principal_dependency,
     outbox,
     retry_with_backoff,
+    run_migrations,
     set_session_cookie,
 )
 
@@ -46,11 +49,12 @@ from . import oidc as oidc_client
 from .seed import (
     VALID_PROJECT_RELATIONS,
     VALID_WORKSPACE_RELATIONS,
+    allow_dev_login,
     create_project,
     create_tenant,
     create_workspace,
-    ensure_authz_seeded,
-    ensure_seeded,
+    ensure_instance_bootstrap,
+    ensure_schema,
     get_project,
     get_tenant,
     get_workspace,
@@ -70,10 +74,6 @@ SERVICE_NAME = "identity-platform"
 configure_json_logging(SERVICE_NAME)
 logger = logging.getLogger("identity")
 
-# HOLON_TENANT_ID / HOLON_WORKSPACE_ID are the bootstrap (demo) tenant —
-# not an instance-wide ceiling (ADR 026). JWT tenant_id is authoritative;
-# resource checks must call require_tenant_match / require_urn_tenant_match
-# (the helpers existed but were previously unwired — dead code).
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
@@ -83,20 +83,28 @@ SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
 SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 OPA_URL = os.environ["HOLON_OPA_URL"]
 KAFKA_BOOTSTRAP = os.environ["HOLON_KAFKA_BOOTSTRAP"]
-OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
-        await ensure_seeded(conn, TENANT_ID, WORKSPACE_ID)
+        await ensure_schema(conn)
         await outbox.ensure_schema(conn)
+    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
     await retry_with_backoff(
-        lambda: ensure_authz_seeded(app.state.authz, SPICEDB_SCHEMA_PATH, TENANT_ID, WORKSPACE_ID),
-        what="identity authz seed",
+        lambda: app.state.authz.write_schema(Path(SPICEDB_SCHEMA_PATH).read_text()),
+        what="identity authz schema",
+    )
+    await retry_with_backoff(
+        lambda: ensure_instance_bootstrap(
+            app.state.pool, app.state.authz, tenant_id=TENANT_ID, workspace_id=WORKSPACE_ID
+        ),
+        what="identity empty-instance bootstrap",
     )
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
@@ -120,7 +128,7 @@ current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 
 def _issue(principal: Principal, *, ttl_seconds: int | None = None) -> str:
-    kwargs: dict = {"kid": JWT_ACTIVE_KID, "secrets": JWT_SECRETS}
+    kwargs: dict = {"kid": JWT_ACTIVE_KID, "secrets": JWT_SECRETS, "allow_user": True}
     if ttl_seconds is not None:
         kwargs["ttl_seconds"] = ttl_seconds
     return issue_token(principal, JWT_SECRET, **kwargs)
@@ -159,6 +167,16 @@ async def _require_active_principal_row(urn: str) -> asyncpg.Record:
     if row["status"] != "active":
         raise HTTPException(status_code=403, detail="principal is disabled")
     return row
+
+
+def _reject_dev_secret_if_disabled(client_secret: str) -> None:
+    if allow_dev_login():
+        return
+    if isinstance(client_secret, str) and client_secret.endswith("-dev-secret"):
+        raise HTTPException(
+            status_code=403,
+            detail="dev client_secret login disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",
+        )
 
 
 async def _require_grant_target(urn: str, *, tenant_id: str) -> Principal:
@@ -229,11 +247,12 @@ async def mint_token(request: TokenRequest) -> dict:
     """`client_secret` verifies principal identity prior to issuing bearer tokens.
 
     Unchanged, on purpose — this is the CLI/script/service-to-service
-    path (`scripts/demo.py`, `HolonClient.token_for`, every test
+    path (`HolonClient.token_for`, every test
     fixture, internal service-account minting), none of which have a
     cookie jar. `/login` below is the browser's own path.
     """
     row = await _require_active_principal_row(request.principal_urn)
+    _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
     principal = _principal_from_row(row)
@@ -249,6 +268,7 @@ async def login(request: TokenRequest, response: Response) -> dict:
     `holon_common.auth`'s `set_session_cookie`/module docstring).
     """
     row = await _require_active_principal_row(request.principal_urn)
+    _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
     principal = _principal_from_row(row)
@@ -320,9 +340,7 @@ async def oidc_callback(code: str, state: str):
         )
         row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", created["urn"])
     else:
-        # Returning user: keep the DB tenant (claim→tenant maps on first insert
-        # only). Reject when the IdP now asserts a different active tenant —
-        # silently ignoring would leave admins thinking remaps worked.
+        # Returning user: keep original DB tenant mapping
         if row["tenant_id"] != tenant_id:
             raise HTTPException(
                 status_code=403,
@@ -352,9 +370,7 @@ async def oidc_callback(code: str, state: str):
             subject_urn=principal.urn,
         )
 
-    # Cookie must be set on the RedirectResponse we return — FastAPI's
-    # injected `Response` is discarded when a different response object
-    # is returned, so Set-Cookie would never reach the browser.
+    # Set session cookie on RedirectResponse object
     frontend = os.environ.get("HOLON_OIDC_POST_LOGIN_REDIRECT", "http://localhost:5173/objects")
     redirect = RedirectResponse(url=frontend, status_code=302)
     set_session_cookie(redirect, _issue(principal))
