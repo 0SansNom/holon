@@ -24,6 +24,7 @@ from holon_common import (
     InvalidURNError,
     Principal,
     active_jwt,
+    assert_production_posture,
     build_urn,
     configure_json_logging,
     create_pool,
@@ -35,6 +36,7 @@ from holon_common import (
     make_principal_dependency,
     parse_urn,
     retry_with_backoff,
+    run_migrations,
 )
 from holon_common.authz import PermissionClient
 
@@ -51,7 +53,7 @@ TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
-OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 
 SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
 SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
@@ -60,14 +62,15 @@ SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 
 WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 
-# the single seeded agent identity every `agentApp` session runs
-# under (same URN Identity's seed data and Intelligence's own
-# `AGENT_URN` already use) — a human principal never holds this
-# identity's credentials directly, so Experience mints a short-lived
-# token for it on the caller's behalf, same trust level every other
-# `HOLON_JWT_SECRET`-holding service already extends itself (Knowledge's
-# `_identity_validation_token`, Connectivity's `_function_invocation_token`).
 AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
+
+
+def _allow_dev_login() -> bool:
+    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "true").lower() in {"1", "true", "yes"}
+
+
+def _intelligence_enabled() -> bool:
+    return os.environ.get("HOLON_INTELLIGENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 
 def _agent_app_session_token(on_behalf_of_urn: str) -> str:
@@ -85,15 +88,12 @@ _TIMEOUT_SECONDS = 5.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Bulkhead: one long-lived client with a capped connection
-    # pool, not a throwaway `httpx.AsyncClient()` per proxied request.
+    assert_production_posture(service_name=SERVICE_NAME)
     app.state.client = httpx.AsyncClient(
         timeout=_TIMEOUT_SECONDS, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
     )
     app.state.breaker = CircuitBreaker(name="experience-proxy", failure_threshold=5, cooldown_seconds=30.0)
 
-    # Experience database (application_builder.py).
-    # Application definitions are owned by Experience.
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
         await application_builder.ensure_schema(conn)
@@ -101,11 +101,8 @@ async def lifespan(app: FastAPI):
         await resource_tags.ensure_schema(conn)
         await project_pins.ensure_schema(conn)
         await resource_collections.ensure_schema(conn)
+    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
-    # Applications used to have zero ReBAC enforcement (any authenticated
-    # principal could read/write any application) — same hardening
-    # `object_type` already has. `write_schema` is idempotent, safe to call
-    # on every startup regardless of which service wrote it last.
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
     async def _seed_application_authz() -> None:
@@ -231,19 +228,22 @@ async def config() -> dict:
         "workspace_id": WORKSPACE_ID,
         "default_user_urn": f"hl:{TENANT_ID}:global:user:jdoe",
         "customer_object_type_urn": f"hl:{TENANT_ID}:{WORKSPACE_ID}:object-type:Customer",
+        "allow_dev_login": _allow_dev_login(),
+        "intelligence_enabled": _intelligence_enabled(),
     }
 
 
 @app.post("/api/token")
 async def mint_token(request: TokenRequest, principal: Principal = Depends(current_principal)) -> Response:
-    """Identity's `/token` has required a `client_secret` since increment
-    #13 (closing the "mint a token for any URN, no check at all" gap) —
-    this legacy proxy derives one server-side using the same
-    deterministic dev-only convention every test file already computes
-    independently (`seed.client_secret_for`: `f"{local_name}-dev-secret"`).
-    It may only refresh the already-authenticated caller's own identity;
-    accepting an arbitrary URN here would be an impersonation endpoint.
+    """Dev-only token mint helper — derives `*-dev-secret` server-side.
+    Disabled when `HOLON_ALLOW_DEV_LOGIN` is false. Prefer Identity
+    `/login` (cookie session) or OIDC.
     """
+    if not _allow_dev_login():
+        raise HTTPException(
+            status_code=403,
+            detail="demo token proxy disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",
+        )
     if request.principal_urn != principal.urn:
         raise HTTPException(status_code=403, detail="cannot mint a token for another principal")
     local_name = request.principal_urn.rsplit(":", 1)[-1]
@@ -707,19 +707,45 @@ async def _get_application_or_404(name: str, principal: Principal, *, permission
     return application
 
 
+def _upstream_detail(body: Any) -> str:
+    if isinstance(body, dict) and "detail" in body:
+        return str(body["detail"])
+    return str(body)
+
+
 @app.get("/api/applications/{name}/data")
 async def application_list_data(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
-) -> Response:
+) -> Any:
     """The 'object app' surface's list view: reads through Knowledge's
-    permission-gated `/objects/{type}` endpoint using the caller's token.
+    permission-gated `/objects/{type}` (or `/object-sets/{name}/objects`
+    when the surface declares an Object Set filter) using the caller's token.
     """
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
         raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
+    authorization = http_request.headers.get("authorization")
+    object_set = application_builder.resolve_object_app_object_set(application)
+    if object_set:
+        status_code, body = await _get_json(
+            f"{KNOWLEDGE_URL}/object-sets/{object_set}/objects", authorization=authorization
+        )
+        if status_code != 200:
+            raise HTTPException(status_code=status_code, detail=_upstream_detail(body))
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=502, detail="unexpected object-set evaluate response")
+        if body.get("object_type") != object_type:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"object set {object_set!r} targets {body.get('object_type')!r}, "
+                    f"not application ObjectType {object_type!r}"
+                ),
+            )
+        return body.get("items", [])
     return await _proxy(
-        "GET", f"{KNOWLEDGE_URL}/objects/{object_type}", authorization=http_request.headers.get("authorization")
+        "GET", f"{KNOWLEDGE_URL}/objects/{object_type}", authorization=authorization
     )
 
 
@@ -748,19 +774,9 @@ async def application_invoke_action(
 ) -> Response:
     """An application can only invoke an Action it explicitly declared in `actionRefs`.
 
-    Knowledge's own two invocation shapes disagree on what belongs in the
-    URL: the two hardcoded Customer routes (`routers/actions.py`) are
-    keyed by local name, but the generic route
-    (`routers/objects/generic.py`) — every declarative Action Type,
-    which is the common case for a self-serve ObjectType — is keyed by
-    the full dotted name it's actually registered under. `parameters`
-    presence is the same is-this-declarative discriminator
-    `libs/holon_osdk/schema.py` and `ObjectDetailPage.tsx` already use
-    for the identical decision; this proxy needs to make it too, or
-    every declarative Action invoked through an Object App 404s as
-    "unknown Action Type" (confirmed: `nullifyId`, a real declarative
-    Action Type with zero parameters, hit exactly this against a
-    self-serve ObjectType before this fix).
+    Every Action Type is declarative, so the generic
+    `/objects/{object_type}/{id}/actions/{full_name}` route (keyed by the
+    full dotted name) is the only shape to proxy to.
     """
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
@@ -772,17 +788,11 @@ async def application_invoke_action(
         )
 
     authorization = http_request.headers.get("authorization")
-    actions_status, actions = await _get_json(f"{KNOWLEDGE_URL}/actions", authorization=authorization)
     full_name = f"{object_type}.{action_name}"
-    is_declarative = actions_status == 200 and any(
-        a.get("name") == full_name and "parameters" in a for a in actions
-    )
-    upstream_action_name = full_name if is_declarative else action_name
-
     body = await http_request.json()
     return await _proxy(
         "POST",
-        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{upstream_action_name}",
+        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{full_name}",
         authorization=authorization,
         json=body,
     )
@@ -793,27 +803,60 @@ async def application_dashboard(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
     """The **dashboard** surface — a page of read-only widgets,
-    each bound to an ObjectType.
+    each bound to an ObjectType and optionally narrowed by an Object Set.
     """
     application = await _get_application_or_404(name, principal)
     authorization = http_request.headers.get("authorization")
     widgets_out = []
     for widget in application_builder.get_dashboard_widgets(application):
-        status_code, body = await _get_json(
-            f"{KNOWLEDGE_URL}/objects/{widget['objectType']}", authorization=authorization
-        )
-        if status_code != 200:
-            # `body` is whatever `_get_json` got back from upstream — usually
-            # already a flat `{"detail": "..."}`, but proxying it verbatim as
-            # `detail=body` would nest it (`{"detail": {"detail": "..."}}`)
-            # instead of matching every other error response's flat shape.
-            detail = body["detail"] if isinstance(body, dict) and "detail" in body else str(body)
-            raise HTTPException(status_code=status_code, detail=detail)
-        rows = body if isinstance(body, list) else []
+        object_set = widget.get("objectSet")
+        if object_set:
+            status_code, body = await _get_json(
+                f"{KNOWLEDGE_URL}/object-sets/{object_set}/objects", authorization=authorization
+            )
+            if status_code != 200:
+                raise HTTPException(status_code=status_code, detail=_upstream_detail(body))
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=502, detail="unexpected object-set evaluate response")
+            declared_type = widget.get("objectType")
+            if declared_type and body.get("object_type") != declared_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"object set {object_set!r} targets {body.get('object_type')!r}, "
+                        f"not widget ObjectType {declared_type!r}"
+                    ),
+                )
+            rows = body.get("items", []) if isinstance(body.get("items"), list) else []
+        else:
+            status_code, body = await _get_json(
+                f"{KNOWLEDGE_URL}/objects/{widget['objectType']}", authorization=authorization
+            )
+            if status_code != 200:
+                # `body` is whatever `_get_json` got back from upstream — usually
+                # already a flat `{"detail": "..."}`, but proxying it verbatim as
+                # `detail=body` would nest it (`{"detail": {"detail": "..."}}`)
+                # instead of matching every other error response's flat shape.
+                raise HTTPException(status_code=status_code, detail=_upstream_detail(body))
+            rows = body.get("items", []) if isinstance(body, dict) else (body if isinstance(body, list) else [])
         if widget["component"] == "kpi":
-            widgets_out.append({"label": widget.get("label"), "component": "kpi", "value": len(rows)})
+            widgets_out.append(
+                {
+                    "label": widget.get("label"),
+                    "component": "kpi",
+                    "value": len(rows),
+                    "objectSet": object_set,
+                }
+            )
         elif widget["component"] == "table":
-            widgets_out.append({"label": widget.get("label"), "component": "table", "rows": rows})
+            widgets_out.append(
+                {
+                    "label": widget.get("label"),
+                    "component": "table",
+                    "rows": rows,
+                    "objectSet": object_set,
+                }
+            )
         else:
             plugin_registration = await ui_component_registry.get_component_registration_by_name(
                 app.state.pool, widget["component"]
@@ -823,6 +866,7 @@ async def application_dashboard(
                     "label": widget.get("label"),
                     "component": widget["component"],
                     "rows": rows,
+                    "objectSet": object_set,
                     "iframeUrl": plugin_registration["manifest"]["iframe_url"] if plugin_registration else None,
                 }
             )
