@@ -13,7 +13,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 # Mirrors seed/source_erp.sql — customer 1 has 3 orders, customer 3 has none.
 CUSTOMER_WITH_ORDERS = 1

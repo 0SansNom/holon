@@ -40,7 +40,7 @@ def _put_on_hold(token: str, customer_id: int, reason: str = "test"):
 def test_editor_can_invoke_the_action_and_it_is_reflected_on_read(jdoe_token: str) -> None:
     status, result = _put_on_hold(jdoe_token, 2, reason="suspicious chargeback pattern")
     assert status == 200, result
-    assert result["onHold"] is True
+    assert result["credit_hold"] is True
     assert result["action"] == "Customer.putOnCreditHold"
     assert result["riskLevel"] == "low"
 

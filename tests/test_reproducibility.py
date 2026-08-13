@@ -22,11 +22,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 from holon_sdk import HolonClient  # noqa: E402
 
 
-# Password read from the environment, not hardcoded — CI generates its
-# own .env with a different POSTGRES_PASSWORD than a dev's local one
-# (see .github/workflows/tests.yml), so a hardcoded value here only ever
-# worked by coincidence locally. Default matches .env.example's dev
-# convenience value for a plain `pytest tests/` run against `make up`.
 SOURCE_ERP_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/source_erp"
 
 # Kappa Foundries — not used by any assertion in other test modules, so

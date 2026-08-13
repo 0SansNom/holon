@@ -88,11 +88,12 @@ def test_filiale_isolation_across_services(msmith_token: str) -> None:
         body={"dataset": "customers"},
         timeout=60,
     )
+    # Filiale has no ReBAC grant on Connectivity's bootstrap workspace —
+    # workspace authorize fails closed before dataset lookup.
     assert status == 403, sync_body
 
     status, sources = _request("GET", f"{CONNECTIVITY}/sources", token=filiale_token)
-    assert status == 200, sources
-    assert sources == [], sources
+    assert status == 403, sources
 
 
 def test_workspace_rejects_cross_tenant_admin_grant(msmith_token: str) -> None:

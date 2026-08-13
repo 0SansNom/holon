@@ -13,7 +13,7 @@ import urllib.request
 import uuid
 
 import pytest
-from conftest import EXPERIENCE, IDENTITY, _request
+from conftest import EXPERIENCE, IDENTITY, KNOWLEDGE, _request
 
 
 def _token_for(principal_urn: str) -> str:
@@ -50,7 +50,54 @@ def test_create_draft_validates_and_computes_dependencies(jdoe_token: str) -> No
     assert status == 200, app
     assert app["version"] == 1, app
     assert app["status"] == "draft", app
-    assert app["dependencies"] == {"objectTypes": ["Customer"], "actions": ["Customer.putOnCreditHold"]}, app
+    assert app["dependencies"] == {
+        "objectTypes": ["Customer"],
+        "objectSets": [],
+        "actions": ["Customer.putOnCreditHold"],
+        "relationTypes": [],
+    }, app
+
+
+def test_object_app_link_binding_validates_and_lists_relation_types(jdoe_token: str) -> None:
+    name = f"test-app-links-{uuid.uuid4().hex[:8]}"
+    definition = {
+        "surfaces": [
+            {
+                "type": "objectApp",
+                "objectType": "Customer",
+                "route": "/apps/test-links",
+                "links": ["orders"],
+            }
+        ],
+        "bindings": [{"component": "table", "objectType": "Customer"}, {"component": "detail", "objectType": "Customer"}],
+        "actionRefs": [],
+    }
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": definition}
+    )
+    assert status == 200, app
+    assert app["dependencies"]["relationTypes"] == ["orders"], app
+
+
+def test_unknown_link_accessor_is_rejected(jdoe_token: str) -> None:
+    name = f"test-app-bad-link-{uuid.uuid4().hex[:8]}"
+    definition = {
+        "surfaces": [
+            {
+                "type": "objectApp",
+                "objectType": "Customer",
+                "route": "/apps/bad-link",
+                "links": ["notARealLink"],
+            }
+        ],
+        "bindings": [],
+        "actionRefs": [],
+    }
+    status, body = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": definition}
+    )
+    assert status == 400, body
+    assert "notARealLink" in body["detail"], body
 
 
 def test_undeclared_object_type_is_rejected(jdoe_token: str) -> None:
@@ -141,10 +188,10 @@ def test_object_app_data_surface_serves_list_detail_and_gates_undeclared_actions
         "POST",
         f"{EXPERIENCE}/api/applications/{name}/data/1/actions/putOnCreditHold",
         token=jdoe_token,
-        body={"reason": marker},
+        body={"reason": marker, "parameters": {"reason": marker}},
     )
     assert status == 200, declared
-    assert declared["reason"] == marker, declared
+    assert declared["credit_hold_reason"] == marker, declared
 
     status, undeclared = _request(
         "POST",
@@ -188,12 +235,97 @@ def test_dashboard_surface_serves_kpi_and_table_widgets(jdoe_token: str) -> None
     )
     assert status == 200, app
     assert set(app["dependencies"]["objectTypes"]) == {"Customer", "Order"}, app
+    assert app["dependencies"]["objectSets"] == [], app
 
     status, dash = _request("GET", f"{EXPERIENCE}/api/applications/{name}/dashboard", token=jdoe_token)
     assert status == 200, dash
     widgets = dash["widgets"]
     assert widgets[0]["component"] == "kpi" and widgets[0]["value"] > 0, widgets
     assert widgets[1]["component"] == "table" and len(widgets[1]["rows"]) > 0, widgets
+
+
+def test_dashboard_and_object_app_bind_object_set(jdoe_token: str, msmith_token: str) -> None:
+    set_name = f"ShippedOrdersApp{uuid.uuid4().hex[:6]}"
+    status, created = _request(
+        "POST",
+        f"{KNOWLEDGE}/object-sets",
+        token=msmith_token,
+        body={
+            "name": set_name,
+            "object_type": "Order",
+            "display_name": "Shipped orders",
+            "definition": {"all": [{"property": "status", "op": "eq", "value": "shipped"}]},
+            "lifecycle_status": "active",
+            "visibility": "normal",
+        },
+    )
+    assert status == 201, created
+
+    status, evaluated = _request(
+        "GET", f"{KNOWLEDGE}/object-sets/{set_name}/objects", token=jdoe_token
+    )
+    assert status == 200, evaluated
+    expected_count = evaluated["count"]
+
+    app_name = f"test-os-app-{uuid.uuid4().hex[:8]}"
+    definition = {
+        "surfaces": [
+            {
+                "type": "objectApp",
+                "objectType": "Order",
+                "objectSet": set_name,
+                "route": "/apps/os",
+            },
+            {
+                "type": "dashboard",
+                "route": "/apps/os/dashboard",
+                "widgets": [
+                    {
+                        "component": "kpi",
+                        "objectType": "Order",
+                        "objectSet": set_name,
+                        "label": "Shipped",
+                    },
+                    {
+                        "component": "table",
+                        "objectType": "Order",
+                        "objectSet": set_name,
+                        "label": "Shipped rows",
+                    },
+                ],
+            },
+        ],
+        "bindings": [
+            {"component": "table", "objectType": "Order"},
+            {"component": "detail", "objectType": "Order"},
+        ],
+        "actionRefs": [],
+    }
+    status, app = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{app_name}",
+        token=jdoe_token,
+        body={"definition": definition},
+    )
+    assert status == 200, app
+    assert app["dependencies"]["objectSets"] == [set_name], app
+
+    status, dash = _request(
+        "GET", f"{EXPERIENCE}/api/applications/{app_name}/dashboard", token=jdoe_token
+    )
+    assert status == 200, dash
+    assert dash["widgets"][0]["value"] == expected_count, dash
+    assert dash["widgets"][0]["objectSet"] == set_name, dash
+    assert len(dash["widgets"][1]["rows"]) == expected_count, dash
+    assert all(row.get("status") == "shipped" for row in dash["widgets"][1]["rows"]), dash
+
+    status, rows = _request(
+        "GET", f"{EXPERIENCE}/api/applications/{app_name}/data", token=jdoe_token
+    )
+    assert status == 200, rows
+    assert isinstance(rows, list), rows
+    assert len(rows) == expected_count, rows
+    assert all(row.get("status") == "shipped" for row in rows), rows
 
 
 def test_form_surface_schema_validation_and_submission(jdoe_token: str) -> None:
@@ -224,7 +356,7 @@ def test_form_surface_schema_validation_and_submission(jdoe_token: str) -> None:
         "POST", f"{EXPERIENCE}/api/applications/{name}/form/2", token=jdoe_token, body={"reason": marker}
     )
     assert status == 200, result
-    assert result["reason"] == marker, result
+    assert result["credit_hold_reason"] == marker, result
 
 
 def test_form_referencing_an_undeclared_action_is_rejected(jdoe_token: str) -> None:

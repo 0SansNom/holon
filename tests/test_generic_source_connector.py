@@ -1,13 +1,12 @@
 """The no-code connector: `POST /sources` registers a new REST data
 source as pure configuration (URL + optional auth header + optional
 record_path) — no Python to write, no deploy, no restart. `run_sync`'s
-dispatch checks this registry as a third tier after `DATASET_READERS`
-(core connectors) and `plugin_registry` (developer-authored plugins),
-sharing the exact same zero-arg `read()` shape, so once registered a
-source syncs through the identical Iceberg-write + outbox-event +
-catalog pipeline every other dataset already uses — proven here by
-checking it actually lands in Knowledge's catalog, not just that
-Connectivity accepted the registration.
+dispatch checks this registry after `plugin_registry` (developer-authored
+/ API-registered plugins), sharing the exact same zero-arg `read()` shape,
+so once registered a source syncs through the identical Iceberg-write +
+outbox-event + catalog pipeline every other dataset already uses —
+proven here by checking it actually lands in Knowledge's catalog, not
+just that Connectivity accepted the registration.
 
 Uses the demo `reviews-api` container as a stand-in "external tool" —
 it's just an ordinary JSON HTTP endpoint from this connector's point of
@@ -42,13 +41,13 @@ def jdoe_token() -> str:
         pytest.fail(str(exc))
 
 
-def test_registering_a_source_under_a_core_dataset_name_is_rejected(jdoe_token: str) -> None:
+def test_registering_a_source_under_a_plugin_claimed_dataset_is_rejected(jdoe_token: str) -> None:
     status, body = _request(
         "POST", f"{CONNECTIVITY}/sources", token=jdoe_token,
         body={"name": "customers", "base_url": REVIEWS_API},
     )
     assert status == 409, body
-    assert "already owned by a core connector" in body["detail"], body
+    assert "already claimed by active plugin" in body["detail"], body
 
 
 def test_register_sync_and_catalog_a_brand_new_rest_source_with_zero_code(jdoe_token: str) -> None:
@@ -382,7 +381,7 @@ def test_a_scheduled_source_syncs_itself_with_no_manual_trigger(jdoe_token: str)
         while time.monotonic() < deadline:
             status, runs = _request("GET", f"{CONNECTIVITY}/syncs", token=jdoe_token)
             assert status == 200, runs
-            matched = next((r for r in runs if r["dataset_urn"] == f"hl:acme:demo:dataset:{name}"), None)
+            matched = next((r for r in runs if r["dataset_urn"] == f"hl:acme:main:dataset:{name}"), None)
             if matched is not None:
                 break
             time.sleep(5)
@@ -406,7 +405,7 @@ def test_a_source_without_a_schedule_is_never_touched_by_the_scheduler(jdoe_toke
     time.sleep(65)  # past one full scheduler poll cycle
     status, runs = _request("GET", f"{CONNECTIVITY}/syncs", token=jdoe_token)
     assert status == 200, runs
-    matched = next((r for r in runs if r["dataset_urn"] == f"hl:acme:demo:dataset:{name}"), None)
+    matched = next((r for r in runs if r["dataset_urn"] == f"hl:acme:main:dataset:{name}"), None)
     assert matched is None, matched
 
 

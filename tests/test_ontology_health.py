@@ -39,6 +39,15 @@ def _run(coro):
 
 
 def test_metadata_gaps_flags_missing_pk_title_and_mn_without_join() -> None:
+    link_overlays = types.ModuleType("app.link_overlays")
+
+    async def count_overlays(*_args, **_kwargs):
+        return 0
+
+    link_overlays.count_overlays = count_overlays
+    sys.modules["app.link_overlays"] = link_overlays
+    sys.modules["app.core"].pool = object()
+
     findings = _run(
         _check_metadata_gaps(
             [
@@ -48,16 +57,19 @@ def test_metadata_gaps_flags_missing_pk_title_and_mn_without_join() -> None:
             [
                 {
                     "name": "A.b",
+                    "urn": "hl:acme:global:relation-type:A.b",
                     "cardinality": "many_to_many",
                     "storage_kind": "foreign_key",
                 },
                 {
                     "name": "C.d",
+                    "urn": "hl:acme:global:relation-type:C.d",
                     "cardinality": "many_to_many",
                     "storage_kind": "join_dataset",
                     "join_dataset_urn": None,
                 },
             ],
+            tenant_id="acme",
         )
     )
     kinds = {(f["kind"], f["object_type"]) for f in findings}

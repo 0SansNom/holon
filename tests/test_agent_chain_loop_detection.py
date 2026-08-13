@@ -7,13 +7,12 @@ letting it run forever: a session opts into `chain_trigger` with a low
 instead of ten), and the chain must terminate at exactly that depth, not
 before and not after.
 
-White-box on Intelligence's own `agent_session` table (same technique
-already proven in `test_dlq.py`/`test_projection_rebuild.py`) — the
-chain-triggered sessions belong to Automation's own service-account
-principal, which this test's own token can't read back over the API
-(a session belongs to the agent that created it). Requires the
-stack running (`make up`), real LLM calls (2 chain hops + the root turn
-= 3 total).
+# White-box on Intelligence's own `agent_session` table (same technique
+# already proven in `test_dlq.py`/`test_projection_rebuild.py`) — chained
+# hops belong to `ingest-bot` (Automation mints that agent JWT), which
+# this test's own token can't read back over the API (a session belongs
+# to the agent that created it). Requires the stack running (`make up`),
+# real LLM calls (2 chain hops + the root turn = 3 total).
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ pytestmark = pytest.mark.llm
 # convenience value for a plain `pytest tests/` run against `make up`.
 INTELLIGENCE_DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_intelligence"
 
-CHAIN_TRIGGER_AGENT_URN = f"hl:{TENANT_ID}:global:service-account:automation-agent-chain-trigger"
+CHAIN_TRIGGER_AGENT_URN = f"hl:{TENANT_ID}:global:agent:ingest-bot"
 MAX_CHAIN_DEPTH = 2  # keeps this test to 3 real LLM calls total (root + 2 hops), not 11
 
 

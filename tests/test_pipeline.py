@@ -98,6 +98,27 @@ def test_duplicate_step_name_is_rejected_at_definition_time(jdoe_token: str) -> 
     assert "duplicate step_name" in body["detail"], body
 
 
+def test_empty_value_type_casts_rejected_at_definition_time(jdoe_token: str) -> None:
+    status, body = _request(
+        "POST",
+        f"{CONNECTIVITY}/pipelines/{_unique_name('bad-casts')}",
+        token=jdoe_token,
+        body={
+            "steps": [
+                {
+                    "step_name": "cast",
+                    "input_dataset": "orders",
+                    "function_name": "flag_high_value_order",
+                    "output_dataset": _unique_name("out"),
+                    "value_type_casts": {},
+                }
+            ]
+        },
+    )
+    assert status == 400, body
+    assert "value_type_casts" in body["detail"], body
+
+
 def test_step_reading_and_writing_the_same_dataset_is_rejected(jdoe_token: str) -> None:
     status, body = _request(
         "POST", f"{CONNECTIVITY}/pipelines/{_unique_name('bad-self-ref')}", token=jdoe_token,
@@ -127,9 +148,6 @@ def test_single_step_pipeline_is_catalogued_with_real_lineage(
     output_version_urn = run["step_results"][0]["dataset_version_urn"]
     assert run["step_results"][0]["dataset_urn"].endswith(f":{output_dataset}"), run
 
-    # Catalogued through the existing, unmodified `_catalogue_sync`
-    # consumer — same "eventually consistent" tolerance every other
-    # cross-service consumer test in this build already uses.
     deadline = time.monotonic() + 20
     datasets: list[dict] = []
     while time.monotonic() < deadline:
@@ -222,3 +240,41 @@ def test_run_against_an_unregistered_function_fails_cleanly(orders_synced: dict,
 def test_running_an_unknown_pipeline_is_404(jdoe_token: str) -> None:
     status, body = _request("POST", f"{CONNECTIVITY}/pipelines/{_unique_name('never-created')}/run", token=jdoe_token)
     assert status == 404, body
+
+
+def test_delete_pipeline_removes_definition_and_runs(jdoe_token: str) -> None:
+    pipeline_name = _unique_name("to-delete")
+    status, definition = _request(
+        "POST",
+        f"{CONNECTIVITY}/pipelines/{pipeline_name}",
+        token=jdoe_token,
+        body={
+            "steps": [
+                {
+                    "step_name": "s1",
+                    "input_dataset": "orders",
+                    "function_name": "flag_high_value_order",
+                    "output_dataset": _unique_name("out"),
+                }
+            ]
+        },
+    )
+    assert status == 201, definition
+
+    # Force a failed run row so we prove cascade cleanup of pipeline_run.
+    status, _ = _request("POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/run", token=jdoe_token)
+    assert status in (200, 400)
+
+    status, deleted = _request("DELETE", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 200, deleted
+    assert deleted["deleted"] == pipeline_name, deleted
+
+    status, missing = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 404, missing
+
+    status, runs = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}/runs", token=jdoe_token)
+    assert status == 200, runs
+    assert runs == [], runs
+
+    status, again = _request("DELETE", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 404, again

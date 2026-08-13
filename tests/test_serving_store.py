@@ -15,7 +15,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 ORDER_WITH_CUSTOMER = 1  # Customer 1 (Acme Robotics)'s first order
 

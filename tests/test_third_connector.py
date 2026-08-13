@@ -15,7 +15,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 # Mirrors docker/reviews-api/reviews.json — order 1 has exactly one review,
 # order 3 (Customer 1's "Custom Automation Software") has none.

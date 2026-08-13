@@ -13,7 +13,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 # Mirrors docker/mongo-init/init.js — customer 7 has 2 tickets, customer 3 has none.
 CUSTOMER_WITH_TICKETS = 7

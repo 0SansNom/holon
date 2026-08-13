@@ -308,4 +308,4 @@ def test_the_two_hardcoded_customer_actions_are_unaffected(jdoe_token: str) -> N
     )
     assert status == 200, result
     assert result["status"] == "applied", result
-    assert result["onHold"] is True, result
+    assert result["credit_hold"] is True, result

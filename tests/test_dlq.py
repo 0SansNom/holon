@@ -42,7 +42,7 @@ async def _insert_poison_row(marker: str) -> None:
         "event_type": "testprobe.message.injected",  # valid format, deliberately unregistered
         "schema_version": 1,
         "tenant_id": TENANT_ID,
-        "workspace_id": "demo",
+        "workspace_id": "main",
         "aggregate_type": "TestProbe",
         "aggregate_id": marker,
         "aggregate_version": None,

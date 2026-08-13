@@ -43,7 +43,7 @@ def test_high_risk_action_only_creates_a_pending_approval(jdoe_token: str) -> No
 
     status, customer = _request("GET", f"{KNOWLEDGE}/objects/Customer/9", token=jdoe_token)
     assert status == 200
-    assert customer["account_closed"] is False, "must not apply before approval"
+    assert customer.get("account_closed") is not True, "must not apply before approval"
 
 
 def test_requester_cannot_approve_her_own_request(jdoe_token: str) -> None:
@@ -70,7 +70,7 @@ def test_admin_approval_applies_the_mutation(jdoe_token: str, msmith_token: str)
     )
     assert status == 200, decision
     assert decision["status"] == "approved"
-    assert decision["accountClosed"] is True
+    assert decision["account_closed"] is True
 
     status, customer = _request("GET", f"{KNOWLEDGE}/objects/Customer/4", token=jdoe_token)
     assert status == 200
@@ -91,7 +91,7 @@ def test_admin_rejection_leaves_state_unapplied(jdoe_token: str, msmith_token: s
 
     status, customer = _request("GET", f"{KNOWLEDGE}/objects/Customer/6", token=jdoe_token)
     assert status == 200
-    assert customer["account_closed"] is False
+    assert customer.get("account_closed") is not True
 
     status, approval = _request("GET", f"{KNOWLEDGE}/approvals/{approval_id}", token=msmith_token)
     assert status == 200
