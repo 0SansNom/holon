@@ -355,6 +355,7 @@ async def _apply_now(
                 result, prior = await _apply_declarative_edits(
                     conn, tenant_id, object_type, instance_id, definition["_declarative"]["edits"],
                     parameters or {}, action_urn=action_urn, actor=actor, at=at, workspace_id=workspace_id,
+                    reason=reason,
                 )
             edits_for_invocation = result
             prior_for_invocation = prior
@@ -461,6 +462,7 @@ async def approve_action(
                 result, prior = await _apply_declarative_edits(
                     conn, tenant_id, object_type, instance_id, definition["_declarative"]["edits"],
                     parameters, action_urn=action_urn, actor=decider, at=at, workspace_id=workspace_id,
+                    reason=reason,
                 )
             edits_for_invocation = result
             prior_for_invocation = prior

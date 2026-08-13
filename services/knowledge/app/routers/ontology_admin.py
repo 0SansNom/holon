@@ -1933,6 +1933,50 @@ async def get_glossary_term(term: str, principal: Principal = Depends(core.curre
     return result
 
 
+class GlossaryTermRequest(BaseModel):
+    term: str
+    definition: str
+    synonyms: list[str] = []
+    related_object_type: Optional[str] = None
+
+
+@router.post("/glossary", status_code=201)
+async def create_glossary_term(
+    request: GlossaryTermRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    """Registering a glossary term is ontology governance, same tier and
+    gate as RelationTypes/ActionTypes — not a per-ObjectType concern
+    (`related_object_type` is optional context, not an authorization
+    scope), so `approve` on the workspace is what's checked.
+    """
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="workspace",
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
+        permission="approve",
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
+
+    if await glossary.get_term(core.pool, principal.tenant_id, request.term) is not None:
+        raise HTTPException(status_code=409, detail=f"glossary term already exists: {request.term}")
+
+    related_urn = None
+    if request.related_object_type is not None:
+        related_urn = ontology.object_type_urn(principal.tenant_id, workspace_id, request.related_object_type)
+        if await ontology.get_object_type(core.pool, related_urn) is None:
+            raise HTTPException(status_code=404, detail=f"unknown ObjectType: {request.related_object_type}")
+
+    return await glossary.create_term(
+        core.pool,
+        tenant_id=principal.tenant_id,
+        term=request.term,
+        definition=request.definition,
+        synonyms=request.synonyms,
+        related_object_type_urn=related_urn,
+    )
+
+
 @router.get("/actions")
 async def list_actions(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     """Read surface for every registered Action Type — auth-only,

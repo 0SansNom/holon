@@ -209,12 +209,18 @@ async def _apply_declarative_edits(
     actor: Principal,
     at: datetime,
     workspace_id: str = "global",
+    reason: str = "",
 ) -> tuple[dict, dict]:
     """Resolve a static `edits` declaration into property overlays plus
     optional structural rules (create/delete object + link), then write
     both in the same transaction. Property results stay flat
     (`{property: value}`); structural ops are bagged under
     `__structural__` so response splatting and writeback stay compatible.
+
+    An edit sourced from `parameter_name: "reason"` reads the
+    invocation's own top-level `reason` — always available, never a
+    declared parameter, so recording e.g. `credit_hold_reason` needs no
+    parameter of its own to duplicate what the caller already supplied.
     """
     from ..action_structural import (
         STRUCTURAL_KEY,
@@ -224,7 +230,9 @@ async def _apply_declarative_edits(
 
     resolved = {
         edit["property"]: (
-            parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
+            reason
+            if edit["source"] == "parameter" and edit["parameter_name"] == "reason"
+            else parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
         )
         for edit in edits
         if is_property_edit(edit)
@@ -529,6 +537,8 @@ async def request_generic_action(
         if declaration.get("required", True) and name not in parameters:
             raise ValueError(f"missing required parameter: {name!r}")
     for name, value in parameters.items():
+        if name == "reason":
+            continue  # always an implicit, undeclared edit source — see _apply_declarative_edits
         declaration = declared_parameters.get(name)
         if declaration is None:
             raise ValueError(f"unknown parameter: {name!r}")

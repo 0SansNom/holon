@@ -123,9 +123,14 @@ def test_lineage_links_dataset_version_to_object_type(token: str, synced: dict) 
 
 
 def test_cross_tenant_read_is_rejected(synced: dict) -> None:
+    """ObjectTypes are catalogued per tenant now (self-serve, ADR 026) — a
+    genuinely foreign tenant has no Customer ObjectType at all, so this is
+    correctly a 404, not a 403: nothing here to authorize against, and a
+    404 leaks less than a 403 would about what exists in another tenant.
+    """
     foreign_token = _mint_token("other-tenant", "hl:other-tenant:global:user:eve")
     status, body = _request("GET", f"{KNOWLEDGE}/objects/Customer", token=foreign_token)
-    assert status == 403, body
+    assert status == 404, body
 
 
 def test_dashboard_only_talks_to_the_knowledge_api() -> None:

@@ -37,6 +37,29 @@ async def list_terms(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+async def create_term(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    term: str,
+    definition: str,
+    synonyms: list[str],
+    related_object_type_urn: Optional[str],
+) -> dict:
+    await pool.execute(
+        """
+        INSERT INTO business_glossary (tenant_id, term, definition, synonyms, related_object_type_urn)
+        VALUES ($1, $2, $3, $4, $5)
+        """,
+        tenant_id,
+        term,
+        definition,
+        synonyms,
+        related_object_type_urn,
+    )
+    return await get_term(pool, tenant_id, term)
+
+
 async def get_term(pool: asyncpg.Pool, tenant_id: str, term: str) -> Optional[dict]:
     """Case-insensitive, and matches a synonym as well as the canonical
     term — the whole point of a glossary is resolving whatever wording a

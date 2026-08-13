@@ -19,13 +19,14 @@ full high-risk approval lifecycle (pending -> separation-of-duties
 `action_approval`/PDP machinery the two hardcoded Customer Actions
 already use.
 
-Also regression-covers route ordering: the generic
-`POST /objects/{object_type}/{instance_id}/actions/{action_name}` route
-must be registered *after* `routers/actions.py`'s specific Customer
-action routes — Starlette matches by registration order, so registering
-it first would silently shadow `putOnCreditHold`/`closeAccount`
-entirely. See `test_human_in_the_loop.py` for the Customer-action tests
-that would catch a regression here. No real LLM calls.
+Also regression-covers the bare-local-name convenience: `putOnCreditHold`/
+`closeAccount` are declarative Action Types like any other now (no
+separate hardcoded route to shadow), but the one generic route still
+accepts their short, unqualified name — qualified with the URL's own
+`object_type` before lookup — matching how Intelligence's agent runtime
+and generated OSDK clients already call them. See
+`test_human_in_the_loop.py` for the Customer-action tests that would
+catch a regression here. No real LLM calls.
 """
 
 from __future__ import annotations
@@ -298,10 +299,10 @@ def test_high_risk_declarative_action_requires_approval_and_separation_of_duties
     assert status == 200 and instance2["archived"] is True, instance2
 
 
-def test_the_two_hardcoded_customer_actions_are_unaffected(jdoe_token: str) -> None:
-    """Verifies that `putOnCreditHold`'s specific route is not shadowed
-    by the generic `/objects/{object_type}/{instance_id}/actions/{action_name}` route.
-    """
+def test_customer_put_on_credit_hold_still_works_by_its_bare_local_name(jdoe_token: str) -> None:
+    """`Customer.putOnCreditHold` is a declarative Action Type like any
+    other, but callers using the historical bare local name still resolve
+    correctly (qualified with the URL's `object_type`)."""
     status, result = _request(
         "POST", f"{KNOWLEDGE}/objects/Customer/1/actions/putOnCreditHold", token=jdoe_token,
         body={"reason": "regression check"},

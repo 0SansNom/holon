@@ -264,7 +264,10 @@ async def create_action_type(
     # be applied against real data.
     top_property_kinds: dict[str, set[str]] = {}
     for edit in edits:
-        validate_edit_declaration(edit, parameter_names=parameter_names)
+        # "reason" is always available as an implicit edit source (the
+        # invocation's own top-level reason, see declarative.py's
+        # _apply_declarative_edits) — never a declared parameter.
+        validate_edit_declaration(edit, parameter_names=parameter_names | {"reason"})
         if is_property_edit(edit):
             top_property = edit["property"].split(".", 1)[0]
             kind = "dotted" if "." in edit["property"] else "plain"

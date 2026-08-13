@@ -61,25 +61,26 @@ def test_support_ticket_classification_is_internal_not_confidential(jdoe_token: 
 
 
 def test_relation_traversal_returns_the_right_tickets(jdoe_token: str, tickets_synced: dict) -> None:
-    status, tickets = _request(
-        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_TICKETS}/tickets", token=jdoe_token
+    status, body = _request(
+        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_TICKETS}/links/tickets", token=jdoe_token, unwrap_pages=False
     )
-    assert status == 200, tickets
+    assert status == 200, body
+    tickets = body["items"]
     assert len(tickets) == EXPECTED_TICKET_COUNT_FOR_CUSTOMER_WITH_TICKETS
     assert all(t["customer_id"] == CUSTOMER_WITH_TICKETS for t in tickets)
 
 
 def test_relation_traversal_for_customer_without_tickets_is_empty(jdoe_token: str, tickets_synced: dict) -> None:
-    status, tickets = _request(
-        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITHOUT_TICKETS}/tickets", token=jdoe_token
+    status, body = _request(
+        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITHOUT_TICKETS}/links/tickets", token=jdoe_token, unwrap_pages=False
     )
-    assert status == 200
-    assert tickets == []
+    assert status == 200, body
+    assert body["items"] == []
 
 
 def test_ticket_traversal_goes_through_the_same_pdp(alice_token: str, tickets_synced: dict) -> None:
     status, body = _request(
-        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_TICKETS}/tickets", token=alice_token
+        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_TICKETS}/links/tickets", token=alice_token
     )
     assert status == 403, body
     assert "rebac_denied" in body["detail"], body
