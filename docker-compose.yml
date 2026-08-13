@@ -300,6 +300,7 @@ services:
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_connectivity
       HOLON_MINTABLE_PRINCIPAL_URNS: connectivity-pipeline-runner
       HOLON_SOURCE_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/source_erp
+      HOLON_ENABLE_INVENTORY_STREAM: ${HOLON_ENABLE_INVENTORY_STREAM:-false}
       HOLON_MONGO_URL: mongodb://mongodb:27017
       HOLON_REVIEWS_API_URL: http://reviews-api:8000/reviews.json
       HOLON_EXCHANGE_RATE_FEED_URL: http://reviews-api:8000/exchange_rates.json

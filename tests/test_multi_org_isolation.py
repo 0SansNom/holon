@@ -75,11 +75,13 @@ def test_filiale_isolation_across_services(msmith_token: str) -> None:
     assert all(p["tenant_id"] == tenant_id for p in filiale_list), filiale_list
     assert not any(p["urn"].endswith(":user:jdoe") for p in filiale_list), filiale_list
 
+    # ObjectTypes are catalogued per tenant (self-serve) — the filiale has
+    # never created its own Customer ObjectType, so this is a 404 (nothing
+    # to authorize against), not a 403. Acme's own Customer catalog entry
+    # is simply invisible from another tenant's URN space.
     status, objects = _request("GET", f"{KNOWLEDGE}/objects/Customer", token=filiale_token)
-    assert status == 403, objects
-    assert "tenant mismatch" in str(objects.get("detail", objects)).lower() or "denied" in str(
-        objects.get("detail", objects)
-    ).lower(), objects
+    assert status == 404, objects
+    assert "unknown objecttype" in str(objects.get("detail", objects)).lower(), objects
 
     status, sync_body = _request(
         "POST",

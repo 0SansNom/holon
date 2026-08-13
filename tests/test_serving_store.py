@@ -83,8 +83,11 @@ def test_relation_traversal_still_resolves_through_the_serving_store(
     deadline = time.monotonic() + 30
     orders: list = []
     while time.monotonic() < deadline:
-        status, orders = _request("GET", f"{KNOWLEDGE}/objects/Customer/1/orders", token=jdoe_token)
-        assert status == 200, orders
+        status, body = _request(
+            "GET", f"{KNOWLEDGE}/objects/Customer/1/links/orders", token=jdoe_token, unwrap_pages=False
+        )
+        assert status == 200, body
+        orders = body["items"]
         if orders and all(o["degraded"] is False for o in orders):
             break
         time.sleep(1)

@@ -203,17 +203,18 @@ def test_generated_typescript_contains_the_typed_object_and_action_and_type_chec
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_hardcoded_actions_use_their_specific_route_not_the_generic_one(jdoe_token: str) -> None:
-    """`putOnCreditHold`/`closeAccount` must generate a call to their own
-    specific route (bare local name), never the generic declarative-
-    Action route (which needs the full dotted name and a `parameters`
-    body field that endpoint doesn't even accept).
+def test_putoncredithold_uses_the_one_generic_action_route(jdoe_token: str) -> None:
+    """Every Action Type is declarative now (`putOnCreditHold`/`closeAccount`
+    included) — one route, keyed by the full dotted name, with both
+    `reason` and `parameters` in the body. The Knowledge route also
+    accepts the bare local name as a convenience (agent runtime, direct
+    API callers), but generated OSDK code always emits the unambiguous
+    full name.
     """
     schema = fetch_schema(knowledge_url=KNOWLEDGE, token=jdoe_token)
     output = emit_python(schema)
-    assert 'f"{knowledge_url}/objects/Customer/{instance_id}/actions/putOnCreditHold"' in output, output
-    assert 'f"{knowledge_url}/objects/Customer/{instance_id}/actions/Customer.putOnCreditHold"' not in output, output
-    assert 'body={"reason": reason},' in output, output
+    assert 'f"{knowledge_url}/objects/Customer/{instance_id}/actions/Customer.putOnCreditHold"' in output, output
+    assert '"reason": reason, "parameters"' in output, output
 
 
 def test_generated_python_emits_relation_type_link_accessors(jdoe_token: str) -> None:

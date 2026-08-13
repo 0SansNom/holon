@@ -127,26 +127,32 @@ async def invoke_generic_action(
     object_type: str, instance_id: str, action_name: str, request: InvokeActionRequest,
     principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    """The generic invocation endpoint for a declarative Action Type —
-    alongside the two hardcoded Customer action endpoints in
-    `routers/actions.py` (unchanged), not a replacement for them.
-    Write-tier gated the same way every mutation on an ObjectType
-    already is; parameter format and submission-criteria validation
-    happen inside `actions.request_generic_action` before anything is
-    requested or applied, so a bad call never reaches a 500.
+    """The one invocation endpoint for every declarative Action Type.
+    `action_name` accepts either the full `ObjectType.actionName` form or,
+    as a convenience, a bare local name — resolved by qualifying it with
+    this route's own `object_type` first (matching how Intelligence's
+    agent runtime and generated OSDK clients call well-known Actions by
+    local name). Write-tier gated the same way every mutation on an
+    ObjectType already is; parameter format and submission-criteria
+    validation happen inside `actions.request_generic_action` before
+    anything is requested or applied, so a bad call never reaches a 500.
     """
     try:
         object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
-    action_type = await ontology.get_action_type(core.pool, principal.tenant_id, action_name)
+    qualified_name = action_name if "." in action_name else f"{object_type}.{action_name}"
+    action_type = await ontology.get_action_type(core.pool, principal.tenant_id, qualified_name)
+    if action_type is None and qualified_name != action_name:
+        action_type = await ontology.get_action_type(core.pool, principal.tenant_id, action_name)
+        qualified_name = action_name
     if action_type is None:
         raise HTTPException(status_code=404, detail=f"unknown Action Type: {action_name}")
     await core._authorize_object_type(principal, object_type_urn, action_type["required_permission"])
     try:
         return await request_generic_action(
             core.pool,
-            action_name=action_name,
+            action_name=qualified_name,
             tenant_id=principal.tenant_id,
             workspace_id=workspace_id,
             object_type=object_type,

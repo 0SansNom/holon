@@ -73,25 +73,26 @@ def test_order_object_type_classification_is_confidential(jdoe_token: str, order
 
 
 def test_relation_traversal_returns_the_right_orders(jdoe_token: str, orders_synced: dict) -> None:
-    status, orders = _request(
-        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_ORDERS}/orders", token=jdoe_token
+    status, body = _request(
+        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_ORDERS}/links/orders", token=jdoe_token, unwrap_pages=False
     )
-    assert status == 200, orders
+    assert status == 200, body
+    orders = body["items"]
     assert len(orders) == EXPECTED_ORDER_COUNT_FOR_CUSTOMER_WITH_ORDERS
     assert all(order["customer_id"] == CUSTOMER_WITH_ORDERS for order in orders)
 
 
 def test_relation_traversal_for_customer_without_orders_is_empty(jdoe_token: str, orders_synced: dict) -> None:
-    status, orders = _request(
-        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITHOUT_ORDERS}/orders", token=jdoe_token
+    status, body = _request(
+        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITHOUT_ORDERS}/links/orders", token=jdoe_token, unwrap_pages=False
     )
-    assert status == 200
-    assert orders == []
+    assert status == 200, body
+    assert body["items"] == []
 
 
 def test_relation_traversal_goes_through_the_same_pdp(alice_token: str, orders_synced: dict) -> None:
     status, body = _request(
-        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_ORDERS}/orders", token=alice_token
+        "GET", f"{KNOWLEDGE}/objects/Customer/{CUSTOMER_WITH_ORDERS}/links/orders", token=alice_token
     )
     assert status == 403, body
     assert "rebac_denied" in body["detail"], body

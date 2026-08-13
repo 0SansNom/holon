@@ -322,6 +322,13 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type_name: st
         source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
         target_name = relation["target_object_type_urn"].rsplit(":", 1)[-1]
         local_name = relation["name"].split(".", 1)[-1]
+        forward = (relation.get("source_api_name") or "").strip() or local_name
+        reverse = (relation.get("target_api_name") or "").strip() or relation.get("target_property")
+        if source_name == object_type_name and forward == link_name:
+            return relation
+        if target_name == object_type_name and reverse == link_name:
+            return relation
+        # Legacy: still accept bare local name / target_property when API names diverge.
         if source_name == object_type_name and local_name == link_name:
             return relation
         if target_name == object_type_name and relation.get("target_property") == link_name:

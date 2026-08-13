@@ -71,16 +71,21 @@ def test_product_review_classification_is_public(jdoe_token: str, reviews_synced
 
 
 def test_relation_traversal_from_order_returns_the_right_review(jdoe_token: str, reviews_synced: dict) -> None:
-    status, reviews = _request("GET", f"{KNOWLEDGE}/objects/Order/{ORDER_WITH_REVIEW}/reviews", token=jdoe_token)
-    assert status == 200, reviews
+    status, body = _request(
+        "GET", f"{KNOWLEDGE}/objects/Order/{ORDER_WITH_REVIEW}/links/reviews", token=jdoe_token, unwrap_pages=False
+    )
+    assert status == 200, body
+    reviews = body["items"]
     assert len(reviews) == 1
     assert reviews[0]["order_id"] == ORDER_WITH_REVIEW
 
 
 def test_relation_traversal_for_unreviewed_order_is_empty(jdoe_token: str, reviews_synced: dict) -> None:
-    status, reviews = _request("GET", f"{KNOWLEDGE}/objects/Order/{ORDER_WITHOUT_REVIEW}/reviews", token=jdoe_token)
-    assert status == 200
-    assert reviews == []
+    status, body = _request(
+        "GET", f"{KNOWLEDGE}/objects/Order/{ORDER_WITHOUT_REVIEW}/links/reviews", token=jdoe_token, unwrap_pages=False
+    )
+    assert status == 200, body
+    assert body["items"] == []
 
 
 def test_abac_only_restricts_confidential_data_not_public_data(kenji_token: str, reviews_synced: dict) -> None:
