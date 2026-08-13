@@ -60,18 +60,52 @@ async def _create_resource(
             required_properties=definition.get("required_properties", []),
             required_actions=definition.get("required_actions", []),
             description=definition.get("description", ""),
+            lifecycle_status=definition.get("lifecycle_status", "experimental"),
+            deprecation_reason=definition.get("deprecation_reason"),
+            deprecation_deadline=definition.get("deprecation_deadline"),
+            replacement_urn=definition.get("replacement_urn"),
+            property_types=definition.get("property_types"),
+            link_constraints=definition.get("link_constraints"),
+            parent_interfaces=definition.get("parent_interfaces"),
         )
     if resource_type == "relation_type":
+        mid_ot = definition.get("mid_object_type")
+        if mid_ot is None and definition.get("mid_object_type_urn"):
+            mid_ot = str(definition["mid_object_type_urn"]).rsplit(":", 1)[-1]
+        source_ot = definition.get("source_object_type")
+        if source_ot is None and definition.get("source_object_type_urn"):
+            source_ot = str(definition["source_object_type_urn"]).rsplit(":", 1)[-1]
+        target_ot = definition.get("target_object_type")
+        if target_ot is None and definition.get("target_object_type_urn"):
+            target_ot = str(definition["target_object_type_urn"]).rsplit(":", 1)[-1]
         return await relation_types_module.create_relation_type(
             pool,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             name=resource_name,
-            source_object_type=definition["source_object_type"],
-            target_object_type=definition["target_object_type"],
-            source_property=definition["source_property"],
+            source_object_type=source_ot,
+            target_object_type=target_ot,
+            source_property=definition.get("source_property", ""),
             target_property=definition["target_property"],
             cardinality=definition["cardinality"],
+            storage_kind=definition.get("storage_kind", "foreign_key"),
+            join_dataset_urn=definition.get("join_dataset_urn"),
+            join_source_column=definition.get("join_source_column"),
+            join_target_column=definition.get("join_target_column"),
+            mid_object_type=mid_ot,
+            mid_source_property=definition.get("mid_source_property"),
+            mid_target_property=definition.get("mid_target_property"),
+            source_display_name=definition.get("source_display_name", ""),
+            source_plural_display_name=definition.get("source_plural_display_name", ""),
+            source_api_name=definition.get("source_api_name"),
+            source_visibility=definition.get("source_visibility", "normal"),
+            target_display_name=definition.get("target_display_name", ""),
+            target_plural_display_name=definition.get("target_plural_display_name", ""),
+            target_api_name=definition.get("target_api_name"),
+            target_visibility=definition.get("target_visibility", "normal"),
+            lifecycle_status=definition.get("lifecycle_status", "experimental"),
+            type_classes=definition.get("type_classes"),
+            project_urn=definition.get("project_urn"),
         )
     if resource_type == "value_type":
         return await value_types_module.create_value_type(
@@ -82,6 +116,12 @@ async def _create_resource(
             format_regex=definition.get("format_regex"),
             constraints=definition.get("constraints"),
             description=definition.get("description", ""),
+            api_name=definition.get("api_name"),
+            display_name=definition.get("display_name", ""),
+            example_value=definition.get("example_value"),
+            lifecycle_status=definition.get("lifecycle_status", "experimental"),
+            format_regex_match=definition.get("format_regex_match", "full"),
+            project_urn=definition.get("project_urn"),
         )
     if resource_type == "shared_property_type":
         return await shared_property_types_module.create_shared_property_type(
@@ -89,7 +129,8 @@ async def _create_resource(
             tenant_id=tenant_id,
             api_name=resource_name,
             display_name=definition["display_name"],
-            value_type=definition["value_type"],
+            value_type=definition.get("value_type"),
+            struct_properties=definition.get("struct_properties"),
             description=definition.get("description", ""),
         )
     if resource_type == "action_type":
@@ -109,6 +150,12 @@ async def _create_resource(
             writeback_dataset=definition.get("writeback_dataset"),
             edit_function=definition.get("edit_function"),
             sections=definition.get("sections"),
+            type_classes=definition.get("type_classes"),
+            lifecycle_status=definition.get("lifecycle_status", "experimental"),
+            deprecation_reason=definition.get("deprecation_reason"),
+            deprecation_deadline=definition.get("deprecation_deadline"),
+            replacement_urn=definition.get("replacement_urn"),
+            notify_webhook=definition.get("notify_webhook"),
         )
     raise ValueError(f"unknown resource_type: {resource_type!r} (expected one of {sorted(ALLOWED_RESOURCE_TYPES)})")
 
@@ -124,8 +171,18 @@ async def _update_resource(
             required_properties=definition.get("required_properties"),
             required_actions=definition.get("required_actions"),
             description=definition.get("description"),
+            lifecycle_status=definition.get("lifecycle_status"),
+            deprecation_reason=definition.get("deprecation_reason"),
+            deprecation_deadline=definition.get("deprecation_deadline"),
+            replacement_urn=definition.get("replacement_urn"),
+            property_types=definition.get("property_types"),
+            link_constraints=definition.get("link_constraints"),
+            parent_interfaces=definition.get("parent_interfaces"),
         )
     if resource_type == "relation_type":
+        mid_ot = definition.get("mid_object_type")
+        if mid_ot is None and definition.get("mid_object_type_urn"):
+            mid_ot = str(definition["mid_object_type_urn"]).rsplit(":", 1)[-1]
         return await relation_types_module.update_relation_type(
             pool,
             tenant_id=tenant_id,
@@ -133,6 +190,25 @@ async def _update_resource(
             name=resource_name,
             target_property=definition.get("target_property"),
             cardinality=definition.get("cardinality"),
+            storage_kind=definition.get("storage_kind"),
+            join_dataset_urn=definition.get("join_dataset_urn"),
+            join_source_column=definition.get("join_source_column"),
+            join_target_column=definition.get("join_target_column"),
+            mid_object_type=mid_ot,
+            mid_source_property=definition.get("mid_source_property"),
+            mid_target_property=definition.get("mid_target_property"),
+            source_display_name=definition.get("source_display_name"),
+            source_plural_display_name=definition.get("source_plural_display_name"),
+            source_api_name=definition.get("source_api_name"),
+            source_visibility=definition.get("source_visibility"),
+            target_display_name=definition.get("target_display_name"),
+            target_plural_display_name=definition.get("target_plural_display_name"),
+            target_api_name=definition.get("target_api_name"),
+            target_visibility=definition.get("target_visibility"),
+            lifecycle_status=definition.get("lifecycle_status"),
+            type_classes=definition.get("type_classes"),
+            project_urn=definition.get("project_urn"),
+            clear_project_urn=bool(definition.get("clear_project_urn", False)),
         )
     if resource_type == "value_type":
         return await value_types_module.update_value_type(
@@ -142,6 +218,14 @@ async def _update_resource(
             format_regex=definition.get("format_regex"),
             constraints=definition.get("constraints"),
             description=definition.get("description"),
+            api_name=definition.get("api_name"),
+            display_name=definition.get("display_name"),
+            example_value=definition.get("example_value"),
+            lifecycle_status=definition.get("lifecycle_status"),
+            clear_example_value=bool(definition.get("clear_example_value", False)),
+            format_regex_match=definition.get("format_regex_match"),
+            project_urn=definition.get("project_urn"),
+            clear_project_urn=bool(definition.get("clear_project_urn", False)),
         )
     if resource_type == "shared_property_type":
         return await shared_property_types_module.update_shared_property_type(

@@ -26,13 +26,11 @@ _ACTION_SPRAWL_THRESHOLD = 10
 _GOD_OBJECT_PROPERTY_THRESHOLD = 15
 _GOD_OBJECT_NULL_RATE_THRESHOLD = 0.5
 _GOD_OBJECT_SAMPLE_SIZE = 50
+_VALUE_TYPE_SAMPLE_SIZE = 50
+_VALUE_TYPE_MAX_FINDINGS_PER_TYPE = 5
 _DRY_DUPLICATION_THRESHOLD = 0.7
 _DRY_DUPLICATION_MIN_PROPERTIES = 3
 
-# Foundry's own bad examples ("value", "quantity", "score", "type") plus
-# the same class of unqualified generic noun ("item", "record", "data",
-# "field") — deliberately excludes "status"/"date"/"name", which the
-# doc's own good examples endorse in context (`age`, `status`).
 _MISNOMER_PROPERTY_NAMES = {"value", "quantity", "score", "type", "item", "record", "data", "field"}
 _MISNOMER_TYPE_NAMES = {"data", "item", "record"}
 
@@ -116,6 +114,70 @@ async def _check_god_object(object_types: list[dict], principal: Principal) -> l
     return findings
 
 
+async def _check_value_type_violations(object_types: list[dict], principal: Principal) -> list[dict]:
+    """Foundry: OT health fails when indexed property values violate Value Types.
+
+    Samples live instances for ObjectTypes that declare `property_types` and
+    reports the first few distinct validation failures (not every row).
+    """
+    findings: list[dict] = []
+    for object_type in object_types:
+        property_types = object_type.get("property_types") or {}
+        if not property_types:
+            continue
+        name = object_type["name"]
+        property_mapping = object_type.get("property_mapping") or {}
+        handle = await core._type_handle(name)
+        if handle is None:
+            continue
+        rows = await core._resolve_many(name, principal.tenant_id, handle["fetch_fn"], principal=principal)
+        rows = rows[:_VALUE_TYPE_SAMPLE_SIZE]
+        if not rows:
+            continue
+
+        seen_details: set[str] = set()
+        invalid_count = 0
+        sample_details: list[str] = []
+        # One cache per ObjectType's sample: property_types names only a
+        # handful of distinct Value Types/Shared Property Types, however
+        # many sampled rows reference them.
+        cache: ontology.TypeCache = {}
+        for row in rows:
+            errors = await ontology.validate_object_row(
+                core.pool,
+                principal.tenant_id,
+                property_mapping=property_mapping,
+                property_types=property_types,
+                row=row,
+                cache=cache,
+            )
+            if not errors:
+                continue
+            invalid_count += 1
+            for detail in errors:
+                if detail in seen_details:
+                    continue
+                seen_details.add(detail)
+                if len(sample_details) < _VALUE_TYPE_MAX_FINDINGS_PER_TYPE:
+                    sample_details.append(detail)
+
+        if invalid_count == 0:
+            continue
+        examples = "; ".join(sample_details)
+        findings.append(
+            {
+                "kind": "value_type_violation",
+                "object_type": name,
+                "severity": "error",
+                "detail": (
+                    f"{invalid_count}/{len(rows)} sampled instances fail Value Type validation — "
+                    f"search index skips invalid rows. Examples: {examples}"
+                ),
+            }
+        )
+    return findings
+
+
 async def _check_misnomer(object_types: list[dict]) -> list[dict]:
     findings = []
     for object_type in object_types:
@@ -181,7 +243,11 @@ async def _check_time_machine(object_types: list[dict]) -> list[dict]:
     return findings
 
 
-async def _check_metadata_gaps(object_types: list[dict], relation_types: list[dict]) -> list[dict]:
+async def _check_metadata_gaps(
+    object_types: list[dict], relation_types: list[dict], *, tenant_id: str
+) -> list[dict]:
+    from . import link_overlays
+
     findings: list[dict] = []
     for object_type in object_types:
         mapping = object_type.get("property_mapping") or {}
@@ -213,6 +279,15 @@ async def _check_metadata_gaps(object_types: list[dict], relation_types: list[di
                 "object_backed_incomplete", relation["name"],
                 "storage_kind=object_backed but mid_object_type_urn is empty.",
             ))
+        overlay_count = await link_overlays.count_overlays(
+            core.pool, tenant_id=tenant_id, relation_urn=relation["urn"]
+        )
+        if overlay_count > 0 and (relation.get("lifecycle_status") or "experimental") == "active":
+            findings.append(_finding(
+                "link_overlays_present", relation["name"],
+                f"{overlay_count} link overlay write(s) on an active RelationType — "
+                "changing storage/keys will not migrate those writes.",
+            ))
     return findings
 
 
@@ -229,8 +304,9 @@ async def run_health_check(principal: Principal) -> list[dict]:
     findings: list[dict] = []
     findings += await _check_action_sprawl(object_types, action_types)
     findings += await _check_god_object(object_types, principal)
+    findings += await _check_value_type_violations(object_types, principal)
     findings += await _check_misnomer(object_types)
     findings += await _check_dry_duplication(object_types)
     findings += await _check_time_machine(object_types)
-    findings += await _check_metadata_gaps(object_types, relation_types)
+    findings += await _check_metadata_gaps(object_types, relation_types, tenant_id=principal.tenant_id)
     return findings

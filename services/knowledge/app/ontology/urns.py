@@ -17,29 +17,5 @@ def relation_type_urn(tenant_id: str, workspace_id: str, name: str) -> str:
     return build_urn(tenant_id, workspace_id, "relation-type", name)
 
 
-def customer_object_type_urn(tenant_id: str, workspace_id: str) -> str:
-    return object_type_urn(tenant_id, workspace_id, "Customer")
-
-
-def order_object_type_urn(tenant_id: str, workspace_id: str) -> str:
-    return object_type_urn(tenant_id, workspace_id, "Order")
-
-
-def support_ticket_object_type_urn(tenant_id: str, workspace_id: str) -> str:
-    return object_type_urn(tenant_id, workspace_id, "SupportTicket")
-
-
-def product_review_object_type_urn(tenant_id: str, workspace_id: str) -> str:
-    return object_type_urn(tenant_id, workspace_id, "ProductReview")
-
-
-def supplier_object_type_urn(tenant_id: str, workspace_id: str) -> str:
-    return object_type_urn(tenant_id, workspace_id, "Supplier")
-
-
-def inventory_level_object_type_urn(tenant_id: str, workspace_id: str) -> str:
-    return object_type_urn(tenant_id, workspace_id, "InventoryLevel")
-
-
 def workspace_urn(tenant_id: str, workspace_id: str) -> str:
     return build_urn(tenant_id, "global", "workspace", workspace_id)

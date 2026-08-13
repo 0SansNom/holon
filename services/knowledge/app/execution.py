@@ -44,7 +44,7 @@ import duckdb
 
 from holon_common import build_urn
 
-from . import catalog, execution_adapter_registry, resolver
+from . import catalog, execution_adapter_registry, ontology, resolver
 
 DDL = """
 CREATE TABLE IF NOT EXISTS execution_run (
@@ -57,12 +57,6 @@ CREATE TABLE IF NOT EXISTS execution_run (
     cache_hits INTEGER NOT NULL DEFAULT 0
 );
 """
-
-# object_type_name -> dataset_name, built once from the registry catalog.py
-# already maintains — no separate mapping to keep in sync.
-_OBJECT_TYPE_TO_DATASET = {
-    spec["object_type_name"]: dataset_name for dataset_name, spec in catalog.DATASET_OBJECT_TYPES.items()
-}
 
 _VALID_OPERATIONS = ("filter", "count", "group_by", "join")
 _VALID_AGGREGATE_FUNCTIONS = ("count", "sum", "avg", "min", "max")
@@ -148,6 +142,44 @@ def _execute_duckdb_join(
     return con.execute(query).fetch_arrow_table().to_pylist()
 
 
+def _execute_duckdb_bridged_join(
+    source_dataset_name: str,
+    source_id_column: str,
+    source_columns: list[str],
+    bridge_dataset_name: str,
+    bridge_source_column: str,
+    bridge_target_column: str,
+    target_dataset_name: str,
+    target_id_column: str,
+    target_columns: list[str],
+    iceberg_config: dict,
+    *,
+    source_snapshot_id: Optional[int] = None,
+    bridge_snapshot_id: Optional[int] = None,
+    target_snapshot_id: Optional[int] = None,
+):
+    """M:N join via a bridge table (join_dataset) or mid ObjectType
+    dataset (object_backed): ``s.pk = bridge.src AND bridge.tgt = t.pk``.
+    Result shape matches FK join (`s_` / `t_` prefixes) so masking stays
+    identical.
+    """
+    source_arrow = resolver.scan_at(source_dataset_name, snapshot_id=source_snapshot_id, **iceberg_config).to_arrow()
+    bridge_arrow = resolver.scan_at(bridge_dataset_name, snapshot_id=bridge_snapshot_id, **iceberg_config).to_arrow()
+    target_arrow = resolver.scan_at(target_dataset_name, snapshot_id=target_snapshot_id, **iceberg_config).to_arrow()
+    con = duckdb.connect()
+    con.register("s", source_arrow)
+    con.register("j", bridge_arrow)
+    con.register("t", target_arrow)
+    source_select = ", ".join(f's."{col}" AS "s_{col}"' for col in source_columns)
+    target_select = ", ".join(f't."{col}" AS "t_{col}"' for col in target_columns)
+    query = (
+        f'SELECT {source_select}, {target_select} FROM s '
+        f'JOIN j ON s."{source_id_column}" = j."{bridge_source_column}" '
+        f'JOIN t ON j."{bridge_target_column}" = t."{target_id_column}"'
+    )
+    return con.execute(query).fetch_arrow_table().to_pylist()
+
+
 def _json_default(o: object) -> str:
     """ISO 8601 for temporal values (matches FastAPI's own serialization of
     the fresh path), str() for everything else (Decimal & co)."""
@@ -174,18 +206,28 @@ async def get_or_execute(
     join_source_property: Optional[str] = None,
     target_object_type_name: Optional[str] = None,
     target_property_mapping: Optional[dict] = None,
+    storage_kind: str = "foreign_key",
+    bridge_dataset_name: Optional[str] = None,
+    bridge_source_column: Optional[str] = None,
+    bridge_target_column: Optional[str] = None,
+    source_id_column: Optional[str] = None,
 ) -> dict:
     if operation not in _VALID_OPERATIONS:
         raise ValueError(f"unknown operation {operation!r} (must be one of {_VALID_OPERATIONS})")
 
-    dataset_name = _OBJECT_TYPE_TO_DATASET[object_type_name]
+    object_type_row = await ontology.get_object_type(pool, object_type_urn)
+    if object_type_row is None:
+        raise ValueError(f"unknown ObjectType: {object_type_name}")
+    dataset_name = object_type_row["source_dataset_urn"].rsplit(":", 1)[-1]
     dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
     dataset_version_urn = await catalog.latest_dataset_version_urn(pool, dataset_urn)
     if dataset_version_urn is None:
         raise ValueError(f"{object_type_name} has never been synced — nothing to execute against")
 
     target_dataset_name = target_dataset_version_urn = target_id_column = None
+    bridge_dataset_version_urn = None
     aggregate_source_column = None
+    source_column = None
 
     if operation in ("filter", "count"):
         if filter_property not in property_mapping:
@@ -213,28 +255,68 @@ async def get_or_execute(
         }
 
     else:  # join
-        if not relation_name or not join_source_property or not target_object_type_name or not target_property_mapping:
+        if not relation_name or not target_object_type_name or not target_property_mapping:
             raise ValueError(
-                "join requires relation_name, join_source_property, target_object_type_name, and target_property_mapping"
+                "join requires relation_name, target_object_type_name, and target_property_mapping"
             )
-        if join_source_property not in property_mapping:
-            raise ValueError(f"unknown property {join_source_property!r} on {object_type_name} (known: {sorted(property_mapping)})")
         if "id" not in target_property_mapping:
             raise ValueError(f"{target_object_type_name} has no 'id' property to join against")
-        source_column = property_mapping[join_source_property]
-        target_id_column = target_property_mapping["id"]
-        target_dataset_name = _OBJECT_TYPE_TO_DATASET[target_object_type_name]
+        target_object_type_row = await ontology.get_object_type(
+            pool, ontology.object_type_urn(tenant_id, workspace_id, target_object_type_name)
+        )
+        if target_object_type_row is None:
+            raise ValueError(f"unknown ObjectType: {target_object_type_name}")
+        target_dataset_name = target_object_type_row["source_dataset_urn"].rsplit(":", 1)[-1]
         target_dataset_urn = build_urn(tenant_id, workspace_id, "dataset", target_dataset_name)
         target_dataset_version_urn = await catalog.latest_dataset_version_urn(pool, target_dataset_urn)
         if target_dataset_version_urn is None:
             raise ValueError(f"{target_object_type_name} has never been synced — nothing to join against")
-        hash_fields = {
-            "dataset_version_urn": dataset_version_urn,
-            "relation_name": relation_name,
-            "join_source_property": join_source_property,
-            "target_object_type": target_object_type_name,
-            "target_dataset_version_urn": target_dataset_version_urn,
-        }
+        target_id_column = target_property_mapping["id"]
+
+        kind = storage_kind or "foreign_key"
+        if kind == "foreign_key":
+            if not join_source_property:
+                raise ValueError("foreign_key join requires join_source_property")
+            if join_source_property not in property_mapping:
+                raise ValueError(
+                    f"unknown property {join_source_property!r} on {object_type_name} (known: {sorted(property_mapping)})"
+                )
+            source_column = property_mapping[join_source_property]
+            hash_fields = {
+                "dataset_version_urn": dataset_version_urn,
+                "relation_name": relation_name,
+                "storage_kind": kind,
+                "join_source_property": join_source_property,
+                "target_object_type": target_object_type_name,
+                "target_dataset_version_urn": target_dataset_version_urn,
+            }
+        elif kind in ("join_dataset", "object_backed"):
+            if not bridge_dataset_name or not bridge_source_column or not bridge_target_column or not source_id_column:
+                raise ValueError(
+                    f"{kind} join requires bridge_dataset_name, bridge_source_column, "
+                    "bridge_target_column, and source_id_column"
+                )
+            bridge_dataset_urn = build_urn(tenant_id, workspace_id, "dataset", bridge_dataset_name)
+            bridge_dataset_version_urn = await catalog.latest_dataset_version_urn(pool, bridge_dataset_urn)
+            if bridge_dataset_version_urn is None:
+                raise ValueError(
+                    f"bridge dataset {bridge_dataset_name!r} has never been synced — nothing to join through"
+                )
+            source_column = source_id_column
+            hash_fields = {
+                "dataset_version_urn": dataset_version_urn,
+                "relation_name": relation_name,
+                "storage_kind": kind,
+                "bridge_dataset_name": bridge_dataset_name,
+                "bridge_source_column": bridge_source_column,
+                "bridge_target_column": bridge_target_column,
+                "source_id_column": source_id_column,
+                "bridge_dataset_version_urn": bridge_dataset_version_urn,
+                "target_object_type": target_object_type_name,
+                "target_dataset_version_urn": target_dataset_version_urn,
+            }
+        else:
+            raise ValueError(f"unsupported join storage_kind: {kind!r}")
 
     plan_hash = _compute_plan_hash(object_type_urn=object_type_urn, operation=operation, **hash_fields)
 
@@ -274,16 +356,24 @@ async def get_or_execute(
             operation=operation,
         )
     elif operation == "join":
-        raw_result = await asyncio.to_thread(
-            _execute_duckdb_join,
-            dataset_name, source_column, list(property_mapping.values()),
-            target_dataset_name, target_id_column, list(target_property_mapping.values()),
-            iceberg_config,
-        )
+        kind = storage_kind or "foreign_key"
+        if kind == "foreign_key":
+            raw_result = await asyncio.to_thread(
+                _execute_duckdb_join,
+                dataset_name, source_column, list(property_mapping.values()),
+                target_dataset_name, target_id_column, list(target_property_mapping.values()),
+                iceberg_config,
+            )
+        else:
+            raw_result = await asyncio.to_thread(
+                _execute_duckdb_bridged_join,
+                dataset_name, source_id_column, list(property_mapping.values()),
+                bridge_dataset_name, bridge_source_column, bridge_target_column,
+                target_dataset_name, target_id_column, list(target_property_mapping.values()),
+                iceberg_config,
+            )
     else:
-        # The DuckDB adapter — the only *built-in* engine this build's data
-        # volume ever needs. `_load_table` is the exact call every
-        # `resolver.fetch_*` already makes; reused as-is, not duplicated.
+        # The DuckDB adapter for processing operations.
         # pyiceberg/DuckDB are synchronous, so this runs via
         # asyncio.to_thread — calling it directly would block Knowledge's
         # whole event loop for the scan's duration (see main.py's module
@@ -319,6 +409,12 @@ async def get_or_execute(
         "aggregate_function": aggregate_function,
         "aggregate_source_column": aggregate_source_column,
         "relation_name": relation_name,
+        "storage_kind": storage_kind if operation == "join" else None,
+        "bridge_dataset_name": bridge_dataset_name,
+        "bridge_source_column": bridge_source_column,
+        "bridge_target_column": bridge_target_column,
+        "bridge_dataset_version_urn": bridge_dataset_version_urn,
+        "source_id_column": source_id_column,
         "target_object_type": target_object_type_name,
         "target_dataset_name": target_dataset_name,
         "target_dataset_version_urn": target_dataset_version_urn,
@@ -369,14 +465,39 @@ async def replay(pool: asyncpg.Pool, iceberg_config: dict, *, plan_hash: str) ->
         target_dataset_version = await catalog.get_dataset_version_by_urn(pool, plan["target_dataset_version_urn"])
         if target_dataset_version is None:
             raise ValueError(f"pinned target dataset_version {plan['target_dataset_version_urn']!r} no longer exists")
-        raw_result = await asyncio.to_thread(
-            _execute_duckdb_join,
-            plan["dataset_name"], plan["source_column"], plan["source_columns"],
-            plan["target_dataset_name"], plan["target_id_column"], plan["target_columns"],
-            iceberg_config,
-            source_snapshot_id=dataset_version["snapshot_id"],
-            target_snapshot_id=target_dataset_version["snapshot_id"],
-        )
+        kind = plan.get("storage_kind") or "foreign_key"
+        if kind in ("join_dataset", "object_backed"):
+            bridge_version_urn = plan.get("bridge_dataset_version_urn")
+            if not bridge_version_urn:
+                raise ValueError("bridged join plan is missing bridge_dataset_version_urn")
+            bridge_dataset_version = await catalog.get_dataset_version_by_urn(pool, bridge_version_urn)
+            if bridge_dataset_version is None:
+                raise ValueError(f"pinned bridge dataset_version {bridge_version_urn!r} no longer exists")
+            raw_result = await asyncio.to_thread(
+                _execute_duckdb_bridged_join,
+                plan["dataset_name"],
+                plan["source_id_column"] or plan["source_column"],
+                plan["source_columns"],
+                plan["bridge_dataset_name"],
+                plan["bridge_source_column"],
+                plan["bridge_target_column"],
+                plan["target_dataset_name"],
+                plan["target_id_column"],
+                plan["target_columns"],
+                iceberg_config,
+                source_snapshot_id=dataset_version["snapshot_id"],
+                bridge_snapshot_id=bridge_dataset_version["snapshot_id"],
+                target_snapshot_id=target_dataset_version["snapshot_id"],
+            )
+        else:
+            raw_result = await asyncio.to_thread(
+                _execute_duckdb_join,
+                plan["dataset_name"], plan["source_column"], plan["source_columns"],
+                plan["target_dataset_name"], plan["target_id_column"], plan["target_columns"],
+                iceberg_config,
+                source_snapshot_id=dataset_version["snapshot_id"],
+                target_snapshot_id=target_dataset_version["snapshot_id"],
+            )
     else:
         raw_result = await asyncio.to_thread(
             _execute_duckdb_operation,

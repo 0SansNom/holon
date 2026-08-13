@@ -59,3 +59,36 @@ async def get_object_type_group(pool: asyncpg.Pool, tenant_id: str, name: str) -
 async def list_object_type_groups(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     rows = await pool.fetch("SELECT * FROM object_type_group WHERE tenant_id = $1 ORDER BY name", tenant_id)
     return [_parse_row(row) for row in rows]
+
+
+async def update_object_type_group(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    name: str,
+    description: str,
+    object_types: list[str],
+) -> dict:
+    existing = await get_object_type_group(pool, tenant_id, name)
+    if existing is None:
+        raise ValueError(f"unknown ObjectType group: {name}")
+    return await create_object_type_group(
+        pool,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        name=name,
+        description=description,
+        object_types=object_types,
+    )
+
+
+async def delete_object_type_group(pool: asyncpg.Pool, tenant_id: str, name: str) -> None:
+    result = await pool.execute(
+        "DELETE FROM object_type_group WHERE tenant_id = $1 AND name = $2",
+        tenant_id,
+        name,
+    )
+    # asyncpg returns e.g. "DELETE 0" / "DELETE 1"
+    if result.endswith("0"):
+        raise ValueError(f"unknown ObjectType group: {name}")
