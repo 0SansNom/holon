@@ -8,9 +8,9 @@ carries the unspecified field forward unchanged; proposing is
 `approve`, same tier as RelationType creation) and emits the real event;
 re-publishing an already-published version is rejected; publishing an
 older draft than the live version is rejected (monotonicity); a
-published change survives a service restart (the real fix for
-`ensure_seeded`'s boot-time reseed, which would otherwise silently
-revert it). No real LLM calls.
+published change survives a service restart (ObjectTypes are no longer
+reseeded on boot — a prior `ensure_seeded` path would have silently
+reverted them). No real LLM calls.
 """
 
 from __future__ import annotations

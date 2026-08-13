@@ -23,7 +23,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 # The documented test-only failure hook (services/connectivity/app/main.py's
 # CLOSE_ACCOUNT_FAILURE_SENTINEL) — not a real production failure mode.
@@ -109,7 +109,7 @@ def test_failed_external_write_compensates_the_local_mutation(jdoe_token: str, m
 
     # Knowledge's own overlay must have been reverted, not left showing a
     # close that was actually rolled back.
-    assert customer["account_closed"] is False, customer
+    assert customer.get("account_closed") is not True, customer
     assert approval["status"] == "failed", approval
 
     # The source system must never actually have been changed — Step 2

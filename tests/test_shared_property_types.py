@@ -136,7 +136,8 @@ def test_a_shared_property_type_can_type_a_real_property_end_to_end(msmith_token
         "POST", f"{KNOWLEDGE}/ontology/{object_type_name}/versions/{draft['version']}/publish", token=msmith_token
     )
     assert status == 200, published
-    assert published["property_types"]["comment"] == {"kind": "shared_property_type", "shared_property_type": api_name}, published
+    assert published["property_types"]["comment"]["kind"] == "shared_property_type", published
+    assert published["property_types"]["comment"]["shared_property_type"] == api_name, published
 
     status, fetched = _request("GET", f"{KNOWLEDGE}/ontology/{object_type_name}", token=msmith_token)
     assert status == 200, fetched

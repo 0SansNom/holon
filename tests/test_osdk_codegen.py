@@ -133,9 +133,17 @@ def sample_ontology(msmith_token: str, jdoe_token: str) -> dict:
     )
     assert status == 201, action_type
 
+    interface_name = _unique_name("OsdkHasComment")
+    status, _ = _request(
+        "POST", f"{KNOWLEDGE}/interfaces", token=msmith_token,
+        body={"name": interface_name, "required_properties": ["comment"], "description": "osdk iface"},
+    )
+    assert status == 201
+
     return {
         "object_type_name": object_type_name, "action_name": action_name, "value_type_name": value_type_name,
         "shared_property_type_name": shared_property_type_name,
+        "interface_name": interface_name,
     }
 
 
@@ -151,6 +159,10 @@ def test_generated_python_contains_the_typed_object_and_action(sample_ontology: 
     assert "priority: Any" in output, output
     assert f'/actions/{sample_ontology["action_name"]}"' in output, output
     assert "comment: Optional[str] = None  # Review comment — Free-text reviewer comment" in output, output
+    interface_name = sample_ontology["interface_name"]
+    assert f"class {interface_name}:" in output, output
+    assert f"def list_interface_{interface_name}(" in output, output
+    assert f'/interfaces/{interface_name}/objects"' in output, output
 
     module_path = tmp_path / "holon_ontology_test_output.py"
     module_path.write_text(output)
@@ -173,6 +185,10 @@ def test_generated_typescript_contains_the_typed_object_and_action_and_type_chec
     assert "priority: unknown" in output, output
     assert "/** Review comment — Free-text reviewer comment */" in output, output
     assert "comment?: string;" in output, output
+    interface_name = sample_ontology["interface_name"]
+    assert f"export interface {interface_name} {{" in output, output
+    assert f"export async function list_interface_{interface_name}(" in output, output
+    assert f"`${{knowledgeUrl}}/interfaces/{interface_name}/objects`" in output, output
 
     if not TSC_PATH.exists():
         pytest.skip("tsc not installed under services/experience/web/node_modules — run `npm install` there first")
@@ -198,3 +214,18 @@ def test_hardcoded_actions_use_their_specific_route_not_the_generic_one(jdoe_tok
     assert 'f"{knowledge_url}/objects/Customer/{instance_id}/actions/putOnCreditHold"' in output, output
     assert 'f"{knowledge_url}/objects/Customer/{instance_id}/actions/Customer.putOnCreditHold"' not in output, output
     assert 'body={"reason": reason},' in output, output
+
+
+def test_generated_python_emits_relation_type_link_accessors(jdoe_token: str) -> None:
+    schema = fetch_schema(knowledge_url=KNOWLEDGE, token=jdoe_token)
+    output = emit_python(schema)
+    assert "def get_Order_customer(" in output, output
+    assert "def get_Customer_orders(" in output, output
+    assert "def link_Order_customer(" in output, output
+    assert "def unlink_Order_customer(" in output, output
+    assert '/objects/Order/{instance_id}/links/customer"' in output, output
+
+    ts = emit_typescript(schema)
+    assert "export async function get_Order_customer(" in ts, ts
+    assert "export async function link_Order_customer(" in ts, ts
+    assert "export async function unlink_Order_customer(" in ts, ts

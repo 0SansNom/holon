@@ -87,7 +87,7 @@ def test_serving_store_and_search_reconstruct_from_iceberg_after_being_wiped(jdo
     # earlier test module in this suite ensures this).
     status, before_rows = _request("GET", f"{KNOWLEDGE}/objects/Customer", token=jdoe_token)
     assert status == 200, before_rows
-    assert len(before_rows) >= 1, "no Customer data materialized yet — run a /sync first (make demo)"
+    assert len(before_rows) >= 1, "no Customer data materialized yet — run a /sync first (provision-test-fixtures + seed)"
     expected_count = len(before_rows)
 
     status, before_search = _request("GET", f"{KNOWLEDGE}/search?q=Acme", token=jdoe_token)

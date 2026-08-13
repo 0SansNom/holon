@@ -26,7 +26,7 @@ import pytest
 from conftest import IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 
 def _token_for(principal_urn: str) -> str:

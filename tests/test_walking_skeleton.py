@@ -21,7 +21,7 @@ from conftest import CONNECTIVITY, EXPERIENCE, IDENTITY, KNOWLEDGE, TENANT_ID, _
 
 
 JWT_SECRET = "dev-only-walking-skeleton-secret"  # matches docker-compose.yml x-app-env
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 USER_URN = f"hl:{TENANT_ID}:global:user:jdoe"
 
 

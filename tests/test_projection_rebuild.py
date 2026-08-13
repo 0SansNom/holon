@@ -37,15 +37,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 from holon_common import EventConsumer, create_pool
 
 KAFKA_BOOTSTRAP = "localhost:19092"  # the OUTSIDE listener — see docker-compose.yml's redpanda service
-# Password read from the environment, not hardcoded — unlike the
-# `f"{local_name}-dev-secret"` JWT client secrets other test files
-# hardcode (those are genuinely fixed by design, seeded verbatim in
-# identity/app/seed.py, so hardcoding them is correct), POSTGRES_PASSWORD
-# is configurable per environment: CI generates its own .env with a
-# different value than a dev's local one (see
-# .github/workflows/tests.yml), so this file hardcoding it only ever
-# worked by coincidence locally — a real CI failure, not a flake.
-# Default matches .env.example's dev convenience value.
 DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_knowledge"
 
 
@@ -127,7 +118,7 @@ def test_catalog_projection_is_reconstructible_from_the_bus_alone() -> None:
             break
         time.sleep(2)
 
-    assert live, "no datasets catalogued yet — run a /sync first (make demo)"
+    assert live, "no datasets catalogued yet — run a /sync first (provision-test-fixtures + seed)"
     assert set(replayed) >= set(live), (
         f"the live catalog has datasets the event log doesn't — a real state mismatch: "
         f"missing from replay: {set(live) - set(replayed)}"

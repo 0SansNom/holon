@@ -15,7 +15,7 @@ def test_collection_filters_members_the_viewer_cannot_read(jdoe_token: str, kenj
     )
     assert status == 200, collection
     collection_id = collection["id"]
-    hidden_urn = f"hl:{TENANT_ID}:demo:application:{_unique_name('unreadable')}"
+    hidden_urn = f"hl:{TENANT_ID}:main:application:{_unique_name('unreadable')}"
 
     try:
         status, body = _request(

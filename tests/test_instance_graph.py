@@ -17,7 +17,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 # Mirrors seed/source_erp.sql + docker/mongo-init/init.js + docker/reviews-api/reviews.json:
 # Customer 1 "Acme Robotics" -> 3 Orders, 2 SupportTickets (hop 1);

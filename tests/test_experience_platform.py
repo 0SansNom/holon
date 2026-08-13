@@ -48,9 +48,13 @@ def test_experience_config():
     status, body = _request("GET", f"{EXPERIENCE}/api/config")
     assert status == 200
     assert body["tenant_id"] == TENANT_ID
-    assert body["workspace_id"] == "demo"
+    assert body["workspace_id"] == "main"
     assert "default_user_urn" in body
     assert "customer_object_type_urn" in body
+    assert "allow_dev_login" in body
+    assert "intelligence_enabled" in body
+    assert isinstance(body["allow_dev_login"], bool)
+    assert isinstance(body["intelligence_enabled"], bool)
 
 
 def test_experience_token_proxy_is_limited_to_authenticated_self(jdoe_token: str):
@@ -90,7 +94,7 @@ def test_experience_knowledge_proxies(jdoe_token: str):
     # Get Lineage for Customer ObjectType URN
     status, lineage = _request(
         "GET",
-        f"{EXPERIENCE}/api/lineage/hl:{TENANT_ID}:demo:object-type:Customer",
+        f"{EXPERIENCE}/api/lineage/hl:{TENANT_ID}:main:object-type:Customer",
         token=jdoe_token,
     )
     assert status in (200, 404)
@@ -110,7 +114,7 @@ def test_experience_application_builder_lifecycle(jdoe_token: str):
             {
                 "id": "customer-table",
                 "type": "ObjectTable",
-                "object_type": f"hl:{TENANT_ID}:demo:object-type:Customer",
+                "object_type": f"hl:{TENANT_ID}:main:object-type:Customer",
                 "properties": ["name", "email", "credit_limit"],
             }
         ],

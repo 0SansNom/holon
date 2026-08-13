@@ -39,7 +39,7 @@ def test_two_hop_link_aggregate_count_and_collect(
                 },
                 "orderTotal": {
                     "kind": "link_aggregate",
-                    "relation": "orders",
+                    "path": ["orders"],
                     "aggregate": "sum",
                     "property": "amount",
                 },

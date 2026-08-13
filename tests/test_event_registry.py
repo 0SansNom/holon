@@ -45,10 +45,10 @@ def test_valid_sync_completed_payload_validates():
         "connectivity.sync.completed",
         1,
         {
-            "connector_urn": "hl:acme:demo:connector:erp",
+            "connector_urn": "hl:acme:main:connector:erp",
             "dataset_name": "customers",
-            "dataset_urn": "hl:acme:demo:dataset:customers",
-            "dataset_version_urn": "hl:acme:demo:dataset-version:42",
+            "dataset_urn": "hl:acme:main:dataset:customers",
+            "dataset_version_urn": "hl:acme:main:dataset-version:42",
             "iceberg_namespace": "holon",
             "iceberg_table": "customers",
             "snapshot_id": 42,
@@ -97,12 +97,12 @@ def test_envelope_and_registry_compose():
         event_type="knowledge.action.approval_expired",
         tenant_id="acme",
         aggregate_type="ActionApproval",
-        aggregate_id="hl:acme:demo:action-approval:7",
+        aggregate_id="hl:acme:main:action-approval:7",
         correlation_id="abc",
-        partition_key="acme/hl:acme:demo:action-approval:7",
+        partition_key="acme/hl:acme:main:action-approval:7",
         producer="knowledge-platform@0.1.0",
         actor={"type": "service_account", "urn": "hl:acme:global:service-account:knowledge"},
-        payload={"action_name": "close_account", "instance_urn": "hl:acme:demo:customer:1", "approval_id": 7},
+        payload={"action_name": "close_account", "instance_urn": "hl:acme:main:customer:1", "approval_id": 7},
     )
     model = registry.validate(envelope.event_type, envelope.schema_version, envelope.payload)
     assert model.approval_id == 7

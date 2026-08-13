@@ -3,7 +3,7 @@ Dataset (see `test_generic_source_connector.py`) into a real, browsable
 ObjectType — `POST /object-types`, then the generic `GET /objects/{type}`
 read path (`routers/objects.py`'s last two routes), proving the dynamic
 fallback actually generalizes rather than only working for the six
-boot-seeded types it was carved out of.
+historical demo ObjectTypes it was carved out of.
 
 Ordering matters and is deliberately exercised here: `/sync` only
 catalogues/materializes against whatever ObjectType mapping exists *at
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _unique_name
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _unique_name, as_items
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
 
@@ -88,7 +88,7 @@ def test_creating_an_object_type_requires_admin_governance_tier(jdoe_token: str)
 def test_creating_an_object_type_under_an_existing_name_is_rejected(msmith_token: str) -> None:
     status, body = _request(
         "POST", f"{KNOWLEDGE}/object-types", token=msmith_token,
-        body={"name": "Customer", "source_dataset_urn": "hl:acme:demo:dataset:whatever", "property_mapping": {"id": "id"}},
+        body={"name": "Customer", "source_dataset_urn": "hl:acme:main:dataset:whatever", "property_mapping": {"id": "id"}},
     )
     assert status == 409, body
 
@@ -133,8 +133,9 @@ def test_full_self_serve_loop_source_to_browsable_and_searchable_object(jdoe_tok
     assert type_name in [t["name"] for t in listing], listing
 
     # Immediately readable — generic dispatch, no code, no restart.
-    status, rows = _request("GET", f"{KNOWLEDGE}/objects/{type_name}", token=jdoe_token)
-    assert status == 200, rows
+    status, body = _request("GET", f"{KNOWLEDGE}/objects/{type_name}", token=jdoe_token)
+    assert status == 200, body
+    rows = as_items(body)
     assert len(rows) == 8, rows
     assert all(row["degraded"] is True for row in rows), rows  # first sync predates the type — live federated read only
 

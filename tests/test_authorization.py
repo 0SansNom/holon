@@ -64,8 +64,8 @@ def test_workspace_viewer_in_disallowed_country_gets_confidential_fields_masked_
 
 
 def test_lineage_endpoint_is_governed_by_the_same_pdp(alice_token: str, jdoe_token: str) -> None:
-    status, body = _request("GET", f"{KNOWLEDGE}/lineage/hl:{TENANT_ID}:demo:object-type:Customer", token=alice_token)
+    status, body = _request("GET", f"{KNOWLEDGE}/lineage/hl:{TENANT_ID}:main:object-type:Customer", token=alice_token)
     assert status == 403, body
 
-    status, _ = _request("GET", f"{KNOWLEDGE}/lineage/hl:{TENANT_ID}:demo:object-type:Customer", token=jdoe_token)
+    status, _ = _request("GET", f"{KNOWLEDGE}/lineage/hl:{TENANT_ID}:main:object-type:Customer", token=jdoe_token)
     assert status == 200

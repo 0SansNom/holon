@@ -73,7 +73,7 @@ def test_registering_the_shipped_plugin_and_syncing_through_it_works(jdoe_token:
     assert sync_result["row_count"] == 5, sync_result
 
 
-def test_a_plugin_cannot_claim_a_core_connectors_dataset(jdoe_token: str) -> None:
+def test_a_plugin_cannot_claim_a_seeded_demo_plugins_dataset(jdoe_token: str) -> None:
     module_name = f"_test_conflict_core_{int(time.time())}"
     path = _write_conflict_plugin(module_name, "CoreHijackPlugin", "customers")
     try:
@@ -84,7 +84,7 @@ def test_a_plugin_cannot_claim_a_core_connectors_dataset(jdoe_token: str) -> Non
             body={"entry_point": f"app.plugins.{module_name}:CoreHijackPlugin"},
         )
         assert status == 409, body
-        assert "core connector" in body["detail"], body
+        assert "already claimed by active plugin" in body["detail"], body
     finally:
         path.unlink(missing_ok=True)
 
@@ -123,8 +123,8 @@ def test_disabling_a_plugin_blocks_sync_and_enabling_restores_it(jdoe_token: str
         status, blocked = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "exchange_rates"})
         assert status == 404, blocked
     finally:
-        # Leave the shipped example plugin active — this is the default,
-        # steady state other tests/demo runs expect.
+        # Leave the shipped example plugin active — default steady state
+        # other tests expect.
         status, enabled = _request("POST", f"{CONNECTIVITY}/plugins/exchange-rate-feed/enable", token=jdoe_token)
         assert status == 200 and enabled["status"] == "active", enabled
 

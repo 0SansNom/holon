@@ -56,6 +56,41 @@ def test_matches_predicates_in_and_comparison() -> None:
     assert not matches_predicates({"amount": 99}, definition, mapping)
 
 
+def test_matches_predicates_struct_field_path() -> None:
+    mapping = {"id": "id", "address": "address_json"}
+    definition = {"all": [{"property": "address.city", "op": "eq", "value": "Paris"}]}
+    assert matches_predicates({"address": {"city": "Paris"}}, definition, mapping)
+    assert matches_predicates({"address_json": {"city": "Paris"}}, definition, mapping)
+    assert not matches_predicates({"address": {"city": "Lyon"}}, definition, mapping)
+
+
+def test_validate_definition_allows_struct_field_paths() -> None:
+    mapping = {"id": "id", "address": "address_json"}
+    property_types = {
+        "address": {
+            "kind": "struct",
+            "properties": {"city": {"kind": "value_type", "value_type": "String"}},
+        }
+    }
+    validate_definition(
+        {"all": [{"property": "address.city", "op": "eq", "value": "Paris"}]},
+        mapping,
+        property_types,
+    )
+    with pytest.raises(ValueError, match="struct"):
+        validate_definition(
+            {"all": [{"property": "id.city", "op": "eq", "value": "x"}]},
+            mapping,
+            property_types,
+        )
+    with pytest.raises(ValueError, match="unknown struct field"):
+        validate_definition(
+            {"all": [{"property": "address.zip", "op": "eq", "value": "x"}]},
+            mapping,
+            property_types,
+        )
+
+
 def test_validate_definition_rejects_unknown_property_or_op() -> None:
     mapping = {"id": "id"}
     with pytest.raises(ValueError, match="property"):

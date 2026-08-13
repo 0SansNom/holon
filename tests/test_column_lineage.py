@@ -16,7 +16,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request
 
 
-WORKSPACE_ID = "demo"
+WORKSPACE_ID = "main"
 
 # Mirrors services/knowledge/app/ontology.py's CUSTOMER_PROPERTY_MAPPING —
 # duplicated on purpose: this test talks to the API only, never imports
