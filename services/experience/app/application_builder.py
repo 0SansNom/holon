@@ -148,6 +148,30 @@ def _referenced_object_types(definition: dict) -> set[str]:
     return types
 
 
+def _referenced_relation_types(definition: dict) -> set[str]:
+    """Optional link-type bindings on objectApp surfaces (api accessor names)."""
+    names: set[str] = set()
+    for surface in definition.get("surfaces", []):
+        if surface.get("type") == "objectApp":
+            for link in surface.get("links") or []:
+                if isinstance(link, str) and link.strip():
+                    names.add(link.strip())
+    return names
+
+
+def _referenced_object_sets(definition: dict) -> set[str]:
+    """Optional Object Set bindings on objectApp / dashboard widgets."""
+    names: set[str] = set()
+    for surface in definition.get("surfaces", []):
+        if surface.get("type") == "objectApp" and surface.get("objectSet"):
+            names.add(surface["objectSet"])
+        if surface.get("type") == "dashboard":
+            for widget in surface.get("widgets", []):
+                if widget.get("objectSet"):
+                    names.add(widget["objectSet"])
+    return names
+
+
 def _referenced_actions(definition: dict) -> set[str]:
     return {a["action"] for a in definition.get("actionRefs", [])}
 
@@ -196,15 +220,75 @@ async def _validate_definition(
     """
     headers = {"Authorization": authorization}
     object_types = sorted(_referenced_object_types(definition))
+    object_sets = sorted(_referenced_object_sets(definition))
     actions = sorted(_referenced_actions(definition))
     components = sorted(_referenced_components(definition))
     tools = sorted(_referenced_tools(definition))
+    relation_link_names = sorted(_referenced_relation_types(definition))
 
     for object_type in object_types:
         response = await http.get(f"{knowledge_url}/ontology/{object_type}", headers=headers)
         if response.status_code == 404:
             raise InvalidApplicationDefinition(f"unknown ObjectType {object_type!r}")
         response.raise_for_status()
+
+    if relation_link_names:
+        response = await http.get(f"{knowledge_url}/relation-types", headers=headers)
+        response.raise_for_status()
+        relation_rows = response.json()
+        known_accessors: set[str] = set()
+        for row in relation_rows:
+            local = str(row.get("name", "")).split(".", 1)[-1]
+            known_accessors.add((row.get("source_api_name") or "").strip() or local)
+            known_accessors.add((row.get("target_api_name") or "").strip() or row.get("target_property") or local)
+            known_accessors.add(row.get("target_property") or "")
+            known_accessors.add(local)
+        unknown_links = [n for n in relation_link_names if n not in known_accessors]
+        if unknown_links:
+            raise InvalidApplicationDefinition(f"unknown link accessor(s) declared: {unknown_links}")
+        for surface in definition.get("surfaces", []):
+            if surface.get("type") != "objectApp" or not surface.get("links"):
+                continue
+            ot = surface.get("objectType") or ""
+            for link in surface.get("links") or []:
+                attached = False
+                for row in relation_rows:
+                    source = str(row.get("source_object_type_urn", "")).rsplit(":", 1)[-1]
+                    target = str(row.get("target_object_type_urn", "")).rsplit(":", 1)[-1]
+                    local = str(row.get("name", "")).split(".", 1)[-1]
+                    fwd = (row.get("source_api_name") or "").strip() or local
+                    rev = (row.get("target_api_name") or "").strip() or row.get("target_property") or local
+                    if ot == source and link in (fwd, local):
+                        attached = True
+                    if ot == target and link in (rev, row.get("target_property"), local):
+                        attached = True
+                if not attached:
+                    raise InvalidApplicationDefinition(
+                        f"link {link!r} is not attached to ObjectType {ot!r}"
+                    )
+
+    for object_set in object_sets:
+        response = await http.get(f"{knowledge_url}/object-sets/{object_set}", headers=headers)
+        if response.status_code == 404:
+            raise InvalidApplicationDefinition(f"unknown Object Set {object_set!r}")
+        response.raise_for_status()
+        body = response.json()
+        set_type = str(body.get("object_type_urn", "")).rsplit(":", 1)[-1]
+        # Every objectSet binding must also declare a matching objectType so
+        # dependency tracking and PDP type auth stay coherent.
+        declared_types: set[str] = set()
+        for surface in definition.get("surfaces", []):
+            if surface.get("type") == "objectApp" and surface.get("objectSet") == object_set:
+                declared_types.add(surface.get("objectType", ""))
+            if surface.get("type") == "dashboard":
+                for widget in surface.get("widgets", []):
+                    if widget.get("objectSet") == object_set:
+                        declared_types.add(widget.get("objectType", ""))
+        for declared in declared_types:
+            if declared and declared != set_type:
+                raise InvalidApplicationDefinition(
+                    f"Object Set {object_set!r} targets {set_type!r}, not {declared!r}"
+                )
 
     for action in actions:
         response = await http.get(f"{knowledge_url}/actions/{action}", headers=headers)
@@ -246,7 +330,12 @@ async def _validate_definition(
         if unknown_tools:
             raise InvalidApplicationDefinition(f"unknown tool(s) declared: {unknown_tools}")
 
-    return {"objectTypes": object_types, "actions": actions}
+    return {
+        "objectTypes": object_types,
+        "objectSets": object_sets,
+        "actions": actions,
+        "relationTypes": relation_link_names,
+    }
 
 
 async def list_applications(pool: asyncpg.Pool, *, tenant_id: str) -> list[dict]:
@@ -330,21 +419,11 @@ async def create_or_update_draft(
             application_urn(tenant_id, workspace_id, name),
         )
     elif existing["status"] == "draft":
-        # Editing an unpromoted draft in place — not yet "live"
-        # (nothing has promoted it), so in-place edits are
-        # exactly what a draft is for.
         await pool.execute(
             "UPDATE application SET definition = $1::jsonb, dependencies = $2::jsonb WHERE id = $3",
             json.dumps(definition), json.dumps(dependencies), existing["id"],
         )
     else:
-        # The latest version is already promoted (immutable);
-        # further changes always create a new draft, never edit it live.
-        # `urn`/`project_urn` carry forward from the prior version — they're
-        # identity/organization facts about the Application, not something
-        # a new draft resets (a bug fixed here: this branch previously left
-        # them NULL on the new row, which `get_application`'s `ORDER BY
-        # version DESC LIMIT 1` would then surface as the "current" urn).
         await pool.execute(
             "INSERT INTO application (tenant_id, name, version, definition, dependencies, status, urn, project_urn) "
             "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, 'draft', $6, $7)",
@@ -390,6 +469,15 @@ def resolve_object_app_object_type(application: dict) -> Optional[str]:
     for surface in application["definition"].get("surfaces", []):
         if surface.get("type") == "objectApp":
             return surface["objectType"]
+    return None
+
+
+def resolve_object_app_object_set(application: dict) -> Optional[str]:
+    """Optional Object Set filter on the objectApp list surface."""
+    for surface in application["definition"].get("surfaces", []):
+        if surface.get("type") == "objectApp":
+            name = surface.get("objectSet")
+            return name if isinstance(name, str) and name else None
     return None
 
 
