@@ -11,7 +11,9 @@ export function RegistryDialog({
   submitLabel,
   onSubmit,
   submitDisabled,
+  intent = "primary",
   style,
+  footerStart,
   children,
 }: {
   isOpen: boolean;
@@ -22,7 +24,10 @@ export function RegistryDialog({
   submitLabel: string;
   onSubmit: () => void;
   submitDisabled?: boolean;
+  intent?: "primary" | "danger" | "success" | "warning" | "none";
   style?: CSSProperties;
+  /** Optional left-side footer controls (e.g. wizard Back). */
+  footerStart?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -33,9 +38,12 @@ export function RegistryDialog({
       </DialogBody>
       <DialogFooter
         actions={
-          <Button intent="primary" disabled={submitDisabled} loading={isPending} onClick={onSubmit}>
-            {submitLabel}
-          </Button>
+          <>
+            {footerStart}
+            <Button intent={intent} disabled={submitDisabled} loading={isPending} onClick={onSubmit}>
+              {submitLabel}
+            </Button>
+          </>
         }
       />
     </Dialog>

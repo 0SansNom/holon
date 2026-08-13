@@ -2,6 +2,7 @@ import { FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
 import type { InterfaceType, ObjectType } from "../../api/knowledge";
 import { JsonEditorField } from "../common/JsonEditorField";
 import { RISK_LEVELS, type ActionTypeFormState } from "./actionTypeForm";
+import { useTypeClasses } from "../../api/hooks";
 
 export function ActionTypeFormFields({
   mode,
@@ -18,6 +19,11 @@ export function ActionTypeFormFields({
   interfaces: InterfaceType[];
   fixedName?: string;
 }) {
+  const { data: typeClasses } = useTypeClasses();
+  const actionTypeClassSuggestions = (typeClasses ?? [])
+    .filter((c) => c.id.startsWith("hubble-oe:") || c.id.startsWith("actions:"))
+    .map((c) => c.id);
+
   return (
     <>
       {mode === "create" ? (
@@ -89,11 +95,70 @@ export function ActionTypeFormFields({
         />
       </FormGroup>
 
+      <FormGroup
+        label="Type classes"
+        helperText={
+          actionTypeClassSuggestions.length > 0
+            ? `Comma-separated Foundry kind:name — e.g. ${actionTypeClassSuggestions.join(", ")}`
+            : "Comma-separated Foundry kind:name (e.g. hubble-oe:hide-action)"
+        }
+      >
+        <InputGroup
+          placeholder="hubble-oe:hide-action"
+          value={value.typeClasses}
+          onChange={(e) => onChange({ typeClasses: e.target.value })}
+        />
+      </FormGroup>
+
+      <FormGroup label="Status">
+        <HTMLSelect
+          fill
+          value={value.lifecycleStatus}
+          onChange={(e) => onChange({ lifecycleStatus: e.target.value })}
+        >
+          <option value="experimental">experimental</option>
+          <option value="active">active</option>
+          <option value="deprecated">deprecated</option>
+          <option value="example">example</option>
+        </HTMLSelect>
+      </FormGroup>
+      {value.lifecycleStatus === "deprecated" && (
+        <>
+          <FormGroup label="Deprecation reason" helperText="Required when deprecated">
+            <InputGroup
+              value={value.deprecationReason}
+              onChange={(e) => onChange({ deprecationReason: e.target.value })}
+            />
+          </FormGroup>
+          <FormGroup label="Deprecation deadline" helperText="Required when deprecated">
+            <InputGroup
+              type="date"
+              value={value.deprecationDeadline}
+              onChange={(e) => onChange({ deprecationDeadline: e.target.value })}
+            />
+          </FormGroup>
+          <FormGroup label="Replacement URN (optional)">
+            <InputGroup
+              className="hl-mono"
+              value={value.replacementUrn}
+              onChange={(e) => onChange({ replacementUrn: e.target.value })}
+              placeholder="hl:…:action-type:…"
+            />
+          </FormGroup>
+        </>
+      )}
+
       <JsonEditorField
         label="Parameters"
         helperText={
-          <span className="hl-mono">
-            [{"{"}name, required, value_type{"}"} | {"{"}name, required, kind: "object_reference", object_type{"}"}, ...]
+          <span>
+            Optional <span className="hl-mono">default</span>:{" "}
+            <span className="hl-mono">{"{kind:'static',value}"}</span>,{" "}
+            <span className="hl-mono">{"{kind:'current_object'}"}</span>, or{" "}
+            <span className="hl-mono">{"{kind:'object_property',object:'current'|param,property}"}</span>
+            . object_reference may set <span className="hl-mono">object_set</span>. Type classes{" "}
+            <span className="hl-mono">actions:generate_uuid</span> /{" "}
+            <span className="hl-mono">actions:prefill_current_user</span> still apply.
           </span>
         }
         value={value.parametersJson}
@@ -110,7 +175,15 @@ export function ActionTypeFormFields({
       {value.editsKind === "declarative" ? (
         <JsonEditorField
           label="Edits"
-          helperText={<span className="hl-mono">[{"{"}property, source, value|parameter_name{"}"}, ...]</span>}
+          helperText={
+            <span>
+              Rules JSON. Default kind <span className="hl-mono">modify_property</span>
+              {" "}({"{" + "property, source, value|parameter_name}"}). Also{" "}
+              <span className="hl-mono">create_link</span>/<span className="hl-mono">delete_link</span>
+              {" "}(relation_type + ends), <span className="hl-mono">create_object</span>,{" "}
+              <span className="hl-mono">delete_object</span>.
+            </span>
+          }
           value={value.editsJson}
           onChange={(editsJson) => onChange({ editsJson })}
         />
@@ -126,7 +199,13 @@ export function ActionTypeFormFields({
 
       <JsonEditorField
         label="Submission criteria"
-        helperText={<span className="hl-mono">[{"{"}property, operator, value{"}"}, ...]</span>}
+        helperText={
+          <span>
+            Flat AND list, or nested <span className="hl-mono">all</span>/<span className="hl-mono">any</span>.
+            Leaf: property ops, or <span className="hl-mono">{"{principal:'urn'|'type',operator,value}"}</span>.
+            Optional <span className="hl-mono">message</span>.
+          </span>
+        }
         value={value.criteriaJson}
         onChange={(criteriaJson) => onChange({ criteriaJson })}
         height={70}
@@ -143,6 +222,43 @@ export function ActionTypeFormFields({
         onChange={(sectionsJson) => onChange({ sectionsJson })}
         height={70}
       />
+
+      <FormGroup
+        label="Function side effect"
+        helperText="Optional post-commit Function plugin name (runs after the Action applies)."
+      >
+        <InputGroup
+          className="hl-mono"
+          placeholder="notify_ops_channel"
+          value={value.functionSideEffect ?? ""}
+          onChange={(e) => onChange({ functionSideEffect: e.target.value })}
+        />
+      </FormGroup>
+
+      <FormGroup
+        label="Writeback dataset"
+        helperText="Connectivity write_target name. Requires risk level high (Automation saga)."
+      >
+        <InputGroup
+          className="hl-mono"
+          placeholder="customers"
+          value={value.writebackDataset ?? ""}
+          onChange={(e) => onChange({ writebackDataset: e.target.value })}
+          intent={value.writebackDataset && value.riskLevel !== "high" ? "warning" : undefined}
+        />
+      </FormGroup>
+
+      <FormGroup
+        label="Notify webhook"
+        helperText="Optional HTTP(S) URL — best-effort POST after apply (Slack incoming webhook, Zapier, …). Env fallback: HOLON_ACTION_NOTIFY_WEBHOOK."
+      >
+        <InputGroup
+          className="hl-mono"
+          placeholder="https://hooks.slack.com/services/…"
+          value={value.notifyWebhook ?? ""}
+          onChange={(e) => onChange({ notifyWebhook: e.target.value })}
+        />
+      </FormGroup>
     </>
   );
 }

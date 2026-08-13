@@ -6,8 +6,10 @@ import { useMonacoEditorTheme } from "../../hooks/useMonacoEditorTheme";
 import {
   useApplicationOptional,
   useApplicationDashboard,
+  useObjectSets,
   useObjectTypes,
   useActions,
+  useRelationTypes,
   useTools,
   usePromoteApplication,
   useSaveApplication,
@@ -38,7 +40,9 @@ export function ApplicationPage() {
   const { data: application, error, refetch } = useApplicationOptional(name);
   const { data: dashboard } = useApplicationDashboard(application?.status === "promoted" ? name : undefined);
   const { data: objectTypes = [] } = useObjectTypes();
+  const { data: objectSets = [] } = useObjectSets();
   const { data: actions = [] } = useActions();
+  const { data: relationTypes = [] } = useRelationTypes();
   const { data: tools = [] } = useTools();
   const { data: projects = [] } = useProjects();
   const saveMutation = useSaveApplication(name);
@@ -142,7 +146,9 @@ export function ApplicationPage() {
             <ApplicationBuilder
               definition={application?.definition ?? DEFAULT_DEFINITION}
               objectTypes={objectTypes}
+              objectSets={objectSets}
               actions={actions}
+              relationTypes={relationTypes}
               tools={tools}
               saving={saveMutation.isPending}
               saveError={saveError}

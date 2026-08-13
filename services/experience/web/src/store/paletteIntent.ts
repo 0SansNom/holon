@@ -13,6 +13,7 @@ export type PaletteIntent =
   | "create-action-type"
   | "create-object-type-group"
   | "create-object-set"
+  | "create-pipeline"
   | "create-project"
   | "connect-source"
   | "create-connection";

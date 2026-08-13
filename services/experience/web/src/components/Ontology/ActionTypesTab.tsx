@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { Checkbox } from "@blueprintjs/core";
 import { useActionTypes, useCreateActionType, useUpdateActionType, useObjectTypes, useInterfaces } from "../../api/hooks";
 import type { ActionType } from "../../api/knowledge";
 import { CardGrid, EmptyState } from "../common/ListPrimitives";
@@ -16,6 +17,8 @@ import {
   parseActionTypeJsonFields,
   type ActionTypeFormState,
 } from "./actionTypeForm";
+import { isEphemeralTestName } from "./ephemeralResources";
+import { parseTypeClassesInput } from "./typeClassUtils";
 
 export function ActionTypesTab() {
   const { data } = useActionTypes();
@@ -29,6 +32,16 @@ export function ActionTypesTab() {
   const [editing, setEditing] = useState<ActionType | null>(null);
   const [editForm, setEditForm] = useState<ActionTypeFormState>(DEFAULT_ACTION_TYPE_FORM);
   const [branching, setBranching] = useState<ActionType | null>(null);
+  const [showEphemeral, setShowEphemeral] = useState(false);
+
+  const ephemeralCount = useMemo(
+    () => data.filter((at) => isEphemeralTestName(at.name)).length,
+    [data],
+  );
+  const visibleActions = useMemo(
+    () => (showEphemeral ? data : data.filter((at) => !isEphemeralTestName(at.name))),
+    [data, showEphemeral],
+  );
 
   usePaletteCreateIntent("create-action-type", setCreating);
 
@@ -69,6 +82,14 @@ export function ActionTypesTab() {
       submission_criteria: parsed.submission_criteria,
       edit_function: createForm.editsKind === "function" ? createForm.editFunctionName : undefined,
       sections: parsed.sections,
+      function_side_effect: createForm.functionSideEffect?.trim() || undefined,
+      writeback_dataset: createForm.writebackDataset?.trim() || undefined,
+      notify_webhook: createForm.notifyWebhook?.trim() || undefined,
+      type_classes: parseTypeClassesInput(createForm.typeClasses),
+      lifecycle_status: createForm.lifecycleStatus,
+      deprecation_reason: createForm.lifecycleStatus === "deprecated" ? createForm.deprecationReason : undefined,
+      deprecation_deadline: createForm.lifecycleStatus === "deprecated" ? createForm.deprecationDeadline || undefined : undefined,
+      replacement_urn: createForm.lifecycleStatus === "deprecated" ? createForm.replacementUrn || undefined : undefined,
     });
     closeCreate();
   }, { successMessage: `Action type "${createForm.targetKind === "object_type" ? createForm.targetObjectType : createForm.targetInterface}.${createForm.localName}" created` });
@@ -98,10 +119,16 @@ export function ActionTypesTab() {
         parameters: parsed.parameters,
         edits: parsed.edits,
         submission_criteria: parsed.submission_criteria,
-        function_side_effect: editForm.functionSideEffect,
-        writeback_dataset: editForm.writebackDataset,
+        function_side_effect: editForm.functionSideEffect?.trim() || undefined,
+        writeback_dataset: editForm.writebackDataset?.trim() || undefined,
+        notify_webhook: editForm.notifyWebhook?.trim() || undefined,
         edit_function: editForm.editsKind === "function" ? editForm.editFunctionName : undefined,
         sections: parsed.sections,
+        type_classes: parseTypeClassesInput(editForm.typeClasses),
+        lifecycle_status: editForm.lifecycleStatus,
+        deprecation_reason: editForm.lifecycleStatus === "deprecated" ? editForm.deprecationReason : undefined,
+        deprecation_deadline: editForm.lifecycleStatus === "deprecated" ? editForm.deprecationDeadline || undefined : undefined,
+        replacement_urn: editForm.lifecycleStatus === "deprecated" ? editForm.replacementUrn || undefined : undefined,
       },
     });
     setEditing(null);
@@ -119,15 +146,25 @@ export function ActionTypesTab() {
         }
         createLabel="New action type"
         onCreate={() => setCreating(true)}
+        trailing={
+          ephemeralCount > 0 ? (
+            <Checkbox
+              checked={showEphemeral}
+              label={`Show test leftovers (${ephemeralCount})`}
+              onChange={(e) => setShowEphemeral(e.currentTarget.checked)}
+              style={{ marginBottom: 0 }}
+            />
+          ) : undefined
+        }
       />
 
       <CardGrid minWidth={260}>
-        {data.map((at) => (
+        {visibleActions.map((at) => (
           <ActionTypeCard key={at.name} actionType={at} onEdit={() => openEdit(at)} onBranch={() => setBranching(at)} />
         ))}
-        {data.length === 0 && (
+        {visibleActions.length === 0 && (
           <EmptyState actionLabel="New action type" onAction={() => setCreating(true)}>
-            No action types yet.
+            {data.length === 0 ? "No action types yet." : "No durable action types — show test leftovers to browse pytest actions."}
           </EmptyState>
         )}
       </CardGrid>
@@ -189,6 +226,11 @@ export function ActionTypesTab() {
             writeback_dataset: branching.writeback_dataset,
             edit_function: branching.edit_function,
             sections: branching.sections,
+            type_classes: branching.type_classes ?? [],
+            lifecycle_status: branching.lifecycle_status,
+            deprecation_reason: branching.deprecation_reason,
+            deprecation_deadline: branching.deprecation_deadline,
+            replacement_urn: branching.replacement_urn,
           }}
           onClose={() => setBranching(null)}
         />

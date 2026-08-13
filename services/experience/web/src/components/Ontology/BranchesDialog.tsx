@@ -27,6 +27,7 @@ const OBJECT_TYPE_BRANCH_FIELDS = [
   "property_formats",
   "conditional_formats",
   "property_types",
+  "link_constraint_bindings",
 ] as const;
 
 function proposedDefinitionForObjectType(branch: Branch, versions: ReturnType<typeof useObjectTypeVersions>["data"]) {

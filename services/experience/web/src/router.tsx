@@ -5,6 +5,7 @@ import { LoginScreen } from "./components/Auth/LoginScreen";
 import { RouteBoundary } from "./components/common/RouteBoundary";
 import { DetailPageSkeleton, RegistryPageSkeleton, TablePageSkeleton } from "./components/common/Skeleton";
 import { useAuthStore } from "./store/auth";
+import { parseOntologyTab } from "./components/Ontology/ontologyTabs";
 
 function lazyPage(
   factory: () => Promise<Record<string, ComponentType<object>>>,
@@ -67,7 +68,30 @@ const CollectionDetailPage = lazyPage(
   <DetailPageSkeleton />,
 );
 const SourcesPage = lazyPage(() => import("./components/Sources/SourcesPage"), "SourcesPage");
+const PipelinesPage = lazyPage(() => import("./components/Pipelines/PipelinesPage"), "PipelinesPage");
+const PipelineDetailPage = lazyPage(
+  () => import("./components/Pipelines/PipelineDetailPage"),
+  "PipelineDetailPage",
+  <DetailPageSkeleton />,
+);
+const CatalogPage = lazyPage(() => import("./components/Catalog/CatalogPage"), "CatalogPage");
 const OntologyPage = lazyPage(() => import("./components/Ontology/OntologyPage"), "OntologyPage");
+const ObjectTypeDraftPage = lazyPage(
+  () => import("./components/Ontology/ObjectTypeDraftPage"),
+  "ObjectTypeDraftPage",
+  <DetailPageSkeleton />,
+);
+const RelationTypeDetailPage = lazyPage(
+  () => import("./components/Ontology/RelationTypeDetailPage"),
+  "RelationTypeDetailPage",
+  <DetailPageSkeleton />,
+);
+const ActionTypeDetailPage = lazyPage(
+  () => import("./components/Ontology/ActionTypeDetailPage"),
+  "ActionTypeDetailPage",
+  <DetailPageSkeleton />,
+);
+const ApprovalsPage = lazyPage(() => import("./components/Approvals/ApprovalsPage"), "ApprovalsPage");
 
 const rootRoute = createRootRoute({
   component: () => <Outlet />,
@@ -100,8 +124,15 @@ const objectTableRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/objects/$type",
   component: ObjectTablePage,
-  validateSearch: (search: Record<string, unknown>): { set?: string } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { set?: string; exploration?: string; list?: string } => ({
     set: typeof search.set === "string" && search.set.length > 0 ? search.set : undefined,
+    exploration:
+      typeof search.exploration === "string" && search.exploration.length > 0
+        ? search.exploration
+        : undefined,
+    list: typeof search.list === "string" && search.list.length > 0 ? search.list : undefined,
   }),
 });
 
@@ -109,6 +140,16 @@ const objectDetailRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/objects/$type/$id",
   component: ObjectDetailPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string; view?: "standard" | "configured" } => {
+    const tab = typeof search.tab === "string" && /^[a-zA-Z0-9_-]+$/.test(search.tab) ? search.tab : undefined;
+    const view =
+      search.view === "standard" || search.view === "configured" ? search.view : undefined;
+    const standardAllowed = new Set(["overview", "properties", "links", "media", "timeline", "graph"]);
+    if (view === "configured" || (tab && !standardAllowed.has(tab))) {
+      return { tab, view };
+    }
+    return { tab: tab && standardAllowed.has(tab) ? tab : undefined, view };
+  },
 });
 
 const objectGraphRoute = createRoute({
@@ -180,10 +221,59 @@ const sourcesRoute = createRoute({
   component: SourcesPage,
 });
 
+const pipelinesRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/pipelines",
+  component: PipelinesPage,
+});
+
+const pipelineDetailRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/pipelines/$name",
+  component: PipelineDetailPage,
+});
+
+const catalogRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/catalog",
+  component: CatalogPage,
+  validateSearch: (search: Record<string, unknown>): { dataset?: string } => ({
+    dataset: typeof search.dataset === "string" && search.dataset.length > 0 ? search.dataset : undefined,
+  }),
+});
+
 const ontologyRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/ontology",
   component: OntologyPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => {
+    const tab = parseOntologyTab(search.tab);
+    return tab ? { tab } : {};
+  },
+});
+
+const objectTypeDraftRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/ontology/object-types/$name",
+  component: ObjectTypeDraftPage,
+});
+
+const relationTypeDetailRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/ontology/relation-types/$name",
+  component: RelationTypeDetailPage,
+});
+
+const actionTypeDetailRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/ontology/action-types/$name",
+  component: ActionTypeDetailPage,
+});
+
+const approvalsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/approvals",
+  component: ApprovalsPage,
 });
 
 const indexRoute = createRoute({
@@ -200,6 +290,7 @@ const routeTree = rootRoute.addChildren([
     objectTableRoute,
     objectDetailRoute,
     objectGraphRoute,
+    approvalsRoute,
     applicationsRoute,
     applicationRoute,
     collectionsRoute,
@@ -210,7 +301,13 @@ const routeTree = rootRoute.addChildren([
     adminRoute,
     projectDetailRoute,
     sourcesRoute,
+    pipelinesRoute,
+    pipelineDetailRoute,
+    catalogRoute,
     ontologyRoute,
+    objectTypeDraftRoute,
+    relationTypeDetailRoute,
+    actionTypeDetailRoute,
   ]),
 ]);
 

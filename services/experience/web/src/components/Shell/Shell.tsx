@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { useAuthStore } from "../../store/auth";
 import { logout } from "../../api/identity";
 import { registerLoginRedirect } from "../../api/authRedirect";
+import { useApprovals } from "../../api/hooks";
 import { CommandPalette } from "./CommandPalette";
 import { ThemeToggle } from "./ThemeToggle";
 import { NAV_ITEMS, SEQUENTIAL_SHORTCUTS } from "./navigation";
@@ -23,6 +24,8 @@ export function Shell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [paletteOpen, setPaletteOpen] = useState(false);
   const leaderPressedAt = useRef<number | null>(null);
+  const { data: pendingApprovals } = useApprovals("pending");
+  const pendingCount = pendingApprovals?.length ?? 0;
 
   useEffect(() => {
     if (!session) {
@@ -95,7 +98,12 @@ export function Shell() {
               activeOptions={{ exact: false }}
             >
               <Icon icon={item.icon} size={14} />
-              {item.label}
+              <span className="hl-nav-item-label">{item.label}</span>
+              {item.to === "/approvals" && pendingCount > 0 && (
+                <Tag minimal round intent="primary" className="hl-nav-badge">
+                  {pendingCount > 99 ? "99+" : pendingCount}
+                </Tag>
+              )}
             </Link>
           ))}
         </nav>
