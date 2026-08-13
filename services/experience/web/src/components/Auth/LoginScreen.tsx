@@ -1,20 +1,20 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Button, Card, H4, Radio, RadioGroup } from "@blueprintjs/core";
+import { Button, Card, FormGroup, H4, InputGroup } from "@blueprintjs/core";
+import { EXPERIENCE_URL, TENANT_ID } from "../../api/config";
 import { identityApi, login } from "../../api/identity";
-import { clientSecretFor, SEEDED_PRINCIPALS } from "../../api/principals";
 import { useAuthStore } from "../../store/auth";
 
 export function LoginScreen() {
-  const [selected, setSelected] = useState(SEEDED_PRINCIPALS[0].localName);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [ssoAvailable, setSsoAvailable] = useState(false);
+  const [allowDevLogin, setAllowDevLogin] = useState(true);
+  const [manualUrn, setManualUrn] = useState(`hl:${TENANT_ID}:global:user:admin`);
+  const [manualSecret, setManualSecret] = useState("");
   const setSession = useAuthStore((s) => s.setSession);
   const clear = useAuthStore((s) => s.clear);
   const navigate = useNavigate();
-
-  const principal = SEEDED_PRINCIPALS.find((p) => p.localName === selected)!;
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +26,21 @@ export function LoginScreen() {
       .catch(() => {
         if (!cancelled) setSsoAvailable(false);
       });
+    void fetch(`${EXPERIENCE_URL}/api/config`)
+      .then((r) => r.json())
+      .then((cfg: { allow_dev_login?: boolean }) => {
+        if (!cancelled) {
+          const allow = cfg.allow_dev_login !== false;
+          setAllowDevLogin(allow);
+          if (allow) setManualSecret("admin-dev-secret");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAllowDevLogin(true);
+          setManualSecret("admin-dev-secret");
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -35,7 +50,7 @@ export function LoginScreen() {
     setLoading(true);
     setError(null);
     try {
-      await login(principal.urn, clientSecretFor(principal.localName));
+      await login(manualUrn.trim(), manualSecret);
       const me = await identityApi.whoami();
       setSession({ principal: me });
       void navigate({ to: "/objects" });
@@ -52,18 +67,35 @@ export function LoginScreen() {
       <Card className="hl-login-card" elevation={2}>
         <H4>Holon</H4>
         <p className="hl-login-desc">
-          Sign in as a seeded demo principal — switching between them is the fastest way to see the ReBAC + ABAC
-          permission model actually work, not just read about it.
+          {allowDevLogin
+            ? "Sign in with a principal URN and client secret. Empty-instance default is admin / admin-dev-secret."
+            : "Sign in with SSO, or with a principal URN and client secret from Identity."}
         </p>
-        <RadioGroup selectedValue={selected} onChange={(e) => setSelected(e.currentTarget.value)}>
-          {SEEDED_PRINCIPALS.map((p) => (
-            <Radio key={p.localName} value={p.localName} label={p.displayName}>
-              <div className="hl-radio-desc">{p.description}</div>
-            </Radio>
-          ))}
-        </RadioGroup>
+        <FormGroup label="Principal URN" labelFor="login-urn">
+          <InputGroup
+            id="login-urn"
+            value={manualUrn}
+            onChange={(e) => setManualUrn(e.currentTarget.value)}
+            placeholder="hl:…:global:user:…"
+          />
+        </FormGroup>
+        <FormGroup label="Client secret" labelFor="login-secret">
+          <InputGroup
+            id="login-secret"
+            type="password"
+            value={manualSecret}
+            onChange={(e) => setManualSecret(e.currentTarget.value)}
+          />
+        </FormGroup>
         {error && <p className="hl-text-danger hl-text-muted-sm">{error}</p>}
-        <Button intent="primary" fill loading={loading} onClick={() => void signIn()} className="hl-mt-sm">
+        <Button
+          intent="primary"
+          fill
+          loading={loading}
+          disabled={!manualUrn.trim() || !manualSecret}
+          onClick={() => void signIn()}
+          className="hl-mt-sm"
+        >
           Sign in
         </Button>
         {ssoAvailable && (

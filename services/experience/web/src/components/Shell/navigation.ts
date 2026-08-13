@@ -6,7 +6,10 @@
 // evaluates second would read the other's not-yet-initialized const.
 export const NAV_ITEMS = [
   { to: "/objects", icon: "cube" as const, label: "Objects" },
+  { to: "/approvals", icon: "confirm" as const, label: "Approvals" },
   { to: "/sources", icon: "data-connection" as const, label: "Sources" },
+  { to: "/pipelines", icon: "flow-branch" as const, label: "Pipelines" },
+  { to: "/catalog", icon: "th-list" as const, label: "Catalog" },
   { to: "/ontology", icon: "diagram-tree" as const, label: "Ontology" },
   { to: "/applications", icon: "application" as const, label: "Applications" },
   { to: "/collections", icon: "layers" as const, label: "Collections" },
@@ -21,7 +24,10 @@ export const NAV_ITEMS = [
 // worth forcing an awkward second mnemonic letter for.
 export const SEQUENTIAL_SHORTCUTS: Record<string, (typeof NAV_ITEMS)[number]["to"]> = {
   o: "/objects",
+  a: "/approvals",
   s: "/sources",
+  i: "/pipelines",
+  c: "/catalog",
   n: "/ontology",
   p: "/applications",
   d: "/admin",

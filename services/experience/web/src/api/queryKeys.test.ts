@@ -8,6 +8,14 @@ describe("queryKeys", () => {
   });
 
   it("scopes search by optional filters", () => {
-    expect(queryKeys.search("foo", "Customer", 0, 25)).toEqual(["search", "foo", "Customer", 0, 25]);
+    expect(queryKeys.search("foo", "Customer", 0, 25, undefined, "Contactable")).toEqual([
+      "search",
+      "foo",
+      "Customer",
+      0,
+      25,
+      "",
+      "Contactable",
+    ]);
   });
 });

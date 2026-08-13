@@ -1,5 +1,5 @@
 import ReactECharts from "echarts-for-react";
-import { Card } from "@blueprintjs/core";
+import { Card, Tag } from "@blueprintjs/core";
 import type { DashboardWidget } from "../../api/experience";
 import { useThemeStore } from "../../store/theme";
 
@@ -8,7 +8,8 @@ export function DashboardWidgets({ widgets }: { widgets: DashboardWidget[] }) {
     return (
       <p className="hl-text-muted">
         No widgets configured yet — go to the Builder tab, enable Dashboard, and drag a KPI or Table widget onto
-        the canvas (each one needs an ObjectType selected before saving, or it won't be included).
+        the canvas (each one needs an ObjectType selected before saving, or it won't be included). Optionally bind
+        an Object Set to narrow the rows.
       </p>
     );
   }
@@ -16,7 +17,14 @@ export function DashboardWidgets({ widgets }: { widgets: DashboardWidget[] }) {
     <div className="hl-dashboard-grid">
       {widgets.map((widget, i) => (
         <Card key={i}>
-          <div className="hl-widget-label">{widget.label}</div>
+          <div className="hl-flex-between hl-mb-xs">
+            <div className="hl-widget-label">{widget.label}</div>
+            {widget.objectSet && (
+              <Tag minimal intent="primary" icon="filter">
+                {widget.objectSet}
+              </Tag>
+            )}
+          </div>
           {widget.component === "kpi" && <KpiWidget value={widget.value ?? 0} />}
           {widget.component === "table" && <TableWidget rows={widget.rows ?? []} />}
           {widget.component !== "kpi" && widget.component !== "table" && <PluginWidget widget={widget} />}

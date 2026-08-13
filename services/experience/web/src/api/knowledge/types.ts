@@ -50,16 +50,44 @@ export interface ConditionalFormatRule {
 // only, the same limit `ontology/publishing.py`'s `_validate_property_types`
 // enforces server-side (a struct's own properties, or an array's
 // element, may only ever be a `value_type`/`shared_property_type` leaf).
+// Optional `description` / `main_field` are Foundry-style field metadata
+// (compact Explorer display uses main fields when any are marked).
 type PropertyTypeLeaf =
-  | { kind: "value_type"; value_type: string }
-  | { kind: "shared_property_type"; shared_property_type: string };
+  | {
+      kind: "value_type";
+      value_type: string;
+      description?: string;
+      main_field?: boolean;
+      /** Optional dataset column for this field (Foundry Column mapping). */
+      column?: string;
+    }
+  | {
+      kind: "shared_property_type";
+      shared_property_type: string;
+      description?: string;
+      main_field?: boolean;
+      column?: string;
+    };
 
 // `editable`/`required`/`visibility`/`render_hints`/`type_classes` (property
 // control) only ever apply at this top level — never inside a nested
 // `struct.properties`/`array.element` entry, which stays a plain
 // `PropertyTypeLeaf`.
 // `kind` may be omitted for metadata-only entries (visibility etc.).
-export type PropertyRenderHint = "searchable" | "sortable" | "selectable" | "identifier";
+export type PropertyRenderHint =
+  | "searchable"
+  | "sortable"
+  | "selectable"
+  | "identifier"
+  | "keywords"
+  | "long_text"
+  | "low_cardinality"
+  | "enable_leading_wildcards"
+  | "enable_regex_queries";
+
+export type RegistryLifecycleStatus = "experimental" | "active" | "deprecated" | "example";
+export type ObjectTypeLifecycleStatus = RegistryLifecycleStatus | "promoted";
+export type PropertyLifecycleStatus = RegistryLifecycleStatus;
 
 export type PropertyTypeRule = {
   editable?: boolean;
@@ -67,8 +95,9 @@ export type PropertyTypeRule = {
   visibility?: "prominent" | "normal" | "hidden";
   /** Foundry-style render hints. Absent ⇒ searchable by default at index time. */
   render_hints?: PropertyRenderHint[];
-  /** Free-form type classes (e.g. "priority", "important"). */
+  /** Free-form type classes (bare tags or Foundry kind:name). */
   type_classes?: string[];
+  lifecycle_status?: PropertyLifecycleStatus;
 } & (
   | { kind?: undefined }
   | PropertyTypeLeaf
@@ -80,17 +109,14 @@ export type PropertyTypeRule = {
 );
 
 // A derived property is either a Function plugin name (string) or a
-// Foundry-style reducer over a RelationType — `relation` (1 hop) or
-// `path` (1–3 hops) matches the same forward-local-name-or-target_property
-// convention the `/links` endpoint resolves server-side; `property` names
-// a property on the *final* related ObjectType and is required unless
-// `aggregate` is "count".
+// Foundry-style reducer over a RelationType — `path` (1–3 hops) matches
+// the same forward-local-name-or-target_property convention the `/links`
+// endpoint resolves server-side; `property` names a property on the
+// *final* related ObjectType and is required unless `aggregate` is "count".
 export interface DerivedPropertyLinkAggregate {
   kind: "link_aggregate";
-  /** @deprecated Prefer `path`; kept for one-hop configs. */
-  relation?: string;
   /** Link accessor names, 1–3 hops (Foundry multi-hop derived properties). */
-  path?: string[];
+  path: string[];
   aggregate: "sum" | "count" | "avg" | "min" | "max" | "collect_list" | "collect_set";
   property?: string;
   /** Cap for collect_list / collect_set (default 10). */
@@ -123,6 +149,10 @@ export interface ObjectType {
   implements?: string[];
   derived_properties?: Record<string, DerivedPropertyValue>;
   markings?: string[];
+  /** Per-interface map of constraint api_name → RelationType name. */
+  link_constraint_bindings?: Record<string, Record<string, string>>;
+  /** Map interface required props → OT property or struct field path (`address.city`). */
+  interface_property_bindings?: Record<string, Record<string, string>>;
   classification: "public" | "internal" | "confidential" | "restricted";
   description: string;
   version: number;
@@ -135,6 +165,9 @@ export interface ObjectType {
   lifecycle_status?: "experimental" | "active" | "deprecated";
   visibility?: "prominent" | "normal" | "hidden";
   icon?: string | null;
+  deprecation_reason?: string | null;
+  deprecation_deadline?: string | null;
+  replacement_urn?: string | null;
 }
 
 export type ValueTypeBaseType =
@@ -164,8 +197,19 @@ export interface ValueType {
   name: string;
   base_type: ValueTypeBaseType;
   format_regex: string | null;
+  format_regex_match?: "full" | "substring";
   constraints: ValueTypeConstraint[];
   description: string;
+  api_name?: string;
+  display_name?: string;
+  example_value?: string | null;
+  version?: number;
+  lifecycle_status?: "experimental" | "active" | "deprecated";
+  deprecation_reason?: string | null;
+  deprecation_deadline?: string | null;
+  replacement_urn?: string | null;
+  project_urn?: string | null;
+  urn?: string;
   created_at: string;
 }
 
@@ -173,9 +217,35 @@ export interface SharedPropertyType {
   tenant_id: string;
   api_name: string;
   display_name: string;
-  value_type: string;
+  /** Holon RID equivalent: hl:{tenant}:global:shared-property-type:{api_name} */
+  urn?: string;
+  /** Null when this SPT is struct-typed (`struct_properties` set). */
+  value_type: string | null;
+  /** One-level struct field map when this SPT is struct-typed. */
+  struct_properties?: Record<string, PropertyTypeLeaf> | null;
   description: string;
+  /** Foundry aliases — alternate search terms. */
+  aliases?: string[];
+  /** Optional project scope (additive ReBAC via parent_project). */
+  project_urn?: string | null;
+  visibility?: "prominent" | "normal" | "hidden";
+  render_hints?: PropertyRenderHint[];
+  type_classes?: string[];
+  property_format?: PropertyFormatRule | null;
   created_at: string;
+}
+
+export interface ActionParameterDefault {
+  kind: "static" | "current_object" | "object_property";
+  /** Required when kind=static. */
+  value?: unknown;
+  /**
+   * object_property only: `"current"` (Action target) or an earlier
+   * object_reference parameter name (Foundry order rule).
+   */
+  object?: string;
+  /** object_property only — property key on the source object. */
+  property?: string;
 }
 
 export interface ActionParameter {
@@ -187,19 +257,55 @@ export interface ActionParameter {
   kind?: "value_type" | "object_reference";
   value_type?: string;
   object_type?: string;
+  /** Optional Object Set name — filters the object_reference Suggest + invoke check. */
+  object_set?: string;
+  /** Foundry type classes on the parameter, e.g. `actions:generate_uuid`. */
+  type_classes?: string[];
+  /** Foundry Form default — prefills the invoke form (OE / Object App / …). */
+  default?: ActionParameterDefault;
 }
 
 export interface ActionEdit {
-  property: string;
-  source: "parameter" | "literal";
+  /** Defaults to modify_property when omitted (backward compatible). */
+  kind?: "modify_property" | "create_link" | "delete_link" | "create_object" | "delete_object";
+  // modify_property
+  property?: string;
+  source?: "parameter" | "literal";
   parameter_name?: string;
   value?: unknown;
+  // create_link / delete_link
+  relation_type?: string;
+  source_from?: "target_instance" | "parameter" | "literal";
+  source_parameter?: string;
+  source_value?: string;
+  target_from?: "target_instance" | "parameter" | "literal";
+  target_parameter?: string;
+  target_value?: string;
+  // create_object
+  object_type?: string;
+  primary_key?: {
+    source?: "parameter" | "generate_uuid" | "literal";
+    parameter_name?: string;
+    value?: unknown;
+  };
+  properties?: Array<{
+    property: string;
+    source: "parameter" | "literal";
+    parameter_name?: string;
+    value?: unknown;
+  }>;
+  // delete_object
+  // target_from + parameter_name / object_type reused above
 }
 
 export interface SubmissionCriterion {
-  property: string;
-  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte";
-  value: unknown;
+  property?: string;
+  operator?: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in";
+  value?: unknown;
+  message?: string;
+  principal?: "urn" | "type";
+  all?: SubmissionCriterion[];
+  any?: SubmissionCriterion[];
 }
 
 // Configure/Sections: a purely-display grouping of an Action Type's
@@ -226,12 +332,44 @@ export interface ActionType {
   submission_criteria: SubmissionCriterion[];
   function_side_effect: string | null;
   writeback_dataset: string | null;
+  notify_webhook?: string | null;
   // Function-backed Actions: mutually exclusive with a non-empty `edits`
   // — the named Function plugin's return value becomes the applied
   // edits, instead of a fixed declaration.
   edit_function?: string | null;
   sections?: ActionParameterSection[];
+  /** Foundry type classes, e.g. `hubble-oe:hide-action`. */
+  type_classes?: string[];
+  lifecycle_status?: "experimental" | "active" | "deprecated";
+  deprecation_reason?: string | null;
+  deprecation_deadline?: string | null;
+  replacement_urn?: string | null;
   created_at: string;
+}
+
+/** Ontology Manager Action Observability (last N days). */
+export interface ActionTypeObservability {
+  action_name: string;
+  days: number;
+  invocations: number;
+  reverted: number;
+  with_edits: number;
+  approvals: {
+    pending: number;
+    approved: number;
+    rejected: number;
+    expired: number;
+  };
+  by_day: Array<{ day: string; invocations: number }>;
+}
+
+export interface InterfaceLinkConstraint {
+  api_name: string;
+  target_kind: "object_type" | "interface";
+  target: string;
+  cardinality: "one" | "many";
+  required: boolean;
+  description?: string;
 }
 
 export interface InterfaceType {
@@ -239,7 +377,21 @@ export interface InterfaceType {
   name: string;
   required_properties: string[];
   required_actions: string[];
+  /** Optional typed bindings for required_properties (value_type / shared_property_type). */
+  property_types?: Record<
+    string,
+    | { kind: "value_type"; value_type: string }
+    | { kind: "shared_property_type"; shared_property_type: string }
+  >;
+  /** Abstract link constraints fulfilled by RelationTypes on implementers. */
+  link_constraints?: InterfaceLinkConstraint[];
+  /** Interfaces this one extends (Foundry inheritance). */
+  parent_interfaces?: string[];
   description: string;
+  lifecycle_status?: "experimental" | "active" | "deprecated";
+  deprecation_reason?: string | null;
+  deprecation_deadline?: string | null;
+  replacement_urn?: string | null;
   created_at: string;
 }
 
@@ -248,6 +400,14 @@ export interface Marking {
   name: string;
   description: string;
   created_at: string;
+}
+
+export interface TypeClassCatalogEntry {
+  id: string;
+  kind: string;
+  name: string;
+  applies_to: string;
+  description: string;
 }
 
 export interface ObjectTypeVersion {
@@ -267,6 +427,9 @@ export interface ObjectTypeVersion {
   property_formats: Record<string, PropertyFormatRule>;
   conditional_formats: Record<string, ConditionalFormatRule[]>;
   property_types: Record<string, PropertyTypeRule>;
+  link_constraint_bindings?: Record<string, Record<string, string>>;
+  /** Map interface required props → OT property or struct field path (`address.city`). */
+  interface_property_bindings?: Record<string, Record<string, string>>;
   primary_key?: string;
   title_key?: string | null;
   plural_display_name?: string;
@@ -342,6 +505,8 @@ export interface ActionDefinition {
   // edits, instead of a fixed declaration.
   edit_function?: string | null;
   sections?: ActionParameterSection[];
+  /** Foundry type classes, e.g. `hubble-oe:hide-action`. */
+  type_classes?: string[];
 }
 
 export interface LineageEdge {
@@ -362,6 +527,8 @@ export interface SearchResult {
     text: string;
   }>;
   facets: Record<string, number>;
+  /** Selectable-property histograms when an ObjectType facet is selected. */
+  property_facets?: Record<string, Record<string, number>>;
 }
 
 export interface GlossaryTerm {
@@ -411,6 +578,20 @@ export interface RelationType {
   mid_object_type_urn?: string | null;
   mid_source_property?: string | null;
   mid_target_property?: string | null;
+  source_display_name?: string;
+  source_plural_display_name?: string;
+  source_api_name?: string;
+  source_visibility?: "prominent" | "normal" | "hidden";
+  target_display_name?: string;
+  target_plural_display_name?: string;
+  target_api_name?: string;
+  target_visibility?: "prominent" | "normal" | "hidden";
+  lifecycle_status?: "experimental" | "active" | "deprecated";
+  deprecation_reason?: string | null;
+  deprecation_deadline?: string | null;
+  replacement_urn?: string | null;
+  type_classes?: string[];
+  project_urn?: string | null;
 }
 
 export interface ObjectSet {
@@ -439,12 +620,20 @@ export interface TimelineEvent {
   reverted: boolean;
 }
 
+export interface ObjectListPage {
+  items: Array<Record<string, unknown>>;
+  next_cursor: string | null;
+  page_size: number;
+}
+
 export interface ObjectLinksResponse {
   relation: string;
   direction: "toward_one" | "toward_many" | null;
   cardinality: string;
   storage_kind?: string;
   items: Array<Record<string, unknown>>;
+  next_cursor?: string | null;
+  page_size?: number;
   link_objects?: Array<{ object_type: string | null; object: Record<string, unknown> }>;
 }
 
@@ -461,9 +650,52 @@ export interface DatasetPreviewColumn {
   sample: unknown;
 }
 
+/** Latest version summary from GET /catalog/datasets. */
+export interface CatalogDataset {
+  urn: string;
+  display_name: string;
+  latest_version_urn: string;
+  snapshot_id: number | string;
+  row_count: number;
+  location: string;
+  created_at: string;
+}
+
 export interface HealthCheckFinding {
-  kind: "action_sprawl" | "god_object" | "misnomer_property" | "misnomer_type" | "dry_duplication" | "time_machine";
+  kind:
+    | "action_sprawl"
+    | "god_object"
+    | "misnomer_property"
+    | "misnomer_type"
+    | "dry_duplication"
+    | "time_machine"
+    | "missing_primary_key"
+    | "missing_title_key"
+    | "mn_without_join"
+    | "join_dataset_incomplete"
+    | "object_backed_incomplete"
+    | "link_overlays_present"
+    | "value_type_violation";
   object_type: string;
-  severity: "warning";
+  severity: "warning" | "error";
   detail: string;
+}
+
+export type ActionApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "failed";
+
+/** Knowledge `action_approval` row — snake_case as returned by GET /approvals. */
+export interface ActionApproval {
+  id: number;
+  tenant_id: string;
+  action_name: string;
+  instance_urn: string;
+  requested_by_urn: string;
+  reason: string;
+  status: ActionApprovalStatus;
+  requested_at: string;
+  expires_at: string;
+  decided_by_urn: string | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  parameters?: Record<string, unknown>;
 }

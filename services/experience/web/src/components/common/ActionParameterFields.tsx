@@ -1,13 +1,11 @@
 import { Suspense } from "react";
 import { FormGroup, InputGroup, MenuItem, Spinner, Switch } from "@blueprintjs/core";
 import { Suggest } from "@blueprintjs/select";
-import { useObjects, useValueTypes } from "../../api/hooks";
+import { useEvaluateObjectSet, useObjects, useValueTypes } from "../../api/hooks";
 import type { ActionParameter, ActionParameterSection } from "../../api/knowledge";
+import { prefillActionParameters } from "../ObjectExplorer/actionParameterPrefill";
 import { coerce } from "./actionParameterUtils";
 
-// A short, readable label for a candidate instance in the picker below —
-// its id plus the first of a few common human-readable fields it has, so
-// "12" doesn't stand alone next to a dozen identical-looking rows.
 function instanceLabel(row: Record<string, unknown>): string {
   const id = String(row.id ?? row.Id ?? "");
   for (const key of ["name", "title", "email", "displayName"]) {
@@ -18,15 +16,18 @@ function instanceLabel(row: Record<string, unknown>): string {
 
 function ObjectReferenceFieldInner({
   objectType,
+  objectSet,
   value,
   onChange,
 }: {
   objectType: string;
+  objectSet?: string;
   value: unknown;
-  onChange: (value: unknown) => void;
+  onChange: (value: unknown, row: Record<string, unknown> | null) => void;
 }) {
-  const { data: rows } = useObjects(objectType);
-  const items = rows;
+  const { data: allRows = [] } = useObjects(objectSet ? "" : objectType);
+  const { data: setEval } = useEvaluateObjectSet(objectSet ?? "", !!objectSet);
+  const items = (objectSet ? setEval?.items : allRows) ?? [];
   const selected = items.find((r) => String(r.id) === String(value)) ?? null;
 
   return (
@@ -37,9 +38,9 @@ function ObjectReferenceFieldInner({
         <MenuItem key={String(item.id)} text={instanceLabel(item)} active={modifiers.active} onClick={handleClick} />
       )}
       inputValueRenderer={(item) => instanceLabel(item)}
-      onItemSelect={(item) => onChange(item.id)}
+      onItemSelect={(item) => onChange(item.id, item)}
       selectedItem={selected}
-      noResults={<MenuItem disabled text="No matches" />}
+      noResults={<MenuItem disabled text={objectSet ? `No matches in set ${objectSet}` : "No matches"} />}
       popoverProps={{ minimal: true }}
     />
   );
@@ -47,43 +48,36 @@ function ObjectReferenceFieldInner({
 
 function ObjectReferenceField({
   objectType,
+  objectSet,
   value,
   onChange,
 }: {
   objectType: string;
+  objectSet?: string;
   value: unknown;
-  onChange: (value: unknown) => void;
+  onChange: (value: unknown, row: Record<string, unknown> | null) => void;
 }) {
   return (
     <Suspense fallback={<Spinner size={16} />}>
-      <ObjectReferenceFieldInner objectType={objectType} value={value} onChange={onChange} />
+      <ObjectReferenceFieldInner objectType={objectType} objectSet={objectSet} value={value} onChange={onChange} />
     </Suspense>
   );
 }
 
-// Shared by every declarative Action invocation dialog (`ObjectDetailPage.tsx`,
-// `ObjectAppView.tsx`) — previously neither collected `parameters` at all,
-// so any Action Type with a *required* parameter simply couldn't be
-// invoked from the UI. One input per declared parameter, type-coerced by
-// the referenced Value Type's `base_type` on change (not left as a raw
-// string) so `ontology.validate_value`'s server-side type check doesn't
-// reject a well-formed submission.
-//
-// `sections` (Configure/Sections, optional) is purely a display grouping —
-// `values`/`onChange` stay a flat `Record<string, unknown>` regardless, the
-// same shape submitted whether or not any grouping was ever declared. A
-// parameter not named in any section renders ungrouped, at the top, same
-// as every Action Type had before this existed.
 export function ActionParameterFields({
   parameters,
   values,
   onChange,
   sections,
+  currentObjectId,
+  currentObject,
 }: {
   parameters: ActionParameter[];
   values: Record<string, unknown>;
   onChange: (values: Record<string, unknown>) => void;
   sections?: ActionParameterSection[];
+  currentObjectId?: string | null;
+  currentObject?: Record<string, unknown> | null;
 }) {
   const { data: valueTypes = [] } = useValueTypes();
 
@@ -93,14 +87,34 @@ export function ActionParameterFields({
     onChange({ ...values, [name]: value });
   }
 
+  function setObjectReference(name: string, value: unknown, row: Record<string, unknown> | null) {
+    const base = { ...values, [name]: value };
+    const dependents = prefillActionParameters(parameters, {
+      currentObjectId,
+      currentObject,
+      objectsByParameter: { [name]: row },
+      onlyFromObjectParameter: name,
+    });
+    onChange({ ...base, ...dependents });
+  }
+
   function renderField(p: ActionParameter) {
     const value = values[p.name];
     const label = p.required ? `${p.name} (required)` : p.name;
 
     if (p.kind === "object_reference" && p.object_type) {
       return (
-        <FormGroup key={p.name} label={label}>
-          <ObjectReferenceField objectType={p.object_type} value={value} onChange={(v) => setValue(p.name, v)} />
+        <FormGroup
+          key={p.name}
+          label={label}
+          helperText={p.object_set ? `Filtered by Object Set ${p.object_set}` : undefined}
+        >
+          <ObjectReferenceField
+            objectType={p.object_type}
+            objectSet={p.object_set}
+            value={value}
+            onChange={(v, row) => setObjectReference(p.name, v, row)}
+          />
         </FormGroup>
       );
     }

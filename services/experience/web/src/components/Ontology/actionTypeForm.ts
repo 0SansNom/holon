@@ -20,8 +20,14 @@ export interface ActionTypeFormState {
   editFunctionName: string;
   criteriaJson: string;
   sectionsJson: string;
+  typeClasses: string;
+  lifecycleStatus: string;
+  deprecationReason: string;
+  deprecationDeadline: string;
+  replacementUrn: string;
   functionSideEffect?: string;
   writebackDataset?: string;
+  notifyWebhook?: string;
 }
 
 export const DEFAULT_ACTION_TYPE_FORM: ActionTypeFormState = {
@@ -38,6 +44,14 @@ export const DEFAULT_ACTION_TYPE_FORM: ActionTypeFormState = {
   editFunctionName: "",
   criteriaJson: DEFAULT_CRITERIA,
   sectionsJson: DEFAULT_SECTIONS,
+  typeClasses: "",
+  lifecycleStatus: "experimental",
+  deprecationReason: "",
+  deprecationDeadline: "",
+  replacementUrn: "",
+  functionSideEffect: "",
+  writebackDataset: "",
+  notifyWebhook: "",
 };
 
 export function actionTypeFormFromRecord(at: ActionType): ActionTypeFormState {
@@ -55,8 +69,14 @@ export function actionTypeFormFromRecord(at: ActionType): ActionTypeFormState {
     editFunctionName: at.edit_function ?? "",
     criteriaJson: JSON.stringify(at.submission_criteria ?? [], null, 2),
     sectionsJson: JSON.stringify(at.sections ?? [], null, 2),
-    functionSideEffect: at.function_side_effect ?? undefined,
-    writebackDataset: at.writeback_dataset ?? undefined,
+    typeClasses: (at.type_classes ?? []).join(", "),
+    lifecycleStatus: at.lifecycle_status ?? "experimental",
+    deprecationReason: at.deprecation_reason ?? "",
+    deprecationDeadline: (at.deprecation_deadline ?? "").toString().slice(0, 10),
+    replacementUrn: at.replacement_urn ?? "",
+    functionSideEffect: at.function_side_effect ?? "",
+    writebackDataset: at.writeback_dataset ?? "",
+    notifyWebhook: at.notify_webhook ?? "",
   };
 }
 

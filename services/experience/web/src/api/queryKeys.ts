@@ -6,7 +6,10 @@ export const queryKeys = {
   objectType: (name: string) => ["objectType", name] as const,
   objectTypeVersions: (name: string) => ["objectTypeVersions", name] as const,
   objects: (objectType: string) => ["objects", objectType] as const,
+  objectsPage: (objectType: string, pageSize: number, cursor: string | null) =>
+    ["objectsPage", objectType, pageSize, cursor] as const,
   object: (objectType: string, id: string | number) => ["object", objectType, id] as const,
+  datasets: () => ["datasets"] as const,
   datasetPreview: (datasetName: string) => ["datasetPreview", datasetName] as const,
 
   relationTypes: () => ["relationTypes"] as const,
@@ -14,11 +17,15 @@ export const queryKeys = {
   valueTypes: () => ["valueTypes"] as const,
   sharedPropertyTypes: () => ["sharedPropertyTypes"] as const,
   actionTypes: () => ["actionTypes"] as const,
+  actionTypeObservability: (name: string, days: number) =>
+    ["actionTypeObservability", name, days] as const,
   interfaces: () => ["interfaces"] as const,
+  interfaceObjects: (name: string) => ["interfaceObjects", name] as const,
   markings: () => ["markings"] as const,
   objectTypeGroups: () => ["objectTypeGroups"] as const,
   objectSets: () => ["objectSets"] as const,
   ontologyHealthCheck: () => ["ontologyHealthCheck"] as const,
+  typeClasses: () => ["typeClasses"] as const,
 
   branches: (kind: string, resourceName: string) => ["branches", kind, resourceName] as const,
   branchReviews: (kind: string, resourceName: string, branchName: string) =>
@@ -31,9 +38,25 @@ export const queryKeys = {
   objectLinks: (objectType: string, id: string | number, linkName: string) =>
     ["objectLinks", objectType, id, linkName] as const,
 
-  search: (q: string, objectType?: string, from?: number, size?: number) =>
-    ["search", q, objectType, from, size] as const,
+  search: (
+    q: string,
+    objectType?: string,
+    from?: number,
+    size?: number,
+    propFilters?: Record<string, string>,
+    interfaceName?: string,
+  ) =>
+    [
+      "search",
+      q,
+      objectType,
+      from,
+      size,
+      propFilters ? JSON.stringify(propFilters) : "",
+      interfaceName ?? "",
+    ] as const,
   glossary: () => ["glossary"] as const,
+  approvals: (status?: string) => ["approvals", status ?? "all"] as const,
 
   applications: () => ["applications"] as const,
   application: (name: string) => ["application", name] as const,
@@ -54,6 +77,9 @@ export const queryKeys = {
   sources: () => ["sources"] as const,
   syncs: () => ["syncs"] as const,
   connections: () => ["connections"] as const,
+  pipelines: () => ["pipelines"] as const,
+  pipeline: (name: string) => ["pipeline", name] as const,
+  pipelineRuns: (name: string) => ["pipelineRuns", name] as const,
 
   resourceTags: () => ["resourceTags"] as const,
   tools: () => ["tools"] as const,

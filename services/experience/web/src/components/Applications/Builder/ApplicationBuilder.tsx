@@ -4,7 +4,7 @@ import { arrayMove } from "@dnd-kit/sortable";
 import { Button, Callout } from "@blueprintjs/core";
 import type { ApplicationDefinition, ApplicationSurface } from "../../../api/experience";
 import { isAgentAppSurface, isDashboardSurface, isObjectAppSurface } from "../../../api/experience";
-import type { ObjectType, ActionDefinition } from "../../../api/knowledge";
+import type { ObjectSet, ObjectType, ActionDefinition, RelationType } from "../../../api/knowledge";
 import type { ToolDefinition } from "../../../api/intelligence";
 import { WidgetPalette } from "./WidgetPalette";
 import { ObjectAppSection, type ObjectAppValue } from "./ObjectAppSection";
@@ -18,7 +18,7 @@ interface BuilderState {
 }
 
 const DEFAULT_STATE: BuilderState = {
-  objectApp: { enabled: false, objectType: "", route: "", actions: [] },
+  objectApp: { enabled: false, objectType: "", objectSet: "", route: "", actions: [], links: [] },
   dashboard: { enabled: false, route: "", widgets: [] },
   agentApp: {
     enabled: false,
@@ -45,7 +45,14 @@ function definitionToState(definition: ApplicationDefinition): BuilderState {
 
   return {
     objectApp: objectAppSurface
-      ? { enabled: true, objectType: objectAppSurface.objectType ?? "", route: objectAppSurface.route ?? "", actions: objectAppActions }
+      ? {
+          enabled: true,
+          objectType: objectAppSurface.objectType ?? "",
+          objectSet: objectAppSurface.objectSet ?? "",
+          route: objectAppSurface.route ?? "",
+          actions: objectAppActions,
+          links: objectAppSurface.links ?? [],
+        }
       : DEFAULT_STATE.objectApp,
     dashboard: dashboardSurface
       ? {
@@ -55,6 +62,7 @@ function definitionToState(definition: ApplicationDefinition): BuilderState {
             id: crypto.randomUUID(),
             component: w.component === "kpi" ? "kpi" : "table",
             objectType: w.objectType ?? "",
+            objectSet: w.objectSet ?? "",
             label: w.label ?? "",
           })),
         }
@@ -82,7 +90,13 @@ function stateToDefinition(state: BuilderState, actions: ActionDefinition[], exi
   const actionRefs: ApplicationDefinition["actionRefs"] = [];
 
   if (state.objectApp.enabled && state.objectApp.objectType) {
-    surfaces.push({ type: "objectApp", objectType: state.objectApp.objectType, route: state.objectApp.route || "/apps/app" });
+    surfaces.push({
+      type: "objectApp",
+      objectType: state.objectApp.objectType,
+      ...(state.objectApp.objectSet ? { objectSet: state.objectApp.objectSet } : {}),
+      ...(state.objectApp.links.length > 0 ? { links: state.objectApp.links } : {}),
+      route: state.objectApp.route || "/apps/app",
+    });
     bindings.push(
       { component: "table", objectType: state.objectApp.objectType },
       { component: "detail", objectType: state.objectApp.objectType },
@@ -99,7 +113,12 @@ function stateToDefinition(state: BuilderState, actions: ActionDefinition[], exi
       route: state.dashboard.route || "/apps/app/dashboard",
       widgets: state.dashboard.widgets
         .filter((w) => w.objectType)
-        .map((w) => ({ component: w.component, objectType: w.objectType, label: w.label || w.objectType })),
+        .map((w) => ({
+          component: w.component,
+          objectType: w.objectType,
+          ...(w.objectSet ? { objectSet: w.objectSet } : {}),
+          label: w.label || w.objectSet || w.objectType,
+        })),
     });
   }
 
@@ -123,7 +142,9 @@ function stateToDefinition(state: BuilderState, actions: ActionDefinition[], exi
 export function ApplicationBuilder({
   definition,
   objectTypes,
+  objectSets,
   actions,
+  relationTypes,
   tools,
   onSave,
   saving,
@@ -131,7 +152,9 @@ export function ApplicationBuilder({
 }: {
   definition: ApplicationDefinition;
   objectTypes: ObjectType[];
+  objectSets: ObjectSet[];
   actions: ActionDefinition[];
+  relationTypes: RelationType[];
   tools: ToolDefinition[];
   onSave: (definition: ApplicationDefinition) => void;
   saving: boolean;
@@ -154,7 +177,13 @@ export function ApplicationBuilder({
     if (draggedKind) {
       const widgetIds = state.dashboard.widgets.map((w) => w.id);
       if (over.id === "dashboard-canvas" || widgetIds.includes(over.id as string)) {
-        const newWidget: DashboardWidgetConfig = { id: crypto.randomUUID(), component: draggedKind, objectType: "", label: "" };
+        const newWidget: DashboardWidgetConfig = {
+          id: crypto.randomUUID(),
+          component: draggedKind,
+          objectType: "",
+          objectSet: "",
+          label: "",
+        };
         setState((s) => ({ ...s, dashboard: { ...s.dashboard, enabled: true, widgets: [...s.dashboard.widgets, newWidget] } }));
       }
       return;
@@ -172,8 +201,7 @@ export function ApplicationBuilder({
     <DndContext onDragEnd={handleDragEnd}>
       <p className="hl-ontology-tab-desc hl-mb-sm">
         A visual editor over the same definition the Definition tab edits as raw JSON — enable the surfaces this
-        application needs, drag widgets onto the dashboard canvas, and save. Switch to Definition for full manual
-        control at any time.
+        application needs, drag widgets onto the dashboard canvas, bind Object Sets for filtered views, and save.
       </p>
       {saveError && (
         <Callout intent="danger" className="hl-mb-sm">
@@ -188,12 +216,15 @@ export function ApplicationBuilder({
           <ObjectAppSection
             value={state.objectApp}
             objectTypes={objectTypes}
+            objectSets={objectSets}
             actions={actions}
+            relationTypes={relationTypes}
             onChange={(objectApp) => setState((s) => ({ ...s, objectApp }))}
           />
           <DashboardSection
             value={state.dashboard}
             objectTypes={objectTypes}
+            objectSets={objectSets}
             onChange={(dashboard) => setState((s) => ({ ...s, dashboard }))}
           />
           <AgentAppSection value={state.agentApp} tools={tools} onChange={(agentApp) => setState((s) => ({ ...s, agentApp }))} />
