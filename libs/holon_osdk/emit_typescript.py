@@ -13,7 +13,16 @@ generator's output looks like more of the same, not a second style.
 
 from __future__ import annotations
 
-from .schema import ActionTypeSchema, ObjectTypeSchema, OntologySchema, PropertyType, SharedPropertyType, ValueType
+from .schema import (
+    ActionTypeSchema,
+    InterfaceTypeSchema,
+    ObjectTypeSchema,
+    OntologySchema,
+    PropertyType,
+    RelationTypeSchema,
+    SharedPropertyType,
+    ValueType,
+)
 
 _BASE_TYPE_TO_TS = {
     "string": "string",
@@ -60,8 +69,21 @@ def _ts_type_for(
         return _BASE_TYPE_TO_TS[value_types[prop.value_type].base_type]
     if prop.kind == "shared_property_type":
         # Resolves through to the wrapped Value Type's base type, same
-        # as `emit_python.py`'s `_python_type_for`.
+        # as `emit_python.py`'s `_python_type_for`. Struct-typed SPTs
+        # surface as a Record of field leaves (codegen keeps them flat).
         spt = shared_property_types[prop.shared_property_type]
+        if spt.struct_properties:
+            field_types = []
+            for field_name, leaf in spt.struct_properties.items():
+                leaf_prop = PropertyType(
+                    kind=leaf["kind"],
+                    value_type=leaf.get("value_type"),
+                    shared_property_type=leaf.get("shared_property_type"),
+                )
+                field_types.append(f"{field_name}: {_ts_type_for(leaf_prop, value_types, shared_property_types)}")
+            return "{ " + "; ".join(field_types) + " }"
+        if not spt.value_type:
+            raise ValueError(f"shared property type {spt.api_name!r} has neither value_type nor struct_properties")
         return _BASE_TYPE_TO_TS[value_types[spt.value_type].base_type]
     if prop.kind == "struct":
         return struct_interface_name
@@ -124,24 +146,21 @@ def _emit_object_type(
 
 
 def _emit_action_function(action: ActionTypeSchema) -> str:
-    # Same URL/body asymmetry `emit_python.py` handles — see
-    # `ActionTypeSchema.is_declarative`'s docstring.
-    url_action_name = action.name if action.is_declarative else action.local_name
+    # Every Action Type is declarative — the one generic
+    # `/objects/{object_type}/{id}/actions/{full_name}` route is the only shape.
+    url_action_name = action.name
     # Two different ObjectTypes can both declare an action with the same
     # `local_name` (e.g. "archive") — a bare function name would be a
     # TypeScript compile error (`Cannot redeclare exported variable`),
     # confirmed by actually running `tsc --noEmit` against generated
-    # output. The two hardcoded Actions are globally unique already and
-    # keep their familiar bare name.
-    function_name = action.local_name if not action.is_declarative else f"{action.target_object_type}_{action.local_name}"
+    # output. Namespacing by `target_object_type` keeps every emitted
+    # function name unique.
+    function_name = f"{action.target_object_type}_{action.local_name}"
     typed_params = ", ".join(f"{p.name}: unknown" for p in action.parameters)
     params_object = ", ".join(f"{p.name}" for p in action.parameters)
     signature_tail = f", {typed_params}" if typed_params else ""
-    if action.is_declarative:
-        body_params = f"{{ {params_object} }}" if params_object else "{}"
-        body_literal = f"{{ reason, parameters: {body_params} }}"
-    else:
-        body_literal = "{ reason }"
+    body_params = f"{{ {params_object} }}" if params_object else "{}"
+    body_literal = f"{{ reason, parameters: {body_params} }}"
     return (
         f"/** {action.description} */\n"
         f"export async function {function_name}(\n"
@@ -165,18 +184,177 @@ def _emit_action_function(action: ActionTypeSchema) -> str:
     )
 
 
+def _safe_fn_token(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+
+
+def _emit_link_accessors(relation: RelationTypeSchema, emitted: set[str]) -> str:
+    blocks: list[str] = []
+    fwd = _safe_fn_token(f"{relation.source_object_type}_{relation.source_api_name}")
+    if fwd not in emitted:
+        emitted.add(fwd)
+        blocks.append(
+            f"/** Traverse `{relation.name}` forward ({relation.source_api_name}). */\n"
+            f"export async function get_{fwd}(\n"
+            f"  knowledgeUrl: string, token: string, instanceId: string\n"
+            f"): Promise<Record<string, unknown>> {{\n"
+            f"  const _response = await fetch(\n"
+            f'    `${{knowledgeUrl}}/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
+            f"    {{ headers: {{ Authorization: `Bearer ${{token}}` }} }},\n"
+            f"  );\n"
+            f"  if (!_response.ok) {{\n"
+            f'    throw new Error(`get_{fwd} failed (${{_response.status}}): ${{await _response.text()}}`);\n'
+            f"  }}\n"
+            f"  return _response.json();\n"
+            f"}}\n"
+        )
+    rev = _safe_fn_token(f"{relation.target_object_type}_{relation.target_api_name}")
+    if rev not in emitted:
+        emitted.add(rev)
+        blocks.append(
+            f"/** Traverse `{relation.name}` reverse ({relation.target_api_name}). */\n"
+            f"export async function get_{rev}(\n"
+            f"  knowledgeUrl: string, token: string, instanceId: string\n"
+            f"): Promise<Record<string, unknown>> {{\n"
+            f"  const _response = await fetch(\n"
+            f'    `${{knowledgeUrl}}/objects/{relation.target_object_type}/${{instanceId}}/links/{relation.target_api_name}`,\n'
+            f"    {{ headers: {{ Authorization: `Bearer ${{token}}` }} }},\n"
+            f"  );\n"
+            f"  if (!_response.ok) {{\n"
+            f'    throw new Error(`get_{rev} failed (${{_response.status}}): ${{await _response.text()}}`);\n'
+            f"  }}\n"
+            f"  return _response.json();\n"
+            f"}}\n"
+        )
+    if relation.storage_kind == "foreign_key":
+        link_name = f"link_{fwd}"
+        unlink_name = f"unlink_{fwd}"
+        if link_name not in emitted:
+            emitted.add(link_name)
+            blocks.append(
+                f"/** Link write for `{relation.name}` (sets FK `{relation.source_property}`). */\n"
+                f"export async function {link_name}(\n"
+                f"  knowledgeUrl: string, token: string, instanceId: string, targetId: unknown\n"
+                f"): Promise<Record<string, unknown>> {{\n"
+                f"  const _response = await fetch(\n"
+                f'    `${{knowledgeUrl}}/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
+                f"    {{\n"
+                f'      method: "PUT",\n'
+                f"      headers: {{ \"Content-Type\": \"application/json\", Authorization: `Bearer ${{token}}` }},\n"
+                f"      body: JSON.stringify({{ target_id: targetId }}),\n"
+                f"    }},\n"
+                f"  );\n"
+                f"  if (!_response.ok) {{\n"
+                f'    throw new Error(`{link_name} failed (${{_response.status}}): ${{await _response.text()}}`);\n'
+                f"  }}\n"
+                f"  return _response.json();\n"
+                f"}}\n"
+            )
+        if unlink_name not in emitted:
+            emitted.add(unlink_name)
+            blocks.append(
+                f"/** Unlink for `{relation.name}` (clears FK `{relation.source_property}`). */\n"
+                f"export async function {unlink_name}(\n"
+                f"  knowledgeUrl: string, token: string, instanceId: string\n"
+                f"): Promise<Record<string, unknown>> {{\n"
+                f"  const _response = await fetch(\n"
+                f'    `${{knowledgeUrl}}/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
+                f"    {{\n"
+                f'      method: "DELETE",\n'
+                f"      headers: {{ Authorization: `Bearer ${{token}}` }},\n"
+                f"    }},\n"
+                f"  );\n"
+                f"  if (!_response.ok) {{\n"
+                f'    throw new Error(`{unlink_name} failed (${{_response.status}}): ${{await _response.text()}}`);\n'
+                f"  }}\n"
+                f"  return _response.json();\n"
+                f"}}\n"
+            )
+    return "\n".join(blocks)
+
+
+def _ontology_interface_type_name(name: str, object_type_names: set[str]) -> str:
+    safe = _safe_interface_name(name)
+    if safe in object_type_names or safe in _RESERVED_TS_GLOBALS:
+        return f"{safe}_Interface"
+    return safe
+
+
+def _emit_ontology_interface(
+    iface: InterfaceTypeSchema,
+    value_types: dict[str, ValueType],
+    shared_property_types: dict[str, SharedPropertyType],
+    object_type_names: set[str],
+) -> str:
+    """Typed shape + polymorphic list helper for an Ontology Interface."""
+    type_name = _ontology_interface_type_name(iface.name, object_type_names)
+    field_lines: list[str] = ["  _objectType?: string;"]
+    for prop_name in iface.required_properties:
+        prop = iface.property_types.get(prop_name)
+        if prop is None:
+            field_lines.append(f"  {prop_name}?: unknown;")
+            continue
+        field_lines.append(
+            f"{_field_doc(prop, shared_property_types)}  {prop_name}?: {_ts_type_for(prop, value_types, shared_property_types)};"
+        )
+    body = "\n".join(field_lines)
+    doc_bits = [iface.description] if iface.description else []
+    if iface.parent_interfaces:
+        doc_bits.append(f"extends {', '.join(iface.parent_interfaces)}")
+    doc = f"/** {' — '.join(doc_bits)} */\n" if doc_bits else ""
+    type_block = f"{doc}export interface {type_name} {{\n{body}\n}}\n"
+    fn = _safe_fn_token(f"list_interface_{iface.name}")
+    list_block = (
+        f"/** Polymorphic instances of interface `{iface.name}`. */\n"
+        f"export async function {fn}(\n"
+        f"  knowledgeUrl: string, token: string\n"
+        f"): Promise<{type_name}[]> {{\n"
+        f"  const _response = await fetch(\n"
+        f'    `${{knowledgeUrl}}/interfaces/{iface.name}/objects`,\n'
+        f"    {{ headers: {{ Authorization: `Bearer ${{token}}` }} }},\n"
+        f"  );\n"
+        f"  if (!_response.ok) {{\n"
+        f'    throw new Error(`{fn} failed (${{_response.status}}): ${{await _response.text()}}`);\n'
+        f"  }}\n"
+        f"  return _response.json();\n"
+        f"}}\n"
+    )
+    return type_block + "\n" + list_block
+
+
 def emit_typescript(schema: OntologySchema) -> str:
     header = (
         "/**\n"
         " * Generated by `holon codegen typescript` — do not hand-edit.\n"
         " *\n"
-        " * Typed ObjectType interfaces and Action functions, mirroring the\n"
-        " * live ontology at generation time. Regenerate after any ontology\n"
-        " * change rather than editing this file directly.\n"
+        " * Typed ObjectType interfaces, Ontology Interfaces, Action functions,\n"
+        " * and RelationType link accessors, mirroring the live ontology at\n"
+        " * generation time. Regenerate after any ontology change rather than\n"
+        " * editing this file.\n"
         " */\n\n"
     )
+    object_type_names = {_safe_interface_name(ot.name) for ot in schema.object_types}
     object_type_blocks = "\n\n".join(
         _emit_object_type(ot, schema.value_types, schema.shared_property_types) for ot in schema.object_types
     )
+    interface_blocks = "\n".join(
+        _emit_ontology_interface(
+            iface, schema.value_types, schema.shared_property_types, object_type_names,
+        )
+        for iface in schema.interface_types
+    )
     action_blocks = "\n\n".join(_emit_action_function(action) for action in schema.action_types)
-    return header + object_type_blocks + "\n\n" + action_blocks + "\n"
+    emitted_link_fns: set[str] = set()
+    link_blocks = "\n".join(
+        block
+        for rel in schema.relation_types
+        if (block := _emit_link_accessors(rel, emitted_link_fns))
+    )
+    parts = [header, object_type_blocks]
+    if interface_blocks:
+        parts.extend(["\n\n", interface_blocks])
+    if action_blocks:
+        parts.extend(["\n\n", action_blocks])
+    if link_blocks:
+        parts.extend(["\n\n", link_blocks])
+    return "".join(parts) + "\n"
