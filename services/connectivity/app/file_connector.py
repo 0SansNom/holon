@@ -5,10 +5,9 @@ A batch pull of a static file drop, not a database/API client:
 (already a transitive dependency via `pyiceberg[pyarrow,s3fs]` — no new
 package), then stdlib `csv` parses it. A fourth distinct concurrency
 shape: a synchronous filesystem client, wrapped in `asyncio.to_thread` at
-the call site (see `main.py`'s `DATASET_READERS["suppliers"]`) — contrast
-with `connector.py` (asyncpg, natively async), `mongo_connector.py`
-(pymongo, sync, thread-wrapped), and `rest_connector.py` (httpx, natively
-async).
+the call site (see `plugins/csv_suppliers_plugin.py`) — contrast with
+`connector.py` (asyncpg, natively async), `mongo_connector.py` (pymongo,
+sync, thread-wrapped), and `rest_connector.py` (httpx, natively async).
 """
 
 from __future__ import annotations

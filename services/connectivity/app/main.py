@@ -1,10 +1,10 @@
 """Connectivity Platform — Connector execution and ingestion.
 
-Runs core connectors (PostgreSQL, MongoDB, generic REST, CSV file import,
-continuous Kafka stream), lands each in the Iceberg raw zone, and announces
-every new snapshot on the Platform Event Bus via a transactional outbox.
-Everything downstream — cataloguing, ontology mapping, dashboards —
-reacts to that event.
+Runs registered connectors (developer plugins, generic REST sources,
+continuous Kafka stream when enabled), lands each in the Iceberg raw
+zone, and announces every new snapshot on the Platform Event Bus via a
+transactional outbox. Everything downstream — cataloguing, ontology
+mapping, dashboards — reacts to that event.
 """
 
 from __future__ import annotations
@@ -16,11 +16,12 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import asyncpg
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from holon_common import (
@@ -29,6 +30,7 @@ from holon_common import (
     EventProducer,
     Principal,
     active_jwt,
+    assert_production_posture,
     build_urn,
     configure_json_logging,
     create_pool,
@@ -40,18 +42,16 @@ from holon_common import (
     make_principal_dependency,
     outbox,
     require_tenant_match,
+    run_migrations,
 )
+from holon_common.authz import PermissionClient
 
 from . import (
-    connector,
-    file_connector,
     generic_source_registry,
     iceberg_reader,
     iceberg_writer,
-    mongo_connector,
     pipeline,
     plugin_registry,
-    rest_connector,
     stream_connector,
     write_target_registry,
 )
@@ -64,12 +64,19 @@ TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
-SOURCE_DB_URL = os.environ["HOLON_SOURCE_DB_URL"]
-MONGO_URL = os.environ["HOLON_MONGO_URL"]
-REVIEWS_API_URL = os.environ["HOLON_REVIEWS_API_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 KAFKA_BOOTSTRAP = os.environ["HOLON_KAFKA_BOOTSTRAP"]
-OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
+SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
+SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
+OPA_URL = os.environ["HOLON_OPA_URL"]
+
+
+def _source_db_url() -> str:
+    url = (os.environ.get("HOLON_SOURCE_DB_URL") or "").strip()
+    if not url:
+        raise HTTPException(status_code=503, detail="HOLON_SOURCE_DB_URL is not configured")
+    return url
 
 ICEBERG_CONFIG = dict(
     catalog_uri=os.environ["HOLON_ICEBERG_CATALOG_URI"],
@@ -80,66 +87,15 @@ ICEBERG_CONFIG = dict(
     region=os.environ["AWS_REGION"],
 )
 
-# Distinct connectors registered against this platform —
-# one per source system, not one per dataset.
-CONNECTOR_URN_POSTGRES = build_urn(TENANT_ID, "global", "connector", "postgres-source-erp")
-CONNECTOR_URN_MONGO = build_urn(TENANT_ID, "global", "connector", "mongodb-support-desk")
-CONNECTOR_URN_REST = build_urn(TENANT_ID, "global", "connector", "reviews-rest-api")
-CONNECTOR_URN_FILE = build_urn(TENANT_ID, "global", "connector", "csv-landing-suppliers")
 CONNECTOR_URN_STREAM = build_urn(TENANT_ID, "global", "connector", "inventory-kafka-stream")
-
-# every pipeline run's outputs are attributed to this one
-# synthetic connector — a pipeline transforms already-catalogued data,
-# it isn't itself a new external source system the way the five above are.
 CONNECTOR_URN_PIPELINE = build_urn(TENANT_ID, "global", "connector", "pipeline-transform")
 
-# The streaming connector has no `Principal` to attribute events to —
-# nothing called an API to trigger it — so it acts under its own
-# service-account identity, same pattern as Knowledge's
-# `knowledge-saga-orchestrator` (`actions.py`).
 STREAM_INGEST_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-stream-ingest")
-
-# Same reasoning as `STREAM_INGEST_URN` — the scheduler loop below has no
-# `Principal` of its own (nothing called an API to trigger a scheduled
-# sync), so it acts as its own service-account identity.
 SCHEDULER_ACTOR_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-scheduler")
 SCHEDULER_POLL_SECONDS = 60
 
-# Every dataset this platform can sync, paired with the connector that owns
-# it and a zero-arg async reader — `run_sync` doesn't need to know which
-# driver or connection string each source actually uses.
-DATASET_READERS = {
-    "customers": {
-        "connector_urn": CONNECTOR_URN_POSTGRES,
-        "read": lambda: connector.read_customers(SOURCE_DB_URL),
-    },
-    "orders": {
-        "connector_urn": CONNECTOR_URN_POSTGRES,
-        "read": lambda: connector.read_orders(SOURCE_DB_URL),
-    },
-    "support_tickets": {
-        "connector_urn": CONNECTOR_URN_MONGO,
-        "read": lambda: asyncio.to_thread(mongo_connector.read_support_tickets, MONGO_URL),
-    },
-    "reviews": {
-        "connector_urn": CONNECTOR_URN_REST,
-        "read": lambda: rest_connector.read_reviews(REVIEWS_API_URL),
-    },
-    "suppliers": {
-        "connector_urn": CONNECTOR_URN_FILE,
-        "read": lambda: asyncio.to_thread(
-            file_connector.read_suppliers_csv,
-            s3_endpoint=ICEBERG_CONFIG["s3_endpoint"],
-            access_key=ICEBERG_CONFIG["access_key"],
-            secret_key=ICEBERG_CONFIG["secret_key"],
-            region=ICEBERG_CONFIG["region"],
-        ),
-    },
-}
-
-# Every dataset a core connector owns. A plugin can never register itself
-# against one of these.
-CORE_DATASET_NAMES = frozenset(DATASET_READERS) | {"inventory_levels"}
+# Stream connector owns this dataset name; plugins/sources cannot claim it.
+RESERVED_DATASET_NAMES = frozenset({"inventory_levels"})
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS sync_run (
@@ -155,13 +111,23 @@ CREATE TABLE IF NOT EXISTS sync_run (
     started_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ NOT NULL
 );
+
+-- Cluster-wide flags (quiesce) so multi-replica Connectivity shares state.
+CREATE TABLE IF NOT EXISTS connectivity_runtime (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
+
+# Session-level advisory lock: only one replica runs the scheduler loop work.
+_SCHEDULER_LOCK_KEY = 826_450_001
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
-    app.state.quiesced = False
     async with app.state.pool.acquire() as conn:
         await conn.execute(_DDL)
         await outbox.ensure_schema(conn)
@@ -169,31 +135,42 @@ async def lifespan(app: FastAPI):
         await generic_source_registry.ensure_schema(conn)
         await pipeline.ensure_schema(conn)
         await write_target_registry.ensure_schema(conn)
+        await stream_connector.ensure_schema(conn)
+    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
     await app.state.producer.start()
     relay_task = asyncio.create_task(outbox.relay_forever(app.state.pool, app.state.producer, dlq_producer=app.state.producer))
 
-    stream_task = asyncio.create_task(
-        stream_connector.consume_inventory_stream_forever(
-            kafka_bootstrap=KAFKA_BOOTSTRAP,
-            iceberg_config=ICEBERG_CONFIG,
-            connector_urn=CONNECTOR_URN_STREAM,
-            record_sync=functools.partial(
-                _finalize_sync,
-                actor=EventActor(type="service_account", urn=STREAM_INGEST_URN, on_behalf_of=None),
-            ),
+    # Opt-in continuous ingest (not demo seed). Default off — operators
+    # register batch plugins/sources; enable when inventory Kafka is wired.
+    stream_task: Optional[asyncio.Task] = None
+    if os.environ.get("HOLON_ENABLE_INVENTORY_STREAM", "").lower() in {"1", "true", "yes"}:
+        stream_task = asyncio.create_task(
+            stream_connector.consume_inventory_stream_forever(
+                kafka_bootstrap=KAFKA_BOOTSTRAP,
+                iceberg_config=ICEBERG_CONFIG,
+                connector_urn=CONNECTOR_URN_STREAM,
+                pool=app.state.pool,
+                record_sync=functools.partial(
+                    _finalize_sync,
+                    actor=EventActor(type="service_account", urn=STREAM_INGEST_URN, on_behalf_of=None),
+                ),
+            )
         )
-    )
 
     scheduler_task = asyncio.create_task(run_scheduler_forever(app.state.pool))
 
     yield
 
     scheduler_task.cancel()
-    stream_task.cancel()
+    if stream_task is not None:
+        stream_task.cancel()
     relay_task.cancel()
     await app.state.producer.stop()
+    await app.state.authz.aclose()
     await app.state.pool.close()
 
 
@@ -207,6 +184,11 @@ current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 class SyncRequest(BaseModel):
     dataset: str = "customers"
+    # Target workspace for dataset URNs. Plugins / generic sources use this
+    # (or the source's stored workspace_id) instead of blindly using
+    # HOLON_WORKSPACE_ID — otherwise a filiale tenant writes under the
+    # wrong workspace (ADR 026).
+    workspace_id: Optional[str] = None
 
 
 class SyncResult(BaseModel):
@@ -215,6 +197,31 @@ class SyncResult(BaseModel):
     snapshot_id: int
     row_count: int
     location: str
+
+
+def _resolve_workspace(
+    *,
+    explicit: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    x_holon_workspace_id: Optional[str] = None,
+) -> str:
+    return explicit or workspace_id or x_holon_workspace_id or WORKSPACE_ID
+
+
+def _workspace_urn(tenant_id: str, workspace_id: str) -> str:
+    return build_urn(tenant_id, "global", "workspace", workspace_id)
+
+
+async def _authorize_workspace(
+    principal: Principal, permission: str, *, workspace_id: Optional[str] = None
+) -> None:
+    """Workspace ReBAC gate — same container check Knowledge/Experience use."""
+    urn = _workspace_urn(principal.tenant_id, workspace_id or WORKSPACE_ID)
+    decision = await app.state.authz.authorize(
+        principal, resource_type="workspace", resource_urn=urn, permission=permission
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
 
 
 @app.get("/health")
@@ -230,7 +237,7 @@ async def live() -> dict:
 @app.get("/ready")
 async def ready() -> dict:
     await app.state.pool.fetchval("SELECT 1")
-    return {"status": "ok", "quiesced": bool(getattr(app.state, "quiesced", False))}
+    return {"status": "ok", "quiesced": await _is_quiesced(app.state.pool)}
 
 
 class QuiesceRequest(BaseModel):
@@ -240,12 +247,24 @@ class QuiesceRequest(BaseModel):
 @app.post("/admin/quiesce")
 async def admin_quiesce(body: QuiesceRequest, principal: Principal = Depends(current_principal)) -> dict:
     """Freeze scheduled ingestion for a consistent snapshot (operator
-    backup). Does not stop in-flight HTTP `/sync` — deployer should drain
+    backup). Shared across all Connectivity replicas via Postgres.
+    Does not stop in-flight HTTP `/sync` — deployer should drain
     those separately. See docs/ops/backup-restore.md.
     """
     require_tenant_match(principal, TENANT_ID)  # bootstrap admins only for instance quiesce
-    app.state.quiesced = body.quiesced
-    return {"quiesced": app.state.quiesced}
+    await app.state.pool.execute(
+        """
+        INSERT INTO connectivity_runtime (key, value, updated_at) VALUES ('quiesced', $1, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """,
+        "true" if body.quiesced else "false",
+    )
+    return {"quiesced": body.quiesced}
+
+
+async def _is_quiesced(pool: asyncpg.Pool) -> bool:
+    value = await pool.fetchval("SELECT value FROM connectivity_runtime WHERE key = 'quiesced'")
+    return value == "true"
 
 
 async def _finalize_sync(
@@ -342,33 +361,22 @@ async def _run_sync_for_dataset(
     carrying a status code and message there, caught and logged like any
     other error, never turned into an actual HTTP response.
 
-    Built-in `DATASET_READERS` connectors are bootstrap-tenant demo
-    fixtures (module-level URNs). Per-filiale work uses generic REST /
-    plugins keyed by `tenant_id` (ADR 026).
+    Runtime dispatch: active plugin for this tenant → generic REST source.
+    No privileged in-process dataset map.
     """
-    spec = DATASET_READERS.get(dataset_name)
-    if spec is not None:
-        if tenant_id != TENANT_ID:
-            raise HTTPException(
-                status_code=403,
-                detail="built-in demo connectors are scoped to the bootstrap tenant; "
-                "provision per-filiale sources via /sources",
-            )
-        connector_urn = spec["connector_urn"]
-        read = spec["read"]
+    plugin = await plugin_registry.load_active_plugin_for_dataset(app.state.pool, dataset_name, tenant_id)
+    if plugin is not None:
+        local_name = plugin.manifest.connector_local_name or f"plugin-{plugin.manifest.name}"
+        connector_urn = build_urn(tenant_id, "global", "connector", local_name)
+        read = plugin.fetch
+    elif await generic_source_registry.is_registered(app.state.pool, tenant_id, dataset_name):
+        connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
+        read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
     else:
-        plugin = await plugin_registry.load_active_plugin_for_dataset(app.state.pool, dataset_name)
-        if plugin is not None:
-            connector_urn = build_urn(tenant_id, "global", "connector", f"plugin-{plugin.manifest.name}")
-            read = plugin.fetch
-        elif await generic_source_registry.is_registered(app.state.pool, tenant_id, dataset_name):
-            connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
-            read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
-        else:
-            source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
-            if source is not None:
-                raise HTTPException(status_code=409, detail=f"source {dataset_name!r} is disabled — enable it first")
-            raise HTTPException(status_code=404, detail=f"unknown dataset: {dataset_name}")
+        source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
+        if source is not None:
+            raise HTTPException(status_code=409, detail=f"source {dataset_name!r} is disabled — enable it first")
+        raise HTTPException(status_code=404, detail=f"unknown dataset: {dataset_name}")
 
     started_at = datetime.now(timezone.utc)
     try:
@@ -397,12 +405,33 @@ async def _run_sync_for_dataset(
 
 
 @app.post("/sync", response_model=SyncResult)
-async def run_sync(request: SyncRequest = SyncRequest(), principal: Principal = Depends(current_principal)) -> SyncResult:
-    if request.dataset in DATASET_READERS:
-        require_tenant_match(principal, TENANT_ID)
+async def run_sync(
+    request: SyncRequest = SyncRequest(),
+    principal: Principal = Depends(current_principal),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    x_holon_workspace_id: Optional[str] = Header(None, alias="X-Holon-Workspace-Id"),
+) -> SyncResult:
+    target_workspace = _resolve_workspace(
+        explicit=request.workspace_id,
+        workspace_id=workspace_id,
+        x_holon_workspace_id=x_holon_workspace_id,
+    )
+    source = await generic_source_registry.get_source(app.state.pool, principal.tenant_id, request.dataset)
+    if source is not None and source.get("workspace_id"):
+        stored = source["workspace_id"]
+        if request.workspace_id and request.workspace_id != stored:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"source {request.dataset!r} is bound to workspace {stored!r}; "
+                    f"got {request.workspace_id!r}"
+                ),
+            )
+        target_workspace = stored
+    await _authorize_workspace(principal, "write", workspace_id=target_workspace)
     actor = EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of)
     return await _run_sync_for_dataset(
-        request.dataset, actor=actor, tenant_id=principal.tenant_id, workspace_id=WORKSPACE_ID
+        request.dataset, actor=actor, tenant_id=principal.tenant_id, workspace_id=target_workspace
     )
 
 
@@ -412,52 +441,55 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
     the exact same path `/sync` uses, does the actual work, so a
     scheduled sync is indistinguishable downstream from a manual one.
 
-    "Due" is computed against `sync_run.finished_at` (already recorded by
-    every sync regardless of trigger), not a second last-run column on
-    the source itself — one source of truth for "when did this last
-    actually sync", never two that could drift apart.
-
-    One source failing (bad URL, source now down) is logged and skipped,
-    never allowed to stop the loop or block any other source's turn —
-    the same resilience `catalog.consume_events` already applies to a
-    poison event.
+    Multi-replica safe: each poll tries `pg_try_advisory_lock` so only one
+    Connectivity pod runs due-source work per tick. Quiesce is read from
+    `connectivity_runtime` (shared), not process memory.
     """
     actor = EventActor(type="service_account", urn=SCHEDULER_ACTOR_URN, on_behalf_of=None)
     while True:
         try:
-            if getattr(app.state, "quiesced", False):
-                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
-                continue
-            sources = await generic_source_registry.list_all_scheduled_sources(pool)
-            for source in sources:
-                dataset_name = source["name"]
-                tenant_id = source["tenant_id"]
-                interval = timedelta(minutes=source["schedule_interval_minutes"])
-                dataset_urn = build_urn(tenant_id, WORKSPACE_ID, "dataset", dataset_name)
-                last_finished_at = await pool.fetchval(
-                    "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
-                    "ORDER BY finished_at DESC LIMIT 1",
-                    tenant_id, dataset_urn,
-                )
-                due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
-                if not due:
+            async with pool.acquire() as conn:
+                got_lock = await conn.fetchval("SELECT pg_try_advisory_lock($1)", _SCHEDULER_LOCK_KEY)
+                if not got_lock:
+                    await asyncio.sleep(SCHEDULER_POLL_SECONDS)
                     continue
                 try:
-                    result = await _run_sync_for_dataset(
-                        dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=WORKSPACE_ID
-                    )
-                    logger.info(
-                        "scheduled sync completed for %r (tenant=%s): %d rows",
-                        dataset_name,
-                        tenant_id,
-                        result.row_count,
-                    )
-                except Exception:
-                    logger.exception(
-                        "scheduled sync failed for %r (tenant=%s) — will retry next poll",
-                        dataset_name,
-                        tenant_id,
-                    )
+                    if await _is_quiesced(pool):
+                        await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                        continue
+                    sources = await generic_source_registry.list_all_scheduled_sources(pool)
+                    for source in sources:
+                        dataset_name = source["name"]
+                        tenant_id = source["tenant_id"]
+                        workspace_id = source.get("workspace_id") or WORKSPACE_ID
+                        interval = timedelta(minutes=source["schedule_interval_minutes"])
+                        dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
+                        last_finished_at = await pool.fetchval(
+                            "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
+                            "ORDER BY finished_at DESC LIMIT 1",
+                            tenant_id, dataset_urn,
+                        )
+                        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
+                        if not due:
+                            continue
+                        try:
+                            result = await _run_sync_for_dataset(
+                                dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=workspace_id
+                            )
+                            logger.info(
+                                "scheduled sync completed for %r (tenant=%s): %d rows",
+                                dataset_name,
+                                tenant_id,
+                                result.row_count,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "scheduled sync failed for %r (tenant=%s) — will retry next poll",
+                                dataset_name,
+                                tenant_id,
+                            )
+                finally:
+                    await conn.fetchval("SELECT pg_advisory_unlock($1)", _SCHEDULER_LOCK_KEY)
         except Exception:
             logger.exception("scheduler loop iteration failed — will retry")
         await asyncio.sleep(SCHEDULER_POLL_SECONDS)
@@ -465,6 +497,7 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
 
 @app.get("/syncs")
 async def list_syncs(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     rows = await app.state.pool.fetch(
         "SELECT * FROM sync_run WHERE tenant_id = $1 ORDER BY id DESC", principal.tenant_id
     )
@@ -493,8 +526,8 @@ def _function_invocation_token() -> str:
 
 async def _latest_dataset_version_urn(dataset_name: str) -> Optional[str]:
     """Connectivity's own `sync_run` bookkeeping already records every
-    dataset this platform has ever produced — core connector, registered
-    plugin, or an earlier pipeline step's own output, since
+    dataset this platform has ever produced — registered plugin,
+    generic source, or an earlier pipeline step's own output, since
     `_finalize_sync` writes one row regardless of source. No cross-service
     call to Knowledge's catalog needed: this platform is the one thing
     that's authoritative on "what did I just produce."
@@ -512,6 +545,9 @@ class TransformStep(BaseModel):
     input_dataset: str
     function_name: str
     output_dataset: str
+    # Foundry Pipeline Builder "logical type cast" — column → Value Type name.
+    # Validated via Knowledge POST /value-types/validate-casts before write.
+    value_type_casts: Optional[dict[str, str]] = None
 
 
 class CreatePipelineRequest(BaseModel):
@@ -522,6 +558,7 @@ class CreatePipelineRequest(BaseModel):
 async def create_pipeline(
     name: str, request: CreatePipelineRequest, principal: Principal = Depends(current_principal)
 ) -> dict:
+    await _authorize_workspace(principal, "write")
     try:
         return await pipeline.create_pipeline(
             app.state.pool,
@@ -535,30 +572,45 @@ async def create_pipeline(
 
 @app.get("/pipelines")
 async def list_pipelines(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     return await pipeline.list_pipelines(app.state.pool, principal.tenant_id)
 
 
 @app.get("/pipelines/{name}")
 async def get_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
     definition = await pipeline.get_pipeline(app.state.pool, name)
     if definition is None:
         raise HTTPException(status_code=404, detail=f"unknown pipeline: {name}")
     return definition
 
 
+@app.delete("/pipelines/{name}")
+async def delete_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    deleted = await pipeline.delete_pipeline(
+        app.state.pool, tenant_id=principal.tenant_id, name=name
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"unknown pipeline: {name}")
+    return {"deleted": name}
+
+
 @app.get("/pipelines/{name}/runs")
 async def list_pipeline_runs(name: str, principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     return await pipeline.list_runs(app.state.pool, principal.tenant_id, name)
 
 
 @app.post("/pipelines/{name}/run")
 async def run_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     """Drives a `PipelineDefinition`'s steps strictly in the order
     declared (see `pipeline.py`'s module docstring for the DAG-shape
     scope note): read the input Iceberg table, invoke the named Function
     over every row via Knowledge's `POST /functions/{name}/invoke`, write
     the result as a new snapshot, then finalize through the *same*
-    `_finalize_sync` every core connector's `/sync` already uses — so
+    `_finalize_sync` every connector's `/sync` already uses — so
     Catalog picks each step's output up through the existing,
     unmodified `connectivity.sync.completed` consumer, with real
     dataset -> dataset lineage via `source_dataset_version_urn`.
@@ -586,6 +638,23 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
                 )
             response.raise_for_status()
             output_rows = response.json()["rows"]
+
+            casts = step.get("value_type_casts") or {}
+            if casts:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    cast_response = await client.post(
+                        f"{KNOWLEDGE_URL}/value-types/validate-casts",
+                        json={"casts": casts, "rows": output_rows},
+                        headers={"Authorization": f"Bearer {_function_invocation_token()}"},
+                    )
+                cast_response.raise_for_status()
+                cast_result = cast_response.json()
+                if not cast_result.get("ok", False):
+                    sample = cast_result.get("errors") or []
+                    raise ValueError(
+                        f"step {step['step_name']!r} value_type_casts failed "
+                        f"({cast_result.get('error_count', len(sample))} errors): {sample[:3]}"
+                    )
 
             write_result = await asyncio.to_thread(
                 iceberg_writer.write_snapshot, output_rows, step["output_dataset"], **ICEBERG_CONFIG
@@ -634,12 +703,16 @@ class RegisterPluginRequest(BaseModel):
 
 @app.post("/plugins")
 async def register_plugin(body: RegisterPluginRequest, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     """Registers (or re-registers) a Connector plugin by its dynamically-importable
     entry point. See `plugin_registry.py`'s module docstring for details.
     """
     try:
         return await plugin_registry.register_plugin(
-            app.state.pool, entry_point=body.entry_point, core_dataset_names=CORE_DATASET_NAMES
+            app.state.pool,
+            entry_point=body.entry_point,
+            tenant_id=principal.tenant_id,
+            reserved_dataset_names=RESERVED_DATASET_NAMES,
         )
     except plugin_registry.PluginConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -651,6 +724,7 @@ def _plugin_not_found(name: str) -> HTTPException:
 
 @app.get("/plugins/{name}")
 async def get_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
     registration = await plugin_registry.get_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _plugin_not_found(name)
@@ -659,6 +733,7 @@ async def get_plugin(name: str, principal: Principal = Depends(current_principal
 
 @app.post("/plugins/{name}/disable")
 async def disable_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     """Deactivatable without redeploy: `run_sync`'s fallback path
     checks `status = 'active'` on every call, so this takes effect on the
     very next sync attempt, not after a restart.
@@ -671,6 +746,7 @@ async def disable_plugin(name: str, principal: Principal = Depends(current_princ
 
 @app.post("/plugins/{name}/enable")
 async def enable_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     registration = await plugin_registry.get_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _plugin_not_found(name)
@@ -690,6 +766,7 @@ class RegisterConnectionRequest(BaseModel):
 
 @app.post("/connections")
 async def register_connection(body: RegisterConnectionRequest, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     """Reusable auth for the no-code connector: configure a credential
     once, point as many sources at it as needed, instead of re-pasting
     the same secret into every one. Same authentication tier as
@@ -708,11 +785,13 @@ async def register_connection(body: RegisterConnectionRequest, principal: Princi
 
 @app.get("/connections")
 async def list_connections(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     return await generic_source_registry.list_connections(app.state.pool, principal.tenant_id)
 
 
 @app.delete("/connections/{name}")
 async def delete_connection(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     if await generic_source_registry.get_connection(app.state.pool, principal.tenant_id, name) is None:
         raise HTTPException(status_code=404, detail=f"no connection registered as {name!r}")
     try:
@@ -725,6 +804,7 @@ async def delete_connection(name: str, principal: Principal = Depends(current_pr
 class RegisterSourceRequest(BaseModel):
     name: str
     base_url: str
+    workspace_id: Optional[str] = None
     auth_header_name: Optional[str] = None
     auth_header_value: Optional[str] = None
     record_path: Optional[str] = None
@@ -736,12 +816,23 @@ class RegisterSourceRequest(BaseModel):
 
 
 @app.post("/sources")
-async def register_source(body: RegisterSourceRequest, principal: Principal = Depends(current_principal)) -> dict:
+async def register_source(
+    body: RegisterSourceRequest,
+    principal: Principal = Depends(current_principal),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    x_holon_workspace_id: Optional[str] = Header(None, alias="X-Holon-Workspace-Id"),
+) -> dict:
     """The no-code connector: register a REST API by URL alone, no Python
     to write or deploy. Same authentication tier as `/plugins` (any
     authenticated principal) — registering a data source is exactly the
     same class of action as registering a plugin, just without the code.
     """
+    target_workspace = _resolve_workspace(
+        explicit=body.workspace_id,
+        workspace_id=workspace_id,
+        x_holon_workspace_id=x_holon_workspace_id,
+    )
+    await _authorize_workspace(principal, "write", workspace_id=target_workspace)
     try:
         return await generic_source_registry.register_source(
             app.state.pool,
@@ -749,6 +840,7 @@ async def register_source(body: RegisterSourceRequest, principal: Principal = De
             name=body.name,
             base_url=body.base_url,
             created_by_urn=principal.urn,
+            workspace_id=target_workspace,
             auth_header_name=body.auth_header_name,
             auth_header_value=body.auth_header_value,
             record_path=body.record_path,
@@ -757,7 +849,7 @@ async def register_source(body: RegisterSourceRequest, principal: Principal = De
             schedule_interval_minutes=body.schedule_interval_minutes,
             cursor_property=body.cursor_property,
             incremental_param=body.incremental_param,
-            core_dataset_names=CORE_DATASET_NAMES,
+            reserved_dataset_names=RESERVED_DATASET_NAMES,
         )
     except generic_source_registry.SourceConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -767,6 +859,7 @@ async def register_source(body: RegisterSourceRequest, principal: Principal = De
 
 @app.get("/sources")
 async def list_sources(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     return await generic_source_registry.list_sources(app.state.pool, principal.tenant_id)
 
 
@@ -776,6 +869,7 @@ def _source_not_found(name: str) -> HTTPException:
 
 @app.post("/sources/{name}/disable")
 async def disable_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     """Pauses without losing configuration: `run_sync`'s dispatch only
     matches an `active` row, so this takes effect on the very next sync
     attempt, same as `/plugins/{name}/disable`.
@@ -788,6 +882,7 @@ async def disable_source(name: str, principal: Principal = Depends(current_princ
 
 @app.post("/sources/{name}/enable")
 async def enable_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     source = await generic_source_registry.get_source(app.state.pool, principal.tenant_id, name)
     if source is None:
         raise _source_not_found(name)
@@ -796,6 +891,7 @@ async def enable_source(name: str, principal: Principal = Depends(current_princi
 
 @app.delete("/sources/{name}")
 async def delete_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
     source = await generic_source_registry.get_source(app.state.pool, principal.tenant_id, name)
     if source is None:
         raise _source_not_found(name)
@@ -841,10 +937,11 @@ async def close_source_customer_account(
     real failure mode.
     """
     _require_workflow_engine(principal)
+    await _authorize_workspace(principal, "write")
     if request.reason == CLOSE_ACCOUNT_FAILURE_SENTINEL:
         raise HTTPException(status_code=500, detail="simulated downstream failure")
 
-    conn = await asyncpg.connect(SOURCE_DB_URL)
+    conn = await asyncpg.connect(_source_db_url())
     try:
         row = await conn.fetchrow(
             "UPDATE customers SET account_closed = true WHERE id = $1 RETURNING id, account_closed",
@@ -860,7 +957,8 @@ async def close_source_customer_account(
 
 @app.get("/source/customers/{customer_id}")
 async def get_source_customer(customer_id: int, principal: Principal = Depends(current_principal)) -> dict:
-    conn = await asyncpg.connect(SOURCE_DB_URL)
+    await _authorize_workspace(principal, "read")
+    conn = await asyncpg.connect(_source_db_url())
     try:
         row = await conn.fetchrow("SELECT id, account_closed FROM customers WHERE id = $1", customer_id)
     finally:
@@ -889,6 +987,7 @@ async def register_write_target(
     Automation's Workflow Engine by `POST /source/{dataset_name}
     /{instance_id}/write` below).
     """
+    await _authorize_workspace(principal, "write")
     try:
         return await write_target_registry.register_write_target(
             app.state.pool,
@@ -905,11 +1004,13 @@ async def register_write_target(
 
 @app.get("/write-targets")
 async def list_write_targets(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     return await write_target_registry.list_write_targets(app.state.pool, principal.tenant_id)
 
 
 @app.get("/write-targets/{dataset_name}")
 async def get_write_target(dataset_name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
     target = await write_target_registry.get_write_target(app.state.pool, principal.tenant_id, dataset_name)
     if target is None:
         raise HTTPException(status_code=404, detail=f"no write target registered for dataset {dataset_name!r}")
@@ -931,9 +1032,10 @@ async def write_source(
     connector's own sync path or a direct client call.
     """
     _require_workflow_engine(principal)
+    await _authorize_workspace(principal, "write")
     try:
         return await write_target_registry.apply_write(
-            app.state.pool, SOURCE_DB_URL,
+            app.state.pool, _source_db_url(),
             tenant_id=principal.tenant_id, dataset_name=dataset_name, instance_id=instance_id, edits=request.edits,
         )
     except write_target_registry.UnknownWriteTargetError as exc:

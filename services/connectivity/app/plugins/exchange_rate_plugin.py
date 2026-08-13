@@ -1,13 +1,13 @@
 """An example third-party-style Connector plugin, proving
 connectors are executed without modifying core dispatch logic: this file is the *entire* amount of
 code Connectivity's own dispatch path (`main.py`'s `run_sync`) needed to
-gain a sixth data source — nothing in `main.py` or `plugin_registry.py`
+gain another data source — nothing in `main.py` or `plugin_registry.py`
 was written with "exchange rates" in mind. Deliberately lives in its own
-`plugins/` package, organizationally separate from the five hand-written
-core connectors (`connector.py`, `mongo_connector.py`, etc.) even though
-it ships in the same container image for this build's scope — a real
-third-party deployment would load this from an independently-versioned
-package instead, out of scope here.
+`plugins/` package, organizationally separate from the example demo
+plugins and the underlying readers (`connector.py`, `mongo_connector.py`,
+etc.) even though it ships in the same container image for this build's
+scope — a real third-party deployment would load this from an
+independently-versioned package instead, out of scope here.
 
 Fetches from the same tiny static file server this build already uses
 for the REST connector (`reviews-api`) — a second JSON file, no new

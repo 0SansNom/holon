@@ -1,10 +1,9 @@
 """Generic REST source registry — the no-code connector: a non-technical
 admin registers a new data source by filling in a URL and an optional
 auth header, entirely as data (one row in Postgres), with zero Python to
-write or deploy. `main.py`'s `run_sync` dispatch checks this registry as
-a third tier, after `DATASET_READERS` (hardcoded core connectors) and
-`plugin_registry` (developer-authored Python plugins) — the same
-zero-arg-async-reader shape all three already share, so `_finalize_sync`
+write or deploy. `main.py`'s `run_sync` dispatch checks this registry
+after `plugin_registry` (developer-authored plugins registered via API) — the
+same zero-arg-async-reader shape both share, so `_finalize_sync`
 downstream needs no changes at all.
 
 Deliberately narrower than a real ConnectorPlugin: one HTTP GET per page,
@@ -100,13 +99,18 @@ ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS schedule_interval_minut
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS cursor_property TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS incremental_param TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS last_cursor_value TEXT;
+
+-- Workspace the source lands datasets into (ADR 026 multi-tenant). NULL
+-- means "use caller/env default at sync time" for rows created before this
+-- column existed; new registrations always store an explicit workspace_id.
+ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS workspace_id TEXT;
 """
 
 # Columns safe to hand back to a caller — never auth_header_value itself,
 # only whether one is set, so an edit form can say "leave blank to keep
 # the existing value" instead of implying there's nothing there yet.
 _PUBLIC_COLUMNS = (
-    "tenant_id, name, base_url, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
+    "tenant_id, name, workspace_id, base_url, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
     "record_path, next_page_path, connection_name, schedule_interval_minutes, "
     "cursor_property, incremental_param, last_cursor_value, status, created_by_urn, created_at"
 )
@@ -227,6 +231,7 @@ async def register_source(
     name: str,
     base_url: str,
     created_by_urn: str,
+    workspace_id: str,
     auth_header_name: Optional[str] = None,
     auth_header_value: Optional[str] = None,
     record_path: Optional[str] = None,
@@ -235,13 +240,13 @@ async def register_source(
     schedule_interval_minutes: Optional[int] = None,
     cursor_property: Optional[str] = None,
     incremental_param: Optional[str] = None,
-    core_dataset_names: frozenset[str],
+    reserved_dataset_names: frozenset[str] = frozenset({"inventory_levels"}),
 ) -> dict:
     """Same dataset-ownership guard `plugin_registry.register_plugin`
-    already enforces (a name can't shadow a core connector or an active
-    plugin), checked here too since this registry is a third, equally
-    real claimant on the same `dataset` namespace `run_sync` dispatches
-    over.
+    already enforces (a name can't shadow a reserved stream dataset or an
+    active plugin visible to this tenant), checked here too since this
+    registry is an equally real claimant on the same `dataset` namespace
+    `run_sync` dispatches over.
 
     `connection_name` and inline `auth_header_name`/`auth_header_value`
     are mutually exclusive — a source's credential lives in exactly one
@@ -258,11 +263,18 @@ async def register_source(
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
-    if name in core_dataset_names:
-        raise SourceConflictError(f"dataset {name!r} is already owned by a core connector")
+    if name in reserved_dataset_names:
+        raise SourceConflictError(f"dataset {name!r} is reserved")
 
     conflicting_plugin = await pool.fetchval(
-        "SELECT name FROM plugin_registration WHERE manifest->>'dataset_name' = $1 AND status = 'active'", name
+        """
+        SELECT name FROM plugin_registration
+        WHERE manifest->>'dataset_name' = $1
+          AND status = 'active'
+          AND (tenant_id IS NULL OR tenant_id = $2)
+        """,
+        name,
+        tenant_id,
     )
     if conflicting_plugin is not None:
         raise SourceConflictError(f"dataset {name!r} is already claimed by active plugin {conflicting_plugin!r}")
@@ -270,10 +282,11 @@ async def register_source(
     await pool.execute(
         """
         INSERT INTO generic_rest_source
-            (tenant_id, name, base_url, auth_header_name, auth_header_value, record_path, next_page_path,
+            (tenant_id, name, workspace_id, base_url, auth_header_name, auth_header_value, record_path, next_page_path,
              connection_name, schedule_interval_minutes, cursor_property, incremental_param, status, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
+            workspace_id = EXCLUDED.workspace_id,
             base_url = EXCLUDED.base_url,
             auth_header_name = EXCLUDED.auth_header_name,
             -- Never echoed back to a client (see `_PUBLIC_COLUMNS`), so an
@@ -291,7 +304,7 @@ async def register_source(
             -- re-submitting the edit form must never reset it to NULL.
             status = 'active'
         """,
-        tenant_id, name, base_url, auth_header_name, auth_header_value, record_path, next_page_path,
+        tenant_id, name, workspace_id, base_url, auth_header_name, auth_header_value, record_path, next_page_path,
         connection_name, schedule_interval_minutes, cursor_property, incremental_param, created_by_urn,
     )
     return await get_source(pool, tenant_id, name)
@@ -312,7 +325,7 @@ async def list_scheduled_sources(pool: asyncpg.Pool, tenant_id: str) -> list[dic
 async def list_all_scheduled_sources(pool: asyncpg.Pool) -> list[dict]:
     """Active scheduled sources across every tenant (scheduler loop)."""
     rows = await pool.fetch(
-        "SELECT tenant_id, name, schedule_interval_minutes FROM generic_rest_source "
+        "SELECT tenant_id, name, workspace_id, schedule_interval_minutes FROM generic_rest_source "
         "WHERE status = 'active' AND schedule_interval_minutes IS NOT NULL"
     )
     return [dict(row) for row in rows]

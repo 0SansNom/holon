@@ -118,31 +118,21 @@ async def apply_write(
         raise UnknownWriteTargetError(f"no write target registered for dataset {dataset_name!r}")
 
     unknown = set(edits) - set(target["allowed_properties"])
-    if unknown:
+    # Knowledge-side-only properties (e.g. account_closed_reason) may ride
+    # along on the event payload — drop them rather than rejecting the write.
+    filtered = {k: v for k, v in edits.items() if k in target["allowed_properties"]}
+    if not filtered:
         raise WriteTargetConfigError(
-            f"propert{'y' if len(unknown) == 1 else 'ies'} not allow-listed for {dataset_name!r}: {sorted(unknown)}"
+            f"no allow-listed edits to apply for {dataset_name!r}"
+            + (f" (dropped: {sorted(unknown)})" if unknown else "")
         )
-    if not edits:
-        raise WriteTargetConfigError("no edits to apply")
+    edits = filtered
 
-    # `table_name`/`id_column`/`columns` are interpolated directly (asyncpg
-    # has no parameter-binding for identifiers) — safe here specifically
-    # because they only ever come from `write_target`, a governance-gated
-    # registry (`register_write_target` requires the same admin-tier
-    # authorization every other ontology-write endpoint does), never from
-    # this call's own caller-supplied `edits`. Every actual *value* is
-    # still bound as a real parameter below.
     columns = [target["allowed_properties"][name] for name in edits]
     values = list(edits.values())
     set_clause = ", ".join(f"{col} = ${i + 1}" for i, col in enumerate(columns))
     id_placeholder = len(values) + 1
 
-    # `instance_id` always arrives as a string (a URL path segment, all
-    # the way from the Action's own instance URN), but asyncpg refuses to
-    # bind a Python `str` against an `INTEGER` id column (no implicit
-    # cast) — every numeric-keyed write target would 500 without this.
-    # Same try-int-else-string coercion `resolver.fetch_generic`'s
-    # `id_value` already uses for exactly this reason.
     try:
         typed_instance_id: object = int(instance_id)
     except ValueError:
