@@ -44,6 +44,31 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: HOLON_DB_URL
               value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ $.Values.external.postgresHost }}:5432/holon_{{ $name }}"
+            {{- if $.Values.holonEnv }}
+            - name: HOLON_ENV
+              value: {{ $.Values.holonEnv | quote }}
+            {{- end }}
+            {{- if eq $name "identity" }}
+            - name: HOLON_ALLOW_USER_JWT_MINT
+              value: "true"
+            - name: HOLON_MINTABLE_PRINCIPAL_URNS
+              value: ""
+            {{- else if eq $name "connectivity" }}
+            - name: HOLON_MINTABLE_PRINCIPAL_URNS
+              value: "connectivity-pipeline-runner"
+            {{- else if eq $name "knowledge" }}
+            - name: HOLON_MINTABLE_PRINCIPAL_URNS
+              value: "knowledge-project-validator,knowledge-model-caller"
+            {{- else if eq $name "automation" }}
+            - name: HOLON_MINTABLE_PRINCIPAL_URNS
+              value: "automation-workflow-engine,ingest-bot"
+            {{- else if eq $name "intelligence" }}
+            - name: HOLON_MINTABLE_PRINCIPAL_URNS
+              value: "intelligence-indexer,ingest-bot"
+            {{- else if eq $name "experience" }}
+            - name: HOLON_MINTABLE_PRINCIPAL_URNS
+              value: "ingest-bot"
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /ready

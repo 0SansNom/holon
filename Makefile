@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down build up down logs ps seed demo test clean
+.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test clean sync-spicedb-schema check-spicedb-schema
 
 COMPOSE := docker compose
 
@@ -26,11 +26,21 @@ logs:
 ps:
 	$(COMPOSE) ps
 
+# Raw rows into the external source_erp DB (integration tests / local connectors).
+# Platform principals/plugins/ObjectTypes are never auto-seeded — see
+# `make provision-test-fixtures` for CI only.
 seed:
 	$(COMPOSE) exec -T postgres psql -U holon -d source_erp < seed/source_erp.sql
 
-demo: up
-	python3 scripts/demo.py
+# CI / pytest fixtures via public APIs. Not a product feature.
+provision-test-fixtures:
+	python3 scripts/provision_test_fixtures.py
+
+sync-spicedb-schema:
+	./scripts/sync_spicedb_schema.sh --sync
+
+check-spicedb-schema:
+	./scripts/sync_spicedb_schema.sh --check
 
 test:
 	pip3 install -q -r tests/requirements.txt

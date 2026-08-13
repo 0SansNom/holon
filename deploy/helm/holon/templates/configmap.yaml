@@ -5,6 +5,9 @@ metadata:
 data:
   HOLON_TENANT_ID: {{ .Values.bootstrap.tenantId | quote }}
   HOLON_WORKSPACE_ID: {{ .Values.bootstrap.workspaceId | quote }}
+  {{- if .Values.holonEnv }}
+  HOLON_ENV: {{ .Values.holonEnv | quote }}
+  {{- end }}
   HOLON_SECRET_BACKEND: {{ .Values.secretBackend | quote }}
   HOLON_KAFKA_BOOTSTRAP: {{ .Values.external.kafkaBootstrap | quote }}
   HOLON_SPICEDB_URL: {{ .Values.external.spicedbUrl | quote }}
@@ -23,10 +26,17 @@ data:
   HOLON_KNOWLEDGE_URL: "http://holon-knowledge:{{ .Values.services.knowledge.port }}"
   HOLON_AUTOMATION_URL: "http://holon-automation:{{ .Values.services.automation.port }}"
   HOLON_INTELLIGENCE_URL: "http://holon-intelligence:{{ .Values.services.intelligence.port }}"
-  # Walking-skeleton demo connectors — see values.yaml's `demo` comment.
-  HOLON_SOURCE_DB_URL: {{ .Values.demo.sourceDbUrl | quote }}
-  HOLON_MONGO_URL: {{ .Values.demo.mongoUrl | quote }}
-  HOLON_REVIEWS_API_URL: {{ .Values.demo.reviewsApiUrl | quote }}
+  # Optional connector backend URLs — set connectorBackends.* only when you
+  # register matching plugins via POST /plugins. Omit in production.
+  {{- if .Values.connectorBackends.sourceDbUrl }}
+  HOLON_SOURCE_DB_URL: {{ .Values.connectorBackends.sourceDbUrl | quote }}
+  {{- end }}
+  {{- if .Values.connectorBackends.mongoUrl }}
+  HOLON_MONGO_URL: {{ .Values.connectorBackends.mongoUrl | quote }}
+  {{- end }}
+  {{- if .Values.connectorBackends.reviewsApiUrl }}
+  HOLON_REVIEWS_API_URL: {{ .Values.connectorBackends.reviewsApiUrl | quote }}
+  {{- end }}
   {{- if .Values.oidc.enabled }}
   HOLON_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
   HOLON_OIDC_CLIENT_ID: {{ .Values.oidc.clientId | quote }}
@@ -37,3 +47,10 @@ data:
   HOLON_OIDC_WORKSPACE_GROUP_PREFIX: {{ .Values.oidc.workspaceGroupPrefix | default "workspace:" | quote }}
   {{- end }}
   HOLON_SPICEDB_SCHEMA_PATH: {{ .Values.external.spicedbSchemaPath | default "/app/spicedb-schema.zed" | quote }}
+  HOLON_ALLOW_DEV_LOGIN: {{ .Values.allowDevLogin | default true | quote }}
+  HOLON_INTELLIGENCE_ENABLED: {{ .Values.intelligenceEnabled | default true | quote }}
+  HOLON_LLM_PROVIDER: {{ .Values.llmProvider | default "anthropic" | quote }}
+  HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: {{ .Values.servingStoreRequireMaterialized | default false | quote }}
+  {{- if .Values.corsOrigins }}
+  HOLON_CORS_ORIGINS: {{ .Values.corsOrigins | quote }}
+  {{- end }}

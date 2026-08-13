@@ -20,21 +20,16 @@ external:
   qdrantUrl: http://qdrant.example.svc:6333
   otlpEndpoint: http://otel-collector.example.svc:4318
 
-# Connectivity's bundled walking-skeleton demo connectors (source_erp/support-desk
-# Mongo/reviews API) — required at boot (bare `os.environ[...]`, no fallback in
-# app code today), even though a real deployer has no interest in them. Point
-# these at anything reachable-or-not; the pod boots either way, only the demo
-# connector's own sync calls would fail if left unreachable. Tracked as an
-# app-side gap (these should become optional/lazy like the weather feed
-# plugin's own env var already is) — not fixable from the chart alone.
-demo:
-  sourceDbUrl: "postgresql://unset:unset@unset.invalid:5432/source_erp"
-  mongoUrl: "mongodb://unset:unset@unset.invalid:27017"
-  reviewsApiUrl: "http://unset.invalid"
+# Optional connector backend URLs. Leave empty unless you register plugins
+# that read these env vars (HOLON_SOURCE_DB_URL / HOLON_MONGO_URL / …).
+connectorBackends:
+  sourceDbUrl: ""
+  mongoUrl: ""
+  reviewsApiUrl: ""
 
 bootstrap:
   tenantId: acme
-  workspaceId: demo
+  workspaceId: main
 
 secretBackend: kubernetes
 # Must include at least:
@@ -56,11 +51,42 @@ oidc:
   tenantGroupPrefix: "tenant:"
   workspaceGroupPrefix: "workspace:"
 
+# Front door (optional). Prefer values-production.yaml for real hosts.
+ingress:
+  enabled: false
+  className: ""
+  host: holon.example.com
+  tlsSecretName: ""
+  annotations: {}
+
+networkPolicy:
+  enabled: false
+  metricsNamespace: monitoring
+  # CIDRs for Postgres / Kafka / S3 / SpiceDB / OpenSearch / OTLP.
+  # Empty → allow public (non-RFC1918) egress so local overlays boot.
+  dataPlaneCidrs: []
+  intelligence:
+    # Anthropic / Voyage HTTPS. Prefer concrete provider CIDRs in prod.
+    allowPublicHttps: true
+    llmEgressCidrs: []
+
+# Comma-separated SPA origins. Empty → app default (localhost only).
+corsOrigins: ""
+
+# Production posture flags (override in values-production.yaml).
+# holonEnv empty = not production (compose/local DX). Set to "production" in prod.
+holonEnv: ""
+allowDevLogin: true
+intelligenceEnabled: true
+llmProvider: anthropic
+servingStoreRequireMaterialized: false
+
 services:
   identity:
     replicas: 2
     port: 8001
   connectivity:
+    # Multi-replica OK: scheduler uses Postgres advisory lock; quiesce is shared.
     replicas: 2
     port: 8002
   knowledge:
