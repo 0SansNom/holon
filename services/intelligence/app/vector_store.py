@@ -5,8 +5,10 @@ Indexed here: ObjectType/Action definitions (their descriptions) and
 glossary terms (with synonyms) — pulled from Knowledge's own **HTTP**
 API, never its database directly, keeping the same platform boundary
 every other cross-service interaction in this build already respects.
-All three source endpoints (`/ontology/{name}`, `/actions`, `/glossary`)
-are auth-only in Knowledge, so a bare service-account JWT is enough.
+All three source endpoints (`/ontology`, `/actions`, `/glossary`) are
+auth-only in Knowledge, so a bare service-account JWT is enough.
+`/ontology` lists whatever ObjectTypes currently exist — self-serve,
+no fixed type list to keep in sync.
 
 Deliberately *not* indexing instance-level free text (e.g. ProductReview
 comments) in this round: doing so correctly would need the indexer to
@@ -31,8 +33,6 @@ logger = logging.getLogger("intelligence.vector_store")
 
 COLLECTION_NAME = "holon_semantic_index"
 
-_OBJECT_TYPES = ["Customer", "Order", "SupportTicket", "ProductReview", "Supplier", "InventoryLevel"]
-
 
 async def ensure_collection(client: AsyncQdrantClient, dimension: int) -> None:
     collections = await client.get_collections()
@@ -53,16 +53,15 @@ async def index_metadata(
     documents: list[dict] = []
 
     async with httpx.AsyncClient(timeout=30.0) as http:
-        for object_type in _OBJECT_TYPES:
-            response = await http.get(f"{knowledge_url}/ontology/{object_type}", headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        response = await http.get(f"{knowledge_url}/ontology", headers=headers)
+        response.raise_for_status()
+        for data in response.json():
             documents.append(
                 {
-                    "text": f"{object_type}: {data['description']}",
+                    "text": f"{data['name']}: {data['description']}",
                     "source": "object_type",
                     "urn": data["urn"],
-                    "object_type": object_type,
+                    "object_type": data["name"],
                 }
             )
 
