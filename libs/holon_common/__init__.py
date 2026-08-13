@@ -18,7 +18,13 @@ from .auth import (
     require_urn_tenant_match,
     set_session_cookie,
 )
+from .security_posture import (
+    ProductionSecurityError,
+    assert_production_posture,
+    is_production,
+)
 from .db import create_pool
+from .migrations import run_migrations
 from .errors import install_error_handlers
 from .observability import (
     CircuitBreaker,
@@ -55,8 +61,12 @@ __all__ = [
     "require_urn_tenant_match",
     "set_session_cookie",
     "clear_session_cookie",
+    "ProductionSecurityError",
+    "assert_production_posture",
+    "is_production",
     "PermissionClient",
     "create_pool",
+    "run_migrations",
     "install_error_handlers",
     "CircuitBreaker",
     "CircuitBreakerOpenError",

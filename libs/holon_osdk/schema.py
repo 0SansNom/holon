@@ -40,7 +40,8 @@ class SharedPropertyType:
     api_name: str
     display_name: str
     description: str
-    value_type: str  # names a ValueType, resolved the same way a direct "value_type" leaf is
+    value_type: Optional[str] = None  # VT-wrapped SPT; null when struct-typed
+    struct_properties: Optional[dict] = None  # Foundry-style struct SPT field map
 
 
 @dataclass
@@ -82,16 +83,32 @@ class ActionTypeSchema:
     target_object_type: str
     description: str
     parameters: list[ActionParameter]
-    # A real asymmetry in the live API, not a generator quirk: the two
-    # hardcoded Customer Actions are only ever reachable at
-    # `/objects/Customer/{id}/actions/{local_name}` (their own specific
-    # route, registered ahead of the generic one specifically so it
-    # wins — see `routers/objects.py`'s module docstring); every
-    # declarative Action Type instead goes through the one generic
-    # `/objects/{object_type}/{id}/actions/{full_name}` route, which
-    # requires the *full* dotted name. Both emitters need to know which
-    # URL shape to generate per action.
-    is_declarative: bool
+
+
+@dataclass
+class RelationTypeSchema:
+    """Foundry Link Type — bidirectional accessor names + storage kind."""
+
+    name: str
+    source_object_type: str
+    target_object_type: str
+    source_api_name: str
+    target_api_name: str
+    cardinality: str
+    storage_kind: str
+    source_property: str
+
+
+@dataclass
+class InterfaceTypeSchema:
+    """Ontology Interface — checked polymorphic contract."""
+
+    name: str
+    description: str
+    required_properties: list[str]
+    required_actions: list[str]
+    parent_interfaces: list[str] = field(default_factory=list)
+    property_types: dict[str, PropertyType] = field(default_factory=dict)
 
 
 @dataclass
@@ -100,6 +117,8 @@ class OntologySchema:
     value_types: dict[str, ValueType]
     shared_property_types: dict[str, SharedPropertyType]
     action_types: list[ActionTypeSchema]
+    relation_types: list[RelationTypeSchema] = field(default_factory=list)
+    interface_types: list[InterfaceTypeSchema] = field(default_factory=list)
 
 
 def _parse_property_type(raw: dict) -> PropertyType:
@@ -163,8 +182,11 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         raise RuntimeError(f"GET /shared-property-types failed ({status}): {shared_property_type_rows}")
     shared_property_types = {
         row["api_name"]: SharedPropertyType(
-            api_name=row["api_name"], display_name=row["display_name"],
-            description=row.get("description", ""), value_type=row["value_type"],
+            api_name=row["api_name"],
+            display_name=row["display_name"],
+            description=row.get("description", ""),
+            value_type=row.get("value_type"),
+            struct_properties=row.get("struct_properties"),
         )
         for row in shared_property_type_rows
     }
@@ -177,11 +199,6 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         status, detail = client.request("GET", f"{knowledge_url}/actions/{row['name']}", token=token)
         if status != 200:
             continue
-        # A hardcoded Action's adapted shape (`actions._get_action_definition`)
-        # never has a `parameters` key at all — only a declarative Action
-        # Type's registry row does (empty list included). Presence, not
-        # value, is the real signal.
-        is_declarative = "parameters" in detail
         parameters = [
             ActionParameter(
                 name=p["name"], required=p.get("required", True), kind=p.get("kind", "value_type"),
@@ -192,10 +209,54 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         local_name = detail["name"].split(".", 1)[-1] if "." in detail["name"] else detail["name"]
         action_types.append(ActionTypeSchema(
             name=detail["name"], local_name=local_name, target_object_type=detail["target_object_type"],
-            description=detail["description"], parameters=parameters, is_declarative=is_declarative,
+            description=detail["description"], parameters=parameters,
         ))
+
+    status, relation_rows = client.request("GET", f"{knowledge_url}/relation-types", token=token)
+    if status != 200:
+        raise RuntimeError(f"GET /relation-types failed ({status}): {relation_rows}")
+    relation_types: list[RelationTypeSchema] = []
+    for row in relation_rows:
+        source_ot = str(row["source_object_type_urn"]).rsplit(":", 1)[-1]
+        target_ot = str(row["target_object_type_urn"]).rsplit(":", 1)[-1]
+        local = row["name"].split(".", 1)[-1]
+        relation_types.append(
+            RelationTypeSchema(
+                name=row["name"],
+                source_object_type=source_ot,
+                target_object_type=target_ot,
+                source_api_name=(row.get("source_api_name") or "").strip() or local,
+                target_api_name=(row.get("target_api_name") or "").strip() or row.get("target_property") or local,
+                cardinality=row.get("cardinality") or "many_to_one",
+                storage_kind=row.get("storage_kind") or "foreign_key",
+                source_property=row.get("source_property") or "",
+            )
+        )
+
+    status, interface_rows = client.request("GET", f"{knowledge_url}/interfaces", token=token)
+    if status != 200:
+        raise RuntimeError(f"GET /interfaces failed ({status}): {interface_rows}")
+    interface_types: list[InterfaceTypeSchema] = []
+    for row in interface_rows:
+        property_types = {
+            k: _parse_property_type(v)
+            for k, v in (row.get("property_types") or {}).items()
+            if isinstance(v, dict) and v.get("kind") is not None
+        }
+        interface_types.append(
+            InterfaceTypeSchema(
+                name=row["name"],
+                description=row.get("description") or "",
+                required_properties=list(row.get("required_properties") or []),
+                required_actions=list(row.get("required_actions") or []),
+                parent_interfaces=list(row.get("parent_interfaces") or []),
+                property_types=property_types,
+            )
+        )
 
     return OntologySchema(
         object_types=object_types, value_types=value_types,
         shared_property_types=shared_property_types, action_types=action_types,
+        relation_types=relation_types,
+        interface_types=interface_types,
     )

@@ -37,6 +37,9 @@ class PluginManifest(BaseModel):
 
     # Connector-specific (services/connectivity/app/plugin_registry.py)
     dataset_name: Optional[str] = None
+    # Stable connector URN local-name (e.g. postgres-source-erp). When unset,
+    # Connectivity falls back to `plugin-{manifest.name}`.
+    connector_local_name: Optional[str] = None
 
     # Agent-tool-specific (services/intelligence/app/tool_plugin_registry.py)
     tool_name: Optional[str] = None

@@ -346,7 +346,8 @@ class PermissionClient:
 
 
 def _object_id(urn: str) -> str:
-    """SpiceDB object IDs disallow ':' — URNs use it freely. A plain,
-    deterministic swap keeps the mapping obvious without adding a lookup table.
+    """SpiceDB object IDs disallow ':' and '.' — URNs use both freely
+    (e.g. RelationType `Order.customer`). A plain, deterministic swap
+    keeps the mapping obvious without adding a lookup table.
     """
-    return urn.replace(":", "_")
+    return urn.replace(":", "_").replace(".", "_")

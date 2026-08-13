@@ -64,6 +64,14 @@ def active_jwt() -> tuple[str, str, dict[str, str]]:
     return secrets[active], active, secrets
 
 
+def _principal_mint_allowed(urn: str, allowed: set[str]) -> bool:
+    """True if `urn` is allowlisted by full URN or local-name suffix after last `:`."""
+    if urn in allowed:
+        return True
+    local = urn.rsplit(":", 1)[-1] if urn else ""
+    return bool(local) and local in allowed
+
+
 def issue_token(
     principal: Principal,
     secret: str,
@@ -71,10 +79,60 @@ def issue_token(
     *,
     kid: Optional[str] = None,
     secrets: Optional[dict[str, str]] = None,
+    allow_user: bool = False,
 ) -> str:
     """`secret` is the signing key. When `secrets`+`kid` are provided
     (rotation), the kid is stamped into the JWT header.
+
+    Non-Identity services must mint only service_account/agent tokens
+    (`allow_user=False`, the default). User session tokens are Identity's
+    (and Experience self-refresh) job — holding HOLON_JWT_SECRET alone
+    must not let a compromised pod impersonate arbitrary humans.
+
+    Production also requires `HOLON_ALLOW_USER_JWT_MINT` for user mints and
+    `HOLON_MINTABLE_PRINCIPAL_URNS` for SA/agent mints (see SECURITY.md).
     """
+    from .security_posture import is_production
+
+    if principal.type == "user" and not allow_user:
+        # Escape hatch for local unit tests that mint users without Identity.
+        if os.environ.get("HOLON_ALLOW_LOCAL_USER_MINT", "").lower() in {"1", "true", "yes"}:
+            pass
+        else:
+            raise ValueError(
+                "refusing to mint a user JWT outside Identity — pass allow_user=True "
+                "only from Identity/Experience session paths"
+            )
+    if principal.type == "user" and allow_user and is_production():
+        if os.environ.get("HOLON_ALLOW_USER_JWT_MINT", "").strip().lower() not in {"1", "true", "yes"}:
+            raise ValueError(
+                "refusing to mint a user JWT in production — set HOLON_ALLOW_USER_JWT_MINT=true "
+                "only on Identity"
+            )
+    if principal.type != "user":
+        # Identity is the issuer of record after client_secret checks on /token —
+        # it may mint any authenticated SA/agent. Non-Identity services are
+        # constrained to HOLON_MINTABLE_PRINCIPAL_URNS so a compromised pod
+        # cannot mint arbitrary service identities.
+        identity_issuer = os.environ.get("HOLON_ALLOW_USER_JWT_MINT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not identity_issuer:
+            mintable_raw = os.environ.get("HOLON_MINTABLE_PRINCIPAL_URNS")
+            if mintable_raw is not None:
+                allowed = {p.strip() for p in mintable_raw.split(",") if p.strip()}
+                if not _principal_mint_allowed(principal.urn, allowed):
+                    raise ValueError(
+                        f"refusing to mint JWT for {principal.urn!r} — not in HOLON_MINTABLE_PRINCIPAL_URNS"
+                    )
+            elif is_production():
+                raise ValueError(
+                    "refusing to mint service_account/agent JWT in production — "
+                    "set HOLON_MINTABLE_PRINCIPAL_URNS (comma-separated URNs or local names; "
+                    "empty string if this service never mints SAs)"
+                )
     now = int(time.time())
     payload = {
         "sub": principal.urn,
