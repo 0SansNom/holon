@@ -1,0 +1,119 @@
+name: llm-nightly
+
+# Real Anthropic/Voyage spend — never on PR. Requires repo secrets
+# ANTHROPIC_API_KEY (+ optional VOYAGE_API_KEY). Skips cleanly when unset.
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC
+  workflow_dispatch:
+
+jobs:
+  llm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require Anthropic secret
+        id: keys
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ] || [ "$ANTHROPIC_API_KEY" = "change-me" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "ANTHROPIC_API_KEY not configured — skipping llm nightly"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.keys.outputs.present == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Create .env
+        if: steps.keys.outputs.present == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+        run: |
+          sed -e 's/=change-me$/=ci-only-not-a-secret/' \
+              -e 's/^OPENSEARCH_ADMIN_PASSWORD=.*/OPENSEARCH_ADMIN_PASSWORD=Holon-CiOnly-Not-A-Secret-2026!/' \
+              -e 's/^HOLON_JWT_SECRET=.*/HOLON_JWT_SECRET=dev-only-walking-skeleton-secret/' \
+              .env.example > .env
+          echo "HOLON_INTELLIGENCE_RUNTIME=runc" >> .env
+          echo "HOLON_LLM_PROVIDER=anthropic" >> .env
+          echo "HOLON_INTELLIGENCE_ENABLED=true" >> .env
+          echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> .env
+          if [ -n "${VOYAGE_API_KEY}" ]; then
+            echo "VOYAGE_API_KEY=${VOYAGE_API_KEY}" >> .env
+          else
+            echo "HOLON_EMBEDDING_PROVIDER=local" >> .env
+          fi
+          grep '^POSTGRES_PASSWORD=' .env >> "$GITHUB_ENV"
+          grep '^OPENSEARCH_ADMIN_PASSWORD=' .env >> "$GITHUB_ENV"
+          echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+          if [ -n "${VOYAGE_API_KEY}" ]; then
+            echo "VOYAGE_API_KEY=${VOYAGE_API_KEY}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the frontend
+        if: steps.keys.outputs.present == 'true'
+        run: |
+          cd services/experience/web
+          npm ci
+          npm run build
+
+      - name: Start the stack
+        if: steps.keys.outputs.present == 'true'
+        run: make up
+
+      - name: Wait for platforms
+        if: steps.keys.outputs.present == 'true'
+        run: |
+          for i in $(seq 1 90); do
+            all_ok=true
+            for port in 8001 8002 8003 8004 8005 8006; do
+              curl -sf -m 2 "http://localhost:${port}/health" > /dev/null || all_ok=false
+            done
+            [ "$all_ok" = "true" ] && break
+            sleep 3
+          done
+          for port in 8001 8002 8003 8004 8005 8006; do
+            curl -sf -m 2 "http://localhost:${port}/health" > /dev/null \
+              || { docker compose logs; exit 1; }
+          done
+
+      - name: Provision fixtures + seed + sync
+        if: steps.keys.outputs.present == 'true'
+        run: |
+          make provision-test-fixtures
+          make seed
+          TOKEN=$(curl -sf -X POST http://localhost:8001/token -H "Content-Type: application/json" \
+            -d '{"principal_urn":"hl:acme:global:user:jdoe","client_secret":"jdoe-dev-secret"}' \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          for dataset in customers orders support_tickets reviews suppliers; do
+            RESULT=$(curl -sf -X POST http://localhost:8002/sync -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" -d "{\"dataset\": \"$dataset\"}")
+            DATASET_URN=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['dataset_urn'])")
+            SNAPSHOT_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['snapshot_id'])")
+            for i in $(seq 1 30); do
+              MATCH=$(curl -sf "http://localhost:8003/catalog/datasets" -H "Authorization: Bearer $TOKEN" \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if any(x['urn']=='$DATASET_URN' and str(x['snapshot_id'])=='$SNAPSHOT_ID' for x in d) else 'no')")
+              [ "$MATCH" = "yes" ] && break
+              sleep 2
+            done
+          done
+
+      - name: Run llm-marked tests
+        if: steps.keys.outputs.present == 'true'
+        run: |
+          pip3 install -q -r tests/requirements.txt
+          python3 -m pytest -m llm -q tests
+
+      - name: Skip notice
+        if: steps.keys.outputs.present != 'true'
+        run: echo "Skipped — configure repository secret ANTHROPIC_API_KEY to enable."

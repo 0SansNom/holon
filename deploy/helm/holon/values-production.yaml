@@ -1,0 +1,66 @@
+# Production-oriented overlay — copy and fill; do not commit real secrets.
+# Usage:
+#   helm upgrade --install holon deploy/helm/holon -n holon --create-namespace \
+#     -f deploy/helm/holon/values.yaml \
+#     -f deploy/helm/holon/values-production.yaml \
+#     --set image.tag=vX.Y.Z \
+#     --set ingress.host=holon.example.com \
+#     --set corsOrigins=https://holon.example.com
+#
+# Put HOLON_METRICS_TOKEN in existingSecret (not this file).
+
+image:
+  tag: "REPLACE_WITH_RELEASE_TAG" # never deploy `latest` to prod
+  pullPolicy: IfNotPresent
+
+bootstrap:
+  tenantId: acme
+  workspaceId: main
+
+allowDevLogin: false
+intelligenceEnabled: false
+llmProvider: fake
+servingStoreRequireMaterialized: true
+holonEnv: production
+
+# No connector backend env URLs unless you register matching plugins.
+connectorBackends:
+  sourceDbUrl: ""
+  mongoUrl: ""
+  reviewsApiUrl: ""
+# corsOrigins: "https://holon.example.com"  # required for browser clients
+
+oidc:
+  enabled: true
+  # issuer / clientId / redirectUri — set per environment
+
+ingress:
+  enabled: true
+  className: ""
+  host: holon.example.com
+  tlsSecretName: "" # optional; set for TLS
+
+networkPolicy:
+  enabled: true
+  metricsNamespace: monitoring
+  # Replace with your SI CIDRs (Postgres, Kafka, S3, SpiceDB, …).
+  dataPlaneCidrs: []
+  intelligence:
+    allowPublicHttps: true
+    # Optional: pin Anthropic/Voyage egress to known CIDRs and set
+    # allowPublicHttps: false.
+    llmEgressCidrs: []
+
+services:
+  connectivity:
+    replicas: 2
+  knowledge:
+    replicas: 2
+  identity:
+    replicas: 2
+  experience:
+    replicas: 2
+  automation:
+    replicas: 2
+  intelligence:
+    replicas: 2

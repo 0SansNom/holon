@@ -57,6 +57,43 @@ definition object_type {
     permission approve = parent_workspace->approve + parent_project->approve
 }
 
+// Shared Property Type — Foundry-parity resource ACL. Permissions cascade
+// from the owning workspace and an optional project pin (same parent_workspace
+// + parent_project union as object_type). Mutate paths authorize against this
+// URN after create seeds `parent_workspace`.
+definition shared_property_type {
+    relation parent_workspace: workspace
+    relation parent_project: project
+
+    permission read = parent_workspace->read + parent_project->read
+    permission write = parent_workspace->write + parent_project->write
+    permission approve = parent_workspace->approve + parent_project->approve
+}
+
+// Value Type — Foundry space/project import parity. Same parent_workspace /
+// parent_project union as shared_property_type. Create seeds parent_workspace;
+// optional project pin imports the VT into a project scope.
+definition value_type {
+    relation parent_workspace: workspace
+    relation parent_project: project
+
+    permission read = parent_workspace->read + parent_project->read
+    permission write = parent_workspace->write + parent_project->write
+    permission approve = parent_workspace->approve + parent_project->approve
+}
+
+// RelationType (Foundry Link Type) — same parent_workspace / parent_project
+// union as shared_property_type. Create seeds parent_workspace; optional
+// project pin adds a narrower access path without revoking workspace-wide.
+definition relation_type {
+    relation parent_workspace: workspace
+    relation parent_project: project
+
+    permission read = parent_workspace->read + parent_project->read
+    permission write = parent_workspace->write + parent_project->write
+    permission approve = parent_workspace->approve + parent_project->approve
+}
+
 // Application — same parent_workspace/parent_project union `object_type`
 // already has (added so Applications can be scoped into a Project too,
 // same "pin in project" prerequisite). Originally added workspace-only,

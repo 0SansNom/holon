@@ -10,11 +10,10 @@ to cover every endpoint this build now has (Markings, Analytics's
 group_by/join, execution replay, and more all stay API-only), the same
 "minimal" scope the plan itself calls for.
 
-Standard library only, matching `scripts/demo.py`'s own convention —
-runs with any Python 3.9+, no extra install. Talks to the same fixed
-localhost dev ports every other client in this build already uses
+Standard library only — any Python 3.9+, no extra install. Talks to the same fixed
+localhost ports every other client in this build already uses
 (this project's own test suite, the web SPA's `api/config.ts`) — no
-env-var indirection for a single-tenant dev deployment, overridable via
+env-var indirection for a single-tenant local deployment, overridable via
 HOLON_CLI_*_URL only if you genuinely need to point elsewhere.
 
 Session state (a bearer token, minted by `holon login`) is cached in
