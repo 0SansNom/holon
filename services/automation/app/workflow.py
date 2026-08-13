@@ -8,17 +8,16 @@ each step's actual business mutation still lives in its owning service
 
 Scoping:
 
-- **Workflow**: `WORKFLOW_DEFINITIONS` below — one workflow, one step,
-  not a general multi-step DAG compiler.
+- **Workflow**: any approved Action whose event carries `edits` and whose
+  Action Type declares a `writeback_dataset` — looked up via Knowledge
+  `GET /actions/{name}` at trigger time.
 - **Trigger**: `consume_events`'s filter is the trigger — "this event starts this workflow".
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -30,7 +29,6 @@ from holon_common import (
     EventActor,
     EventConsumer,
     EventEnvelope,
-    EventProducer,
     Principal,
     active_jwt,
     build_urn,
@@ -41,6 +39,9 @@ from holon_common import (
 logger = logging.getLogger("automation.workflow")
 
 _TIMEOUT_SECONDS = 10.0
+
+# Documented test-only failure hook (mirrors Connectivity's close-account sentinel).
+WRITEBACK_FAILURE_SENTINEL = "__simulate_failure__"
 
 
 def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> str:
@@ -53,10 +54,6 @@ def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> st
     except RuntimeError:
         return issue_token(principal, jwt_secret, ttl_seconds=ttl_seconds)
 
-
-# The Workflow resource — one entry, matching the one Action in this
-# build whose approval needs an external step.
-WORKFLOW_DEFINITIONS = {"Customer.closeAccount": {"target_service": "connectivity"}}
 
 WORKFLOW_ENGINE_URN_NAME = "automation-workflow-engine"
 
@@ -92,42 +89,11 @@ async def get_workflow_execution(pool: asyncpg.Pool, approval_id: int) -> Option
     return dict(row) if row else None
 
 
-async def _notify_source_system(
-    client: httpx.AsyncClient,
-    breaker: CircuitBreaker,
-    *,
-    tenant_id: str,
-    customer_id: int,
-    reason: str,
-    connectivity_url: str,
-    jwt_secret: str,
-) -> None:
-    token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
-
-    async def _do() -> httpx.Response:
-        response = await client.post(
-            f"{connectivity_url}/source/customers/{customer_id}/close-account",
-            json={"reason": reason},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        response.raise_for_status()
-        return response
-
-    await breaker.call(_do)
-
-
 async def _fetch_writeback_dataset(
     client: httpx.AsyncClient, *, tenant_id: str, action_name: str, knowledge_url: str, jwt_secret: str
 ) -> Optional[str]:
-    """The generic counterpart to `WORKFLOW_DEFINITIONS`'s static
-    membership check — a declarative Action Type names its writeback
-    target by `dataset_name` (`ontology/action_types.py`'s
-    `writeback_dataset` column), read here via the same already-public
-    `GET /actions/{name}` every other Action-metadata reader uses
-    (`actions.py`'s `_get_action_definition` is what actually resolves
-    it server-side) rather than duplicating a second registry here the
-    way `WORKFLOW_DEFINITIONS` itself already duplicates Knowledge's
-    `WORKFLOW_DELEGATED_ACTIONS`.
+    """Look up a declarative Action Type's `writeback_dataset` via the same
+    already-public `GET /actions/{name}` every other Action-metadata reader uses.
     """
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
     response = await client.get(f"{knowledge_url}/actions/{action_name}", headers={"Authorization": f"Bearer {token}"})
@@ -146,13 +112,8 @@ async def _notify_generic_write_target(
     connectivity_url: str,
     jwt_secret: str,
 ) -> None:
-    """The generic counterpart to `_notify_source_system` — any
-    declarative Action Type with a `writeback_dataset` goes through
-    Connectivity's one generic `POST /source/{dataset_name}/{instance_id}
-    /write` instead of a bespoke per-action endpoint. `edits` is exactly
-    the `{property: value}` dict Knowledge's `approve_action` published
-    on the triggering event — this function never needs to know what
-    the properties *mean*, only to forward them.
+    """Any Action Type with a `writeback_dataset` goes through Connectivity's
+    generic `POST /source/{dataset_name}/{instance_id}/write`.
     """
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
@@ -178,10 +139,8 @@ async def _request_compensation(
     knowledge_url: str,
     jwt_secret: str,
 ) -> None:
-    """Automation can't touch Knowledge's own tables directly (separate
-    database, separate service) — compensating Step 1 is Knowledge's own
-    concern (it reverts *its* overlay), so Automation just tells it to,
-    the same way it tells Connectivity to apply Step 2.
+    """Automation can't touch Knowledge's own tables directly — compensating
+    Step 1 is Knowledge's own concern, so Automation just tells it to.
     """
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
@@ -226,39 +185,30 @@ async def _run_workflow(
     approval_id: int,
     action_name: str,
     instance_urn: str,
-    customer_id: Optional[int] = None,
     reason: str = "",
-    dataset_name: Optional[str] = None,
-    instance_id: Optional[str] = None,
+    dataset_name: str,
+    instance_id: str,
     edits: Optional[dict] = None,
     connectivity_url: str,
     knowledge_url: str,
     jwt_secret: str,
 ) -> None:
-    """`dataset_name`/`instance_id`/`edits` are only ever set by
-    `consume_events`'s declarative-writeback branch — the pre-existing
-    `Customer.closeAccount` call site keeps passing `customer_id`/`reason`
-    exactly as before, so `dataset_name is None` below resolves to the
-    original hardcoded call unchanged.
-    """
     execution_id = await pool.fetchval(
         "INSERT INTO workflow_execution (tenant_id, approval_id, action_name, status) VALUES ($1, $2, $3, 'running') RETURNING id",
         tenant_id, approval_id, action_name,
     )
 
     try:
-        if dataset_name is not None:
-            await _notify_generic_write_target(
-                client, connectivity_breaker,
-                tenant_id=tenant_id, dataset_name=dataset_name, instance_id=instance_id, edits=edits or {},
-                connectivity_url=connectivity_url, jwt_secret=jwt_secret,
-            )
-        else:
-            await _notify_source_system(
-                client, connectivity_breaker,
-                tenant_id=tenant_id, customer_id=customer_id, reason=reason,
-                connectivity_url=connectivity_url, jwt_secret=jwt_secret,
-            )
+        # Test hook: fail before Connectivity so Knowledge-side-only reason
+        # (e.g. account_closed_reason) can still trigger compensation without
+        # being allow-listed on the write target.
+        if reason == WRITEBACK_FAILURE_SENTINEL:
+            raise httpx.HTTPError("simulated downstream failure")
+        await _notify_generic_write_target(
+            client, connectivity_breaker,
+            tenant_id=tenant_id, dataset_name=dataset_name, instance_id=instance_id, edits=edits or {},
+            connectivity_url=connectivity_url, jwt_secret=jwt_secret,
+        )
     except (httpx.HTTPError, CircuitBreakerOpenError) as exc:
         error = str(exc)
         await pool.execute(
@@ -288,10 +238,6 @@ async def _run_workflow(
         )
 
 
-def _customer_id_from_instance_urn(instance_urn: str) -> int:
-    return int(instance_urn.rsplit("/", 1)[-1])
-
-
 async def consume_events(
     pool: asyncpg.Pool,
     consumer: EventConsumer,
@@ -301,20 +247,14 @@ async def consume_events(
     knowledge_url: str,
     jwt_secret: str,
 ) -> None:
-    """Consumes Knowledge's bus (topic `knowledge`), triggered — the
-    **Trigger** resource, in the most literal sense — by
-    `knowledge.action.invoked` events whose action has a registered
-    Workflow and an `approval_id` (i.e. went through human-in-the-loop
-    approval, not an immediately-applied low-risk Action).
+    """Consumes Knowledge's bus (topic `knowledge`), triggered by
+    `knowledge.action.invoked` events whose action has a writeback target
+    and an `approval_id` (i.e. went through human-in-the-loop approval).
     """
-    # Bulkhead: one long-lived client for this task's whole
-    # lifetime, not a throwaway `httpx.AsyncClient()` per workflow run;
-    # a circuit breaker per downstream dependency so a stuck Connectivity
-    # doesn't also degrade calls to Knowledge and vice versa.
     async with httpx.AsyncClient(
         timeout=_TIMEOUT_SECONDS, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
     ) as client:
-        connectivity_breaker = CircuitBreaker(name="connectivity-close-account", failure_threshold=5, cooldown_seconds=30.0)
+        connectivity_breaker = CircuitBreaker(name="connectivity-writeback", failure_threshold=5, cooldown_seconds=30.0)
         knowledge_breaker = CircuitBreaker(name="knowledge-compensate", failure_threshold=5, cooldown_seconds=30.0)
 
         await consumer.start()
@@ -328,27 +268,6 @@ async def consume_events(
                     continue
                 instance_urn = event.payload["instance_urn"]
 
-                if action_name in WORKFLOW_DEFINITIONS:
-                    await _run_workflow(
-                        pool, client, connectivity_breaker, knowledge_breaker,
-                        tenant_id=event.tenant_id,
-                        workspace_id=workspace_id,
-                        approval_id=approval_id,
-                        action_name=action_name,
-                        instance_urn=instance_urn,
-                        customer_id=_customer_id_from_instance_urn(instance_urn),
-                        reason=event.payload.get("reason", ""),
-                        connectivity_url=connectivity_url,
-                        knowledge_url=knowledge_url,
-                        jwt_secret=jwt_secret,
-                    )
-                    await consumer.commit()
-                    continue
-
-                # Declarative Action Type path: `edits` is only ever set
-                # on this event when Knowledge's `approve_action` found a
-                # `writeback_dataset` — same signal `WORKFLOW_DEFINITIONS`
-                # membership is for the hardcoded case above.
                 edits = event.payload.get("edits")
                 if edits is None:
                     continue
@@ -367,6 +286,7 @@ async def consume_events(
                     approval_id=approval_id,
                     action_name=action_name,
                     instance_urn=instance_urn,
+                    reason=event.payload.get("reason", ""),
                     dataset_name=writeback_dataset,
                     instance_id=instance_id,
                     edits=edits,

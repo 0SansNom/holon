@@ -5,6 +5,10 @@ Reacts to Intelligence's `intelligence.agent.session_completed` event and,
 when the completed session opted into `chain_trigger`, spawns a *new* agent
 session on Intelligence — threading `causation_id`/`causation_depth` forward.
 
+Chained hops authenticate as the shared `ingest-bot` agent (same principal
+Intelligence / agentApp use), carrying forward `on_behalf_of` from the
+completed session — not Automation's own service-account identity.
+
 Deliberately opt-in, not automatic for every session: `chain_trigger`
 must be set to `true` by whoever created the *first* session in a
 chain. `agent_runtime.create_session` is the authoritative circuit breaker
@@ -15,6 +19,7 @@ chain. `agent_runtime.create_session` is the authoritative circuit breaker
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import httpx
@@ -32,7 +37,9 @@ from holon_common import (
 logger = logging.getLogger("automation.agent_chain_trigger")
 
 _TIMEOUT_SECONDS = 10.0
-TRIGGERED_WORKFLOW_ENGINE_NAME = "automation-agent-chain-trigger"
+# Local-name of the agent principal used for every chained hop. Override
+# only if an operator provisions a different shared agent URN.
+DEFAULT_CHAIN_AGENT_LOCAL_NAME = "ingest-bot"
 
 
 def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> str:
@@ -43,12 +50,22 @@ def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> st
         return issue_token(principal, jwt_secret, ttl_seconds=ttl_seconds)
 
 
-def _chain_trigger_principal(tenant_id: str) -> Principal:
+def chain_agent_local_name() -> str:
+    return (os.environ.get("HOLON_CHAIN_TRIGGER_AGENT_LOCAL_NAME") or DEFAULT_CHAIN_AGENT_LOCAL_NAME).strip() or (
+        DEFAULT_CHAIN_AGENT_LOCAL_NAME
+    )
+
+
+def chain_agent_principal(tenant_id: str, *, on_behalf_of: Optional[str] = None) -> Principal:
+    """Principal for chained hops — ingest-bot by default, not Automation's SA."""
+    local = chain_agent_local_name()
     return Principal(
-        urn=build_urn(tenant_id, "global", "service-account", TRIGGERED_WORKFLOW_ENGINE_NAME),
-        type="service_account",
+        urn=build_urn(tenant_id, "global", "agent", local),
+        type="agent",
         tenant_id=tenant_id,
-        display_name="Automation Agent Chain Trigger",
+        display_name="Ingest Bot" if local == DEFAULT_CHAIN_AGENT_LOCAL_NAME else local,
+        on_behalf_of=on_behalf_of,
+        country="FR",
     )
 
 
@@ -60,10 +77,12 @@ async def _spawn_next_session(
     causation_id: str,
     causation_depth: int,
     max_chain_depth: int,
+    on_behalf_of: Optional[str],
     intelligence_url: str,
     jwt_secret: str,
 ) -> None:
-    token = _mint(_chain_trigger_principal(tenant_id), jwt_secret, ttl_seconds=60)
+    principal = chain_agent_principal(tenant_id, on_behalf_of=on_behalf_of)
+    token = _mint(principal, jwt_secret, ttl_seconds=60)
     headers = {"Authorization": f"Bearer {token}"}
 
     async def _create_session() -> dict:
@@ -120,22 +139,19 @@ async def consume_events(consumer: EventConsumer, *, intelligence_url: str, jwt_
                 max_chain_depth = event.payload.get("max_chain_depth", 10)
                 next_depth = depth + 1
                 if next_depth > max_chain_depth:
-                    # `max_chain_depth` is inclusive (the just-completed
-                    # session at `depth` was the last one allowed) — this
-                    # mirrors `agent_runtime.create_session`'s own
-                    # authoritative check exactly, just earlier, to skip
-                    # a wasted HTTP round trip.
                     logger.info(
                         "agent chain cut off after depth %d (max_chain_depth=%d) for session %s — loop guard",
                         depth, max_chain_depth, event.payload.get("session_urn"),
                     )
                     continue
                 await _spawn_next_session(
-                    client, breaker,
+                    client,
+                    breaker,
                     tenant_id=event.tenant_id,
                     causation_id=event.event_id,
                     causation_depth=next_depth,
                     max_chain_depth=max_chain_depth,
+                    on_behalf_of=event.payload.get("on_behalf_of"),
                     intelligence_url=intelligence_url,
                     jwt_secret=jwt_secret,
                 )

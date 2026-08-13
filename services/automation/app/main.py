@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 
@@ -22,6 +23,7 @@ from holon_common import (
     EventProducer,
     Principal,
     active_jwt,
+    assert_production_posture,
     configure_json_logging,
     create_pool,
     install_error_handlers,
@@ -29,6 +31,7 @@ from holon_common import (
     instrument_tracing,
     make_principal_dependency,
     outbox,
+    run_migrations,
 )
 
 from . import agent_chain_trigger, workflow
@@ -44,15 +47,17 @@ KAFKA_BOOTSTRAP = os.environ["HOLON_KAFKA_BOOTSTRAP"]
 CONNECTIVITY_URL = os.environ["HOLON_CONNECTIVITY_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
-OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
         await workflow.ensure_schema(conn)
         await outbox.ensure_schema(conn)
+    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
     await app.state.producer.start()
@@ -72,9 +77,6 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # Loop-detection trigger — see agent_chain_trigger.py's module
-    # docstring. Own consumer group: logically a distinct trigger from the
-    # saga workflow above, on a different topic entirely.
     agent_chain_consumer = EventConsumer(
         KAFKA_BOOTSTRAP,
         topics=["intelligence"],
