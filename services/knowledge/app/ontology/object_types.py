@@ -1,12 +1,4 @@
-"""ObjectType core: schema DDL, boot-time seeding, and version history
-reads. `ensure_seeded` runs its own `_upsert_object_type` on every
-startup, refreshing `description`/`property_mapping` from code —
-necessary so the bootstrap seed data itself stays a real, editable
-source of truth. The upsert only ever overwrites a row still at
-`version = 1` (never governance-published) — once `publish_object_type_version`
-(in `publishing.py`) bumps a row past that, the boot-time reseed leaves
-it alone.
-"""
+"""ObjectType core: schema DDL, self-serve creation, and version history reads."""
 
 from __future__ import annotations
 
@@ -15,114 +7,26 @@ from typing import Optional
 
 import asyncpg
 
-from holon_common import Classification, build_urn, most_restrictive
+from holon_common import Classification, most_restrictive
 
-from .urns import (
-    customer_object_type_urn,
-    inventory_level_object_type_urn,
-    object_type_urn,
-    order_object_type_urn,
-    product_review_object_type_urn,
-    support_ticket_object_type_urn,
-    supplier_object_type_urn,
+from .urns import object_type_urn
+from .lifecycle import (
+    NON_DELETABLE_OBJECT_TYPE_STATUSES,
+    normalize_deprecation_metadata,
 )
-
-CUSTOMER_PROPERTY_MAPPING = {
-    "id": "id",
-    "name": "name",
-    "email": "email",
-    "country": "country",
-    "segment": "segment",
-    "lifetimeValue": "lifetime_value",
-    "updatedAt": "updated_at",
-}
-
-ORDER_PROPERTY_MAPPING = {
-    "id": "id",
-    "customerId": "customer_id",
-    "product": "product",
-    "amount": "amount",
-    "status": "status",
-    "orderedAt": "ordered_at",
-}
-
-SUPPORT_TICKET_PROPERTY_MAPPING = {
-    "id": "id",
-    "customerId": "customer_id",
-    "subject": "subject",
-    "status": "status",
-    "priority": "priority",
-    "createdAt": "created_at",
-}
-
-PRODUCT_REVIEW_PROPERTY_MAPPING = {
-    "id": "id",
-    "orderId": "order_id",
-    "rating": "rating",
-    "comment": "comment",
-    "reviewerName": "reviewer_name",
-    "reviewedAt": "reviewed_at",
-}
-
-SUPPLIER_PROPERTY_MAPPING = {
-    "id": "id",
-    "name": "name",
-    "country": "country",
-    "category": "category",
-}
-
-# `id` holds the SKU string directly (the streaming connector aliases it
-# that way so `serving_store.materialize`'s hardcoded `row["id"]` key
-# works unchanged) — the first ObjectType in this build keyed by a
-# non-integer instance id.
-INVENTORY_LEVEL_PROPERTY_MAPPING = {
-    "id": "id",
-    "warehouse": "warehouse",
-    "quantity": "quantity",
-    "updatedAt": "updated_at",
-}
-
-# All many_to_one. Explicit cardinality and direction — both are
-# spelled out, not implied. ProductReview.order targets Order, not Customer —
-# the graph now chains one hop further: Customer <- Order <- ProductReview.
-RELATION_TYPES = [
-    {
-        "name": "Order.customer",
-        "source_object_type": "Order",
-        "target_object_type": "Customer",
-        "source_property": "customerId",
-        "target_property": "orders",
-        "cardinality": "many_to_one",
-    },
-    {
-        "name": "SupportTicket.customer",
-        "source_object_type": "SupportTicket",
-        "target_object_type": "Customer",
-        "source_property": "customerId",
-        "target_property": "tickets",
-        "cardinality": "many_to_one",
-    },
-    {
-        "name": "ProductReview.order",
-        "source_object_type": "ProductReview",
-        "target_object_type": "Order",
-        "source_property": "orderId",
-        "target_property": "reviews",
-        "cardinality": "many_to_one",
-    },
-]
 
 INITIAL_CLASSIFICATION = "internal"
 
-VALID_LIFECYCLE_STATUSES = frozenset({"experimental", "active", "deprecated"})
 VALID_VISIBILITIES = frozenset({"prominent", "normal", "hidden"})
+
 
 # All JSONB columns on `object_type`; a subset (without `column_classification`)
 # covers `object_type_version`. Centralised so adding a new JSONB column only
 # requires touching this constant — not the four independent call sites below.
 _OT_JSONB_KEYS: tuple[str, ...] = (
     "property_mapping", "implements", "derived_properties", "markings",
-    "property_formats", "conditional_formats", "property_types", "column_classification",
+    "property_formats", "conditional_formats", "property_types",
+    "link_constraint_bindings", "interface_property_bindings", "column_classification",
 )
 # object_type_version has no column_classification column.
 _OTV_JSONB_KEYS: tuple[str, ...] = _OT_JSONB_KEYS[:-1]
@@ -130,6 +34,7 @@ _OTV_JSONB_KEYS: tuple[str, ...] = _OT_JSONB_KEYS[:-1]
 # Scalar Foundry-parity+ metadata mirrored on live + version rows.
 _OT_META_KEYS: tuple[str, ...] = (
     "primary_key", "title_key", "plural_display_name", "lifecycle_status", "visibility", "icon",
+    "deprecation_reason", "deprecation_deadline", "replacement_urn",
 )
 
 
@@ -159,11 +64,11 @@ def validate_ot_metadata(
     title_key: str | None,
     lifecycle_status: str,
     visibility: str,
-) -> None:
-    if lifecycle_status not in VALID_LIFECYCLE_STATUSES:
-        raise ValueError(
-            f"invalid lifecycle_status: {lifecycle_status!r} (must be one of {sorted(VALID_LIFECYCLE_STATUSES)})"
-        )
+    deprecation_reason: str | None = None,
+    deprecation_deadline=None,
+    replacement_urn: str | None = None,
+) -> dict:
+    """Validate OT identity metadata. Returns normalized deprecation fields."""
     if visibility not in VALID_VISIBILITIES:
         raise ValueError(f"invalid visibility: {visibility!r} (must be one of {sorted(VALID_VISIBILITIES)})")
     if not primary_key:
@@ -172,6 +77,13 @@ def validate_ot_metadata(
         raise ValueError(f"primary_key {primary_key!r} must be a key in property_mapping")
     if title_key and title_key not in property_mapping:
         raise ValueError(f"title_key {title_key!r} must be a key in property_mapping")
+    return normalize_deprecation_metadata(
+        lifecycle_status,
+        deprecation_reason=deprecation_reason,
+        deprecation_deadline=deprecation_deadline,
+        replacement_urn=replacement_urn,
+        target="object_type",
+    )
 
 
 def _parse_jsonb_keys(row: asyncpg.Record, keys: tuple[str, ...]) -> dict:
@@ -330,8 +242,6 @@ CREATE TABLE IF NOT EXISTS ontology_review (
 -- (`ontology/resource_branching.py`) only ever operates on the other 4
 -- resource_type values — a disjoint set from 'object_type' — so the two
 -- code paths never collide on the same table despite sharing it.
-ALTER TABLE ontology_branch ALTER COLUMN object_type_urn DROP NOT NULL;
-ALTER TABLE ontology_branch ALTER COLUMN version DROP NOT NULL;
 ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS resource_type TEXT NOT NULL DEFAULT 'object_type';
 ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS resource_name TEXT;
 ALTER TABLE ontology_branch ADD COLUMN IF NOT EXISTS proposed_definition JSONB;
@@ -390,7 +300,7 @@ ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS markings JSONB NOT NULL
 -- a value in place. Validated at publish time (`_validate_property_formats`
 -- in publishing.py: known property, known `kind`, well-formed rule), same
 -- versioned governance treatment as `derived_properties` above — not
--- boot-seeded here for the same reason that field isn't (see module
+-- auto-filled here for the same reason that field isn't (see module
 -- docstring): a governed field must come from a real propose/publish call,
 -- not be silently reset on every restart.
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS property_formats JSONB NOT NULL DEFAULT '{}';
@@ -409,8 +319,8 @@ ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS conditional_formats JSO
 -- Declared per-column classification for a self-serve ObjectType
 -- (`create_object_type`) — {"email": "confidential", "id": "public"},
 -- keyed by *source column* the same way `object_type_property` already
--- is (see that table's own comment). The six boot-seeded types get this
--- from a hand-written Python constant (`CUSTOMERS_COLUMN_CLASSIFICATION`
+-- is (see that table's own comment). Example connector plugins ship with
+-- hand-written Python constants (`CUSTOMERS_COLUMN_CLASSIFICATION`
 -- etc., `catalog.py`) reviewed once by whoever wrote the connector; a
 -- self-serve type has no such constant to fall back on, so the admin's
 -- choice at creation time has to be persisted somewhere `catalog.py`'s
@@ -443,6 +353,40 @@ CREATE TABLE IF NOT EXISTS value_type (
 -- four and not Foundry's full eight.
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS constraints JSONB NOT NULL DEFAULT '[]';
 
+-- Foundry Value Type metadata + versioning: api/display names, example
+-- preview, integer version (bumped when constraints/format change), and
+-- lifecycle for deprecate-without-delete.
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS api_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS example_value TEXT;
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS version INT NOT NULL DEFAULT 1;
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
+-- Foundry regex may match a substring; default full = re.fullmatch.
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS format_regex_match TEXT NOT NULL DEFAULT 'full';
+-- Optional project import (SpiceDB parent_project), same as SPT / RelationType.
+ALTER TABLE value_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
+
+CREATE TABLE IF NOT EXISTS value_type_revision (
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INT NOT NULL,
+    base_type TEXT NOT NULL,
+    format_regex TEXT,
+    constraints JSONB NOT NULL DEFAULT '[]',
+    description TEXT NOT NULL DEFAULT '',
+    api_name TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    example_value TEXT,
+    lifecycle_status TEXT NOT NULL DEFAULT 'experimental',
+    format_regex_match TEXT NOT NULL DEFAULT 'full',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, name, version)
+);
+ALTER TABLE value_type_revision ADD COLUMN IF NOT EXISTS format_regex_match TEXT NOT NULL DEFAULT 'full';
+
 -- Shared Property Types: a canonical, reusable *property* definition
 -- (api_name + display_name + description) wrapping a Value Type for
 -- its data shape — see shared_property_types.py's module docstring for
@@ -457,6 +401,22 @@ CREATE TABLE IF NOT EXISTS shared_property_type (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, api_name)
 );
+-- Struct-typed Shared Property Types (Foundry parity): either wrap a
+-- Value Type (`value_type` set) or carry a one-level struct field map
+-- (`struct_properties` set, `value_type` null). Additive migration —
+-- existing VT-wrapped rows stay valid.
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS struct_properties JSONB;
+ALTER TABLE shared_property_type ALTER COLUMN value_type DROP NOT NULL;
+-- Foundry-parity shared property metadata (inherited by local properties
+-- that reference this SPT when the local entry doesn't override).
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS render_hints JSONB NOT NULL DEFAULT '["searchable"]';
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS type_classes JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS property_format JSONB;
+-- Foundry aliases: alternate search terms for the shared property.
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]';
+-- Optional project scope (additive ReBAC path via SpiceDB parent_project).
+ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
 
 -- Typed properties: {"email": {"kind": "value_type", "value_type": "Email"}}
 -- (a single typed leaf), {"email": {"kind": "shared_property_type",
@@ -484,12 +444,18 @@ ALTER TABLE object_type ADD COLUMN IF NOT EXISTS plural_display_name TEXT NOT NU
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal';
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS icon TEXT;
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS primary_key TEXT NOT NULL DEFAULT 'id';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS title_key TEXT;
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS plural_display_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS icon TEXT;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
 
 -- Link Type storage kinds beyond FK (Foundry join-table + object-backed).
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS storage_kind TEXT NOT NULL DEFAULT 'foreign_key';
@@ -499,6 +465,22 @@ ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS join_target_column TEXT;
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_object_type_urn TEXT;
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_source_property TEXT;
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_target_property TEXT;
+
+-- Foundry Link Type metadata: per-side display/API/visibility + type-level status/classes.
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_plural_display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_api_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_visibility TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS target_display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS target_plural_display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS target_api_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS target_visibility TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS type_classes JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
+ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
 
 -- Object Sets: filtered collections of instances (Knowledge-owned artefact).
 CREATE TABLE IF NOT EXISTS object_set (
@@ -552,6 +534,29 @@ CREATE TABLE IF NOT EXISTS action_type (
 -- additive migration for databases seeded before this column existed
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS writeback_dataset TEXT;
 
+-- Foundry Type classes on Action Types (e.g. hubble-oe:hide-action).
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS type_classes JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
+-- P1a: optional typed bindings for required_properties (value_type /
+-- shared_property_type only — same leaf kinds OT property_types uses).
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS property_types JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- P1b: abstract link constraints fulfilled by concrete RelationTypes at implement.
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS link_constraints JSONB NOT NULL DEFAULT '[]'::jsonb;
+-- P1c: Foundry-style interface inheritance (child extends parents).
+ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS parent_interfaces JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS link_constraint_bindings JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS link_constraint_bindings JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE object_type ADD COLUMN IF NOT EXISTS interface_property_bindings JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS interface_property_bindings JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+
 -- Actions on interfaces: an Action Type may target an Interface instead
 -- of one ObjectType, becoming invocable against any instance of any
 -- ObjectType that currently `implements` it — same generalization
@@ -560,7 +565,6 @@ ALTER TABLE action_type ADD COLUMN IF NOT EXISTS writeback_dataset TEXT;
 -- `required_properties` may be edited, never a type-specific one.
 -- Exactly one of `target_object_type`/`target_interface` is set, checked
 -- in `action_types.create_action_type`, not here.
-ALTER TABLE action_type ALTER COLUMN target_object_type DROP NOT NULL;
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS target_interface TEXT;
 
 -- Function-backed Actions: an Action Type may declare `edit_function`
@@ -579,6 +583,10 @@ ALTER TABLE action_type ADD COLUMN IF NOT EXISTS edit_function TEXT;
 -- Structural validation (names exist, no parameter in two sections) lives
 -- in `action_types.create_action_type`, not here.
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS sections JSONB NOT NULL DEFAULT '[]';
+
+-- P2c: optional HTTP webhook URL fired best-effort after request/apply/expire
+-- (Slack incoming webhook, Zapier, etc.). NULL = no outbound notify.
+ALTER TABLE action_type ADD COLUMN IF NOT EXISTS notify_webhook TEXT;
 """
 
 
@@ -619,114 +627,6 @@ async def _upsert_object_type(
     )
 
 
-async def ensure_seeded(pool: asyncpg.Pool, tenant_id: str, workspace_id: str) -> None:
-    await _upsert_object_type(
-        pool,
-        customer_object_type_urn(tenant_id, workspace_id),
-        tenant_id,
-        "Customer",
-        build_urn(tenant_id, workspace_id, "dataset", "customers"),
-        CUSTOMER_PROPERTY_MAPPING,
-        "A business account that buys from us — company name, contact email, "
-        "country, commercial segment (enterprise/mid-market/smb), and lifetime "
-        "value. The root of the customer-facing object graph: orders, support "
-        "tickets and product reviews all trace back to one.",
-    )
-    await _upsert_object_type(
-        pool,
-        order_object_type_urn(tenant_id, workspace_id),
-        tenant_id,
-        "Order",
-        build_urn(tenant_id, workspace_id, "dataset", "orders"),
-        ORDER_PROPERTY_MAPPING,
-        "A single purchase placed by a Customer — product, amount, fulfillment "
-        "status (pending/shipped/delivered), and order date. Many orders per "
-        "customer; product reviews reference the order they were left against.",
-    )
-    await _upsert_object_type(
-        pool,
-        support_ticket_object_type_urn(tenant_id, workspace_id),
-        tenant_id,
-        "SupportTicket",
-        build_urn(tenant_id, workspace_id, "dataset", "support_tickets"),
-        SUPPORT_TICKET_PROPERTY_MAPPING,
-        "A customer support request — subject line, open/closed status, "
-        "priority, and which Customer raised it. Sourced from the support "
-        "desk's MongoDB collection, not the same system as Customer/Order.",
-    )
-    await _upsert_object_type(
-        pool,
-        product_review_object_type_urn(tenant_id, workspace_id),
-        tenant_id,
-        "ProductReview",
-        build_urn(tenant_id, workspace_id, "dataset", "reviews"),
-        PRODUCT_REVIEW_PROPERTY_MAPPING,
-        "A public product review left against a specific Order — star rating, "
-        "free-text comment, reviewer display name. The only ObjectType whose "
-        "data is entirely public (no confidential columns).",
-    )
-    await _upsert_object_type(
-        pool,
-        supplier_object_type_urn(tenant_id, workspace_id),
-        tenant_id,
-        "Supplier",
-        build_urn(tenant_id, workspace_id, "dataset", "suppliers"),
-        SUPPLIER_PROPERTY_MAPPING,
-        "A vendor we source materials/components from — name, country, and "
-        "procurement category (raw-materials/components/electronics/packaging). "
-        "Standalone: not yet related to any other ObjectType in this build.",
-    )
-    await _upsert_object_type(
-        pool,
-        inventory_level_object_type_urn(tenant_id, workspace_id),
-        tenant_id,
-        "InventoryLevel",
-        build_urn(tenant_id, workspace_id, "dataset", "inventory_levels"),
-        INVENTORY_LEVEL_PROPERTY_MAPPING,
-        "The current on-hand quantity of one SKU at one warehouse — the only "
-        "ObjectType fed by continuous streaming ingestion rather than a "
-        "periodic batch sync, so its data changes independently of any /sync call.",
-    )
-
-    for relation in RELATION_TYPES:
-        await pool.execute(
-            """
-            INSERT INTO relation_type (urn, tenant_id, name, source_object_type_urn, target_object_type_urn, source_property, target_property, cardinality)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (urn) DO UPDATE SET target_property = EXCLUDED.target_property
-            """,
-            build_urn(tenant_id, workspace_id, "relation-type", relation["name"]),
-            tenant_id,
-            relation["name"],
-            object_type_urn(tenant_id, workspace_id, relation["source_object_type"]),
-            object_type_urn(tenant_id, workspace_id, relation["target_object_type"]),
-            relation["source_property"],
-            relation["target_property"],
-            relation["cardinality"],
-        )
-
-    # Seed title keys for demo types (primary_key defaults to id via DDL).
-    for name, title_key, plural, icon in (
-        ("Customer", "name", "Customers", "people"),
-        ("Order", "id", "Orders", "shopping-cart"),
-        ("SupportTicket", "subject", "Support tickets", "chat"),
-        ("ProductReview", "id", "Product reviews", "star"),
-        ("Supplier", "name", "Suppliers", "office"),
-        ("InventoryLevel", "id", "Inventory levels", "box"),
-    ):
-        await pool.execute(
-            """
-            UPDATE object_type SET
-                title_key = COALESCE(title_key, $2),
-                plural_display_name = CASE WHEN plural_display_name = '' THEN $3 ELSE plural_display_name END,
-                icon = COALESCE(icon, $4),
-                lifecycle_status = CASE WHEN lifecycle_status = 'experimental' THEN 'active' ELSE lifecycle_status END
-            WHERE tenant_id = $1 AND name = $5 AND version = 1
-            """,
-            tenant_id, title_key, plural, icon, name,
-        )
-
-
 async def create_object_type(
     pool: asyncpg.Pool,
     *,
@@ -743,20 +643,23 @@ async def create_object_type(
     lifecycle_status: str = "experimental",
     visibility: str = "normal",
     icon: Optional[str] = None,
+    deprecation_reason: Optional[str] = None,
+    deprecation_deadline=None,
+    replacement_urn: Optional[str] = None,
 ) -> dict:
     """The self-serve path: turn an already-synced Dataset into a
     browsable ObjectType by name and column mapping alone — no code,
     same as the no-code connector that got the data in in the first
-    place. Reuses `_upsert_object_type` (same insert every boot-seeded
-    type goes through) rather than a parallel code path, so a self-serve
-    type is a real `object_type` row indistinguishable from a seeded one
+    place. Reuses `_upsert_object_type` (same insert path as API-created
+    demo types) rather than a parallel code path, so a self-serve
+    type is a real `object_type` row indistinguishable from any other
     at read time. Creation itself is existence + mapping; branching,
     interfaces, markings, and the rest attach afterward via the normal
-    versioning endpoints, same as a seeded type.
+    versioning endpoints.
 
     `column_classification` (source column -> "public"/"internal"/
     "confidential"/"restricted") is the admin's one chance to say which
-    columns are sensitive — the six boot-seeded types get this from a
+    columns are sensitive — example connector plugins may ship a
     hand-reviewed Python constant instead; a self-serve type has none,
     so skipping this arg means every column defaults to internal
     (`catalog.py`'s dynamic-dispatch branch), not automatically
@@ -771,12 +674,15 @@ async def create_object_type(
     the relevant router owns authz-relationship writes, this package
     owns state).
     """
-    validate_ot_metadata(
+    dep = validate_ot_metadata(
         property_mapping=property_mapping,
         primary_key=primary_key,
         title_key=title_key,
         lifecycle_status=lifecycle_status,
         visibility=visibility,
+        deprecation_reason=deprecation_reason,
+        deprecation_deadline=deprecation_deadline,
+        replacement_urn=replacement_urn,
     )
     urn = object_type_urn(tenant_id, workspace_id, name)
     if await get_object_type(pool, urn) is not None:
@@ -786,10 +692,20 @@ async def create_object_type(
         """
         UPDATE object_type SET
             primary_key = $1, title_key = $2, plural_display_name = $3,
-            lifecycle_status = $4, visibility = $5, icon = $6
-        WHERE urn = $7
+            lifecycle_status = $4, visibility = $5, icon = $6,
+            deprecation_reason = $7, deprecation_deadline = $8, replacement_urn = $9
+        WHERE urn = $10
         """,
-        primary_key, title_key, plural_display_name or "", lifecycle_status, visibility, icon, urn,
+        primary_key,
+        title_key,
+        plural_display_name or "",
+        dep["lifecycle_status"],
+        visibility,
+        icon,
+        dep["deprecation_reason"],
+        dep["deprecation_deadline"],
+        dep["replacement_urn"],
+        urn,
     )
 
     declared = column_classification or {}
@@ -876,12 +792,31 @@ async def delete_object_type(pool: asyncpg.Pool, urn: str) -> None:
     write on create — rolls back the Postgres row so we never leave an
     ObjectType that exists in PG but is unreadable via ReBAC.
 
-    Refuses if any `object_type_version` (or property/marking/branch)
-    rows already reference the type: those mean lifecycle has started
-    and a blind delete would orphan history. Brand-new self-serve
-    creates have none of those yet.
+    Refuses if lifecycle_status is `active` (Foundry: active resources
+    cannot be deleted until experimental/deprecated). Also refuses if any
+    `object_type_version` (or property/marking/branch) rows already
+    reference the type: those mean lifecycle has started and a blind
+    delete would orphan history. Brand-new self-serve creates have none
+    of those yet.
     """
     async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT lifecycle_status FROM object_type WHERE urn = $1 FOR UPDATE", urn
+        )
+        if row is None:
+            raise ValueError(f"unknown ObjectType: {urn}")
+        if (row["lifecycle_status"] or "experimental") in NON_DELETABLE_OBJECT_TYPE_STATUSES:
+            # Brand-new self-serve creates (no versions yet) may still be
+            # rolled back after a failed SpiceDB seed — Foundry's active/
+            # promoted delete ban applies once the type has entered versioning.
+            version_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM object_type_version WHERE object_type_urn = $1", urn
+            )
+            if version_count:
+                raise ValueError(
+                    "cannot delete an active or promoted ObjectType — set lifecycle_status to deprecated "
+                    "(or experimental/example) first"
+                )
         version_count = await conn.fetchval(
             "SELECT COUNT(*) FROM object_type_version WHERE object_type_urn = $1", urn
         )

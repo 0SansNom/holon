@@ -1,25 +1,13 @@
-"""All `/objects/*` reads — export, the six typed list/get pairs,
-relation traversal, and instance-graph (all in `seeded.py`), plus the
-generic self-serve list/get/action-invoke routes (`generic.py`).
+"""All `/objects/*` reads — export, relation traversal, and instance-graph
+(all in `seeded.py`, despite the name — every route in it is generic over
+any ObjectType via `core._type_handle`), plus the generic self-serve
+list/get/action-invoke routes (`generic.py`).
 
-Router ordering constraint, preserved exactly across the split: `seeded`
-must combine into this package's `router` *before* `generic` — Starlette
-matches routes in registration order, and `generic.py`'s bare
-`/objects/{object_type}` / `/objects/{object_type}/{instance_id}` routes
-are general enough to shadow every specific route in `seeded.py`
-(including `/objects/Customer` itself) if registered first. Within
-`seeded.py`, `export_objects` must itself be first among the seeded
-routes for the same reason (`/objects/Customer/export` vs.
-`/objects/Customer/{customer_id}`) — that ordering lives inside
-`seeded.py`, since `include_router` here only controls the ordering
-*between* the two files, not within either one.
-
-Separately, `main.py` registers `routers/actions.py`'s router *before*
-this package's, for the same reason again: this package's generic
-`POST /objects/{object_type}/{instance_id}/actions/{action_name}` route
-(in `generic.py`) would otherwise shadow `routers/actions.py`'s specific
-`/objects/Customer/{customer_id}/actions/{putOnCreditHold|closeAccount}`
-routes.
+Router ordering constraint: `seeded` must combine into this package's
+`router` *before* `generic` — Starlette matches routes in registration
+order, and `export_objects`'s `/objects/{object_type}/export` would
+otherwise be shadowed by `generic.py`'s `/objects/{object_type}/{instance_id}`
+(matching `"export"` as `instance_id`) if that registered first.
 """
 
 from __future__ import annotations

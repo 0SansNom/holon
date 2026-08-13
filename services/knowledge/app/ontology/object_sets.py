@@ -15,7 +15,9 @@ from .object_types import get_object_type
 from .urns import object_type_urn
 
 VALID_OPS = frozenset({"eq", "neq", "in", "gt", "gte", "lt", "lte", "contains"})
-VALID_LIFECYCLE = frozenset({"experimental", "active", "deprecated"})
+from .lifecycle import REGISTRY_LIFECYCLE_STATUSES
+
+VALID_LIFECYCLE = REGISTRY_LIFECYCLE_STATUSES
 VALID_VISIBILITY = frozenset({"prominent", "normal", "hidden"})
 
 
@@ -32,7 +34,43 @@ def _parse_row(row: asyncpg.Record) -> dict:
     return result
 
 
-def validate_definition(definition: dict, property_mapping: dict) -> None:
+def _split_struct_path(prop: str) -> tuple[str, str] | None:
+    """Return (top, field) for one-level ``address.city`` paths; else None."""
+    if "." not in prop:
+        return None
+    top, field = prop.split(".", 1)
+    if not top or not field or "." in field:
+        raise ValueError(
+            f"predicate property {prop!r} must be a top-level property or one-level struct path (property.field)"
+        )
+    return top, field
+
+
+def _resolve_predicate_value(instance: dict, prop: str, property_mapping: dict) -> Any:
+    path = _split_struct_path(prop) if "." in prop else None
+    if path is not None:
+        top, field = path
+        container = instance.get(top)
+        if container is None:
+            col = property_mapping.get(top)
+            if col:
+                container = instance.get(col)
+        if isinstance(container, dict):
+            return container.get(field)
+        return None
+    actual = instance.get(prop)
+    if actual is None:
+        col = property_mapping.get(prop)
+        if col:
+            actual = instance.get(col)
+    return actual
+
+
+def validate_definition(
+    definition: dict,
+    property_mapping: dict,
+    property_types: dict | None = None,
+) -> None:
     if not isinstance(definition, dict):
         raise ValueError("definition must be an object")
     predicates = definition.get("all")
@@ -45,7 +83,21 @@ def validate_definition(definition: dict, property_mapping: dict) -> None:
             raise ValueError("each predicate must be an object")
         prop = pred.get("property")
         op = pred.get("op")
-        if not prop or prop not in property_mapping:
+        if not prop or not isinstance(prop, str):
+            raise ValueError(f"predicate property {prop!r} must be a key in the ObjectType property_mapping")
+        path = _split_struct_path(prop) if "." in prop else None
+        if path is not None:
+            top, field = path
+            if top not in property_mapping:
+                raise ValueError(f"predicate property {prop!r} must be a key in the ObjectType property_mapping")
+            if property_types is not None:
+                rule = property_types.get(top) or {}
+                if rule.get("kind") != "struct":
+                    raise ValueError(f"predicate property {prop!r}: {top!r} is not a struct-typed property")
+                fields = rule.get("properties") or {}
+                if field not in fields:
+                    raise ValueError(f"predicate property {prop!r}: unknown struct field {field!r}")
+        elif prop not in property_mapping:
             raise ValueError(f"predicate property {prop!r} must be a key in the ObjectType property_mapping")
         if op not in VALID_OPS:
             raise ValueError(f"invalid predicate op {op!r} (must be one of {sorted(VALID_OPS)})")
@@ -56,16 +108,16 @@ def validate_definition(definition: dict, property_mapping: dict) -> None:
 
 
 def matches_predicates(instance: dict, definition: dict, property_mapping: dict) -> bool:
-    """Evaluate definition.all against a resolved instance (api-name keys preferred)."""
+    """Evaluate definition.all against a resolved instance (api-name keys preferred).
+
+    Predicate properties may be top-level (``status``) or one-level struct
+    paths (``address.city``) — Foundry Object Explorer struct field search.
+    """
     for pred in definition.get("all") or []:
         prop = pred["property"]
         op = pred["op"]
         expected = pred["value"]
-        actual = instance.get(prop)
-        if actual is None:
-            col = property_mapping.get(prop)
-            if col:
-                actual = instance.get(col)
+        actual = _resolve_predicate_value(instance, prop, property_mapping)
         if op == "eq" and not (actual == expected):
             return False
         if op == "neq" and not (actual != expected):
@@ -112,7 +164,7 @@ async def create_object_set(
     ot = await get_object_type(pool, ot_urn)
     if ot is None:
         raise ValueError(f"unknown ObjectType: {object_type}")
-    validate_definition(definition, ot["property_mapping"])
+    validate_definition(definition, ot["property_mapping"], ot.get("property_types"))
     urn = object_set_urn(tenant_id, workspace_id, name)
     try:
         await pool.execute(
@@ -158,7 +210,7 @@ async def update_object_set(
     if ot is None:
         raise ValueError("backing ObjectType no longer exists")
     new_def = definition if definition is not None else current["definition"]
-    validate_definition(new_def, ot["property_mapping"])
+    validate_definition(new_def, ot["property_mapping"], ot.get("property_types"))
     new_lifecycle = lifecycle_status if lifecycle_status is not None else current["lifecycle_status"]
     new_visibility = visibility if visibility is not None else current["visibility"]
     if new_lifecycle not in VALID_LIFECYCLE:

@@ -46,11 +46,49 @@ CREATE TABLE IF NOT EXISTS object_instance_history (
     source_snapshot_id BIGINT NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Soft-delete markers written by declarative Action rules (`delete_object`).
+-- Reads hide tombstoned ids even when the underlying row still exists.
+CREATE TABLE IF NOT EXISTS object_instance_tombstone (
+    tenant_id TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    prior_data JSONB,
+    set_by_action_urn TEXT NOT NULL,
+    set_by_urn TEXT NOT NULL,
+    set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, object_type, instance_id)
+);
 """
 
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
+
+
+async def is_tombstoned(
+    pool: asyncpg.Pool, object_type: str, tenant_id: str, instance_id
+) -> bool:
+    return bool(
+        await pool.fetchval(
+            "SELECT 1 FROM object_instance_tombstone WHERE tenant_id = $1 AND object_type = $2 AND instance_id = $3",
+            tenant_id,
+            object_type,
+            str(instance_id),
+        )
+    )
+
+
+async def list_tombstoned_ids(pool: asyncpg.Pool, object_type: str, tenant_id: str) -> set[str]:
+    """Bulk tombstone lookup for the live-Iceberg fallback path (`core._resolve_many`),
+    which has no serving-store row to filter through `NOT EXISTS` the way `list_instances`
+    does — one query per collection instead of one per row.
+    """
+    rows = await pool.fetch(
+        "SELECT instance_id FROM object_instance_tombstone WHERE tenant_id = $1 AND object_type = $2",
+        tenant_id, object_type,
+    )
+    return {row["instance_id"] for row in rows}
 
 
 async def materialize(
@@ -130,6 +168,8 @@ async def get_instance_as_of(
 
 
 async def get_instance(pool: asyncpg.Pool, object_type: str, tenant_id: str, instance_id) -> Optional[dict]:
+    if await is_tombstoned(pool, object_type, tenant_id, instance_id):
+        return None
     row = await pool.fetchrow(
         "SELECT data, materialized_at FROM object_instance WHERE object_type = $1 AND tenant_id = $2 AND instance_id = $3",
         object_type, tenant_id, str(instance_id),
@@ -139,33 +179,61 @@ async def get_instance(pool: asyncpg.Pool, object_type: str, tenant_id: str, ins
     return _with_freshness(json.loads(row["data"]), row["materialized_at"])
 
 
-# `instance_id` is TEXT (some ObjectTypes, e.g. InventoryLevel, are keyed
-# by a non-numeric SKU) — a plain `::bigint` cast would fail outright for
-# those. Numeric ids are zero-padded before the text compare so their
-# relative order still matches numeric order; non-numeric ids just sort
-# as plain text among themselves. One ORDER BY expression works for both.
+# Zero-pad numeric IDs so ordering matches numeric order, sorting non-numeric IDs as text.
 _ORDER_BY_INSTANCE_ID = "(CASE WHEN instance_id ~ '^[0-9]+$' THEN lpad(instance_id, 20, '0') ELSE instance_id END)"
 
 
 async def list_instances(
-    pool: asyncpg.Pool, object_type: str, tenant_id: str, *, filter_column: Optional[str] = None, filter_value=None
+    pool: asyncpg.Pool,
+    object_type: str,
+    tenant_id: str,
+    *,
+    filter_column: Optional[str] = None,
+    filter_value=None,
+    after_id: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> list[dict]:
+    """List materialized instances, optionally keyset-paged.
+
+    `after_id` is exclusive (rows strictly after that instance_id in the
+    same order as `_ORDER_BY_INSTANCE_ID`). `limit` caps SQL rows before
+    freshness wrapping — callers that post-filter (markings) should
+    over-fetch.
+    """
+    params: list = [object_type, tenant_id]
+    filter_sql = ""
     if filter_column is not None:
-        rows = await pool.fetch(
-            f"""
-            SELECT data, materialized_at FROM object_instance
-            WHERE object_type = $1 AND tenant_id = $2 AND data->>$3 = $4
-            ORDER BY {_ORDER_BY_INSTANCE_ID}
-            """,
-            object_type, tenant_id, filter_column, str(filter_value),
-        )
-    else:
-        rows = await pool.fetch(
-            f"""
-            SELECT data, materialized_at FROM object_instance
-            WHERE object_type = $1 AND tenant_id = $2
-            ORDER BY {_ORDER_BY_INSTANCE_ID}
-            """,
-            object_type, tenant_id,
-        )
+        params.extend([filter_column, str(filter_value)])
+        filter_sql = "AND data->>$3 = $4"
+
+    after_sql = ""
+    if after_id is not None:
+        params.append(str(after_id))
+        p = len(params)
+        after_sql = f"""
+          AND {_ORDER_BY_INSTANCE_ID} > (
+            CASE WHEN ${p}::text ~ '^[0-9]+$' THEN lpad(${p}::text, 20, '0') ELSE ${p}::text END
+          )
+        """
+
+    limit_sql = ""
+    if limit is not None:
+        params.append(int(limit))
+        limit_sql = f"LIMIT ${len(params)}"
+
+    rows = await pool.fetch(
+        f"""
+        SELECT data, materialized_at FROM object_instance oi
+        WHERE object_type = $1 AND tenant_id = $2
+          {filter_sql}
+          AND NOT EXISTS (
+            SELECT 1 FROM object_instance_tombstone t
+            WHERE t.tenant_id = oi.tenant_id AND t.object_type = oi.object_type AND t.instance_id = oi.instance_id
+          )
+          {after_sql}
+        ORDER BY {_ORDER_BY_INSTANCE_ID}
+        {limit_sql}
+        """,
+        *params,
+    )
     return [_with_freshness(json.loads(row["data"]), row["materialized_at"]) for row in rows]

@@ -8,16 +8,15 @@ specific route in `seeded.py` if registered any earlier, including
 `/objects/Customer` itself. They only ever get reached for a name that
 isn't one of the six boot-known types, at which point
 `core._resolve_one`/`_resolve_many`'s own dynamic-URN fallback and
-`resolver.fetch_generic` take over. No Customer-specific overlay
-(`seeded._merge_action_overlays`) applies here — that one really is
-specific to Customer — but `_merge_declarative_edits` below *does*, the
-generic counterpart every self-serve ObjectType gets automatically.
+`resolver.fetch_generic` take over. `_merge_declarative_edits` below
+overlays Action Type edits for every ObjectType.
 """
 
 from __future__ import annotations
 
 import functools
 import json
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,17 +28,14 @@ from ... import ontology, resolver
 from ... import core
 from ...actions import request_generic_action, revert_declarative_action
 from ...actions.declarative import _object_type_and_instance_id_from_instance_urn
+from .paging_deps import after_id_from_cursor, page_from_resolved, paging_query
 
 router = APIRouter()
 
+logger = logging.getLogger("knowledge.objects")
+
 
 async def _generic_object_type_or_404(object_type: str, principal: Principal) -> dict:
-    if object_type in core.OBJECT_TYPE_URNS and principal.tenant_id == core.TENANT_ID:
-        # Already served by a specific route in `seeded.py`; reaching
-        # here would mean registration order broke, not that this name
-        # is unknown. (Other tenants never hit the seeded routes' ReBAC
-        # on bootstrap URNs — they resolve via catalogue below.)
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
     types = await ontology.list_object_types(core.pool, principal.tenant_id)
     for definition in types:
         if definition.get("name") == object_type or definition["urn"].rsplit(":", 1)[-1] == object_type:
@@ -50,11 +46,7 @@ async def _generic_object_type_or_404(object_type: str, principal: Principal) ->
 async def _merge_declarative_edits(rows: list[dict], object_type: str, tenant_id: str) -> list[dict]:
     """The generic read half of the `actions` package's
     `object_instance_edit` overlay — a declarative Action Type's applied
-    edits become visible on the very next read, the same "no new overlay
-    function per Action" property `seeded._merge_action_overlays` never
-    had (it's one bespoke function per Customer Action; this one is the
-    same function for every ObjectType and every declarative Action
-    Type, forever).
+    edits become visible on the very next read, for every ObjectType.
     """
     if not rows:
         return rows
@@ -81,16 +73,24 @@ async def _merge_declarative_edits(rows: list[dict], object_type: str, tenant_id
 
 
 @router.get("/objects/{object_type}")
-async def list_generic_objects(object_type: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def list_generic_objects(
+    object_type: str,
+    principal: Principal = Depends(core.current_principal),
+    page: tuple[int, Optional[str]] = Depends(paging_query),
+) -> dict:
+    page_size, cursor = page
     definition = await _generic_object_type_or_404(object_type, principal)
     await core._authorize_object_type(principal, definition["urn"], "read")
     dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
     fetch_fn = functools.partial(resolver.fetch_generic, dataset_name)
-    rows = await core._resolve_many(object_type, principal.tenant_id, fetch_fn, principal=principal)
+    rows = await core._resolve_many(
+        object_type, principal.tenant_id, fetch_fn, principal=principal,
+        after_id=after_id_from_cursor(cursor), limit=page_size + 1,
+    )
     rows = await _merge_declarative_edits(rows, object_type, principal.tenant_id)
     for row in rows:
         row["title"] = ontology.title_of(row, definition)
-    return rows
+    return page_from_resolved(rows, page_size=page_size)
 
 
 @router.get("/objects/{object_type}/{instance_id}")
@@ -115,6 +115,13 @@ class InvokeActionRequest(BaseModel):
     ttl_seconds: Optional[int] = None
 
 
+class BatchInvokeActionRequest(BaseModel):
+    reason: str
+    instance_ids: list[str]
+    parameters: dict = {}
+    ttl_seconds: Optional[int] = None
+
+
 @router.post("/objects/{object_type}/{instance_id}/actions/{action_name}")
 async def invoke_generic_action(
     object_type: str, instance_id: str, action_name: str, request: InvokeActionRequest,
@@ -128,18 +135,6 @@ async def invoke_generic_action(
     happen inside `actions.request_generic_action` before anything is
     requested or applied, so a bad call never reaches a 500.
     """
-    # Deliberately not `_generic_object_type_or_404` — that helper exists
-    # to keep this router's own generic list/get routes from shadowing
-    # `seeded.py`'s specific ones, and rejects every seeded type name for
-    # that reason. Action invocation isn't split seeded-vs-generic like
-    # reads are (this is the *only* route for any declarative Action,
-    # confirmed via `routers/objects/__init__.py`'s own docstring — the
-    # two hardcoded Customer actions are the sole exception, via their
-    # own literal routes in `routers/actions.py`), so a declarative
-    # Action Type targeting a seeded ObjectType was unreachable here
-    # before this fix — `core._object_type_urn_for` is the
-    # seeded-or-self-serve-agnostic resolver every other cross-cutting
-    # route (e.g. the revert endpoint below) already uses instead.
     try:
         object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
@@ -165,6 +160,60 @@ async def invoke_generic_action(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/objects/{object_type}/actions/{action_name}/batch")
+async def invoke_action_batch(
+    object_type: str,
+    action_name: str,
+    request: BatchInvokeActionRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Bounded sequential batch invoke of a declarative Action Type (P2d)."""
+    if not request.instance_ids:
+        raise HTTPException(status_code=400, detail="instance_ids must be non-empty")
+    if len(request.instance_ids) > 50:
+        raise HTTPException(status_code=400, detail="instance_ids capped at 50 per batch")
+    try:
+        object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
+    action_type = await ontology.get_action_type(core.pool, principal.tenant_id, action_name)
+    if action_type is None:
+        raise HTTPException(status_code=404, detail=f"unknown Action Type: {action_name}")
+    await core._authorize_object_type(principal, object_type_urn, action_type["required_permission"])
+
+    results: list[dict] = []
+    for instance_id in request.instance_ids:
+        try:
+            outcome = await request_generic_action(
+                core.pool,
+                action_name=action_name,
+                tenant_id=principal.tenant_id,
+                workspace_id=workspace_id,
+                object_type=object_type,
+                instance_id=str(instance_id),
+                principal=principal,
+                reason=request.reason,
+                parameters=request.parameters,
+                ttl_seconds=request.ttl_seconds,
+            )
+            results.append({"instanceId": str(instance_id), "ok": True, "result": outcome})
+        except (LookupError, ValueError) as exc:
+            results.append({"instanceId": str(instance_id), "ok": False, "error": str(exc)})
+        except Exception:
+            # Isolate the failure to this instance — don't abort the batch.
+            logger.exception("batch action %s failed for instance %s", action_name, instance_id)
+            results.append({"instanceId": str(instance_id), "ok": False, "error": "internal error"})
+    return {
+        "action": action_name,
+        "objectType": object_type,
+        "count": len(results),
+        "succeeded": sum(1 for r in results if r["ok"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+        "results": results,
+    }
 
 
 @router.post("/action-invocations/{invocation_id}/revert")

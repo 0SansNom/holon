@@ -1,12 +1,10 @@
 """Declarative Action Types (`ontology/action_types.py`'s registry) —
-the no-code counterpart to `hardcoded.py`'s two Python functions. A
-leaf module: imports `_event` from `.hardcoded` (one-way — this file
-depends on that one, never the reverse) plus package-external modules
-(`ontology`, `core`, `resolver`, `serving_store`), never from
-`__init__.py`. `__init__.py`'s shared orchestration (`_apply_now`/
-`approve_action`) imports `_apply_declarative_edits`/
-`_compensate_declarative_action` from here, dispatching into them
-whenever an action name isn't in `hardcoded.ACTION_DEFINITIONS`.
+the no-code Action path. A leaf module: imports `_event` from
+`.hardcoded` (one-way — this file depends on that one, never the reverse)
+plus package-external modules (`ontology`, `core`, `resolver`,
+`serving_store`), never from `__init__.py`. `__init__.py`'s shared
+orchestration (`_apply_now`/`approve_action`) imports
+`_apply_declarative_edits`/`_compensate_declarative_action` from here.
 """
 
 from __future__ import annotations
@@ -21,6 +19,7 @@ import asyncpg
 from holon_common import Principal, build_urn, outbox
 
 from .hardcoded import _event
+from .metrics import ACTION_EVENTS
 
 _OPERATORS = {
     "eq": lambda actual, expected: actual == expected,
@@ -29,45 +28,100 @@ _OPERATORS = {
     "gte": lambda actual, expected: actual is not None and actual >= expected,
     "lt": lambda actual, expected: actual is not None and actual < expected,
     "lte": lambda actual, expected: actual is not None and actual <= expected,
+    "in": lambda actual, expected: actual in (expected or []),
 }
 
 
 def _object_type_and_instance_id_from_instance_urn(instance_urn: str) -> tuple[str, str]:
-    """Generic counterpart to `hardcoded._customer_id_from_instance_urn`
-    — every `instance_urn` this package ever builds (`request_action`,
-    `request_generic_action`) already has the `{ObjectType}/{id}` shape
-    in its final segment; this just splits it instead of assuming it's
-    always `Customer/{int}`.
+    """Generic counterpart to `hardcoded._customer_id_from_instance_urn` —
+    every `instance_urn` this package builds already has the
+    `{ObjectType}/{id}` shape in its final segment.
     """
     local = instance_urn.rsplit(":", 1)[-1]
     object_type, instance_id = local.split("/", 1)
     return object_type, instance_id
 
 
-def _evaluate_criteria(instance_row: dict, criteria: list[dict]) -> Optional[str]:
-    """Pure function, fixed and closed operator set — never `eval()`.
-    Evaluated against the instance's real, unmasked state
-    (`serving_store.get_instance`, called by `request_generic_action`
-    before this): a submission criterion is a business rule about the
-    data itself, a different concern from the requester's *permission*
-    to invoke the action at all, which ABAC/ReBAC still gates separately
-    and unchanged. Returns `None` if every criterion passes, otherwise
-    the first violation's message.
+def _evaluate_criteria(
+    instance_row: dict,
+    criteria: list[dict],
+    *,
+    principal: Optional[Principal] = None,
+) -> Optional[str]:
+    """Evaluate submission criteria. Flat list = implicit AND.
+
+    Leaf kinds: property comparison, principal field comparison.
+    Groups: ``all`` / ``any``. Optional ``message`` overrides the default
+    failure string (Foundry-style failure messages).
     """
     for criterion in criteria:
-        property_name = criterion["property"]
+        error = _evaluate_one_criterion(instance_row, criterion, principal=principal)
+        if error is not None:
+            return error
+    return None
+
+
+def _evaluate_one_criterion(
+    instance_row: dict,
+    criterion: dict,
+    *,
+    principal: Optional[Principal],
+) -> Optional[str]:
+    custom = criterion.get("message")
+
+    if "all" in criterion:
+        for child in criterion["all"]:
+            err = _evaluate_one_criterion(instance_row, child, principal=principal)
+            if err is not None:
+                return custom or err
+        return None
+    if "any" in criterion:
+        errors: list[str] = []
+        for child in criterion["any"]:
+            err = _evaluate_one_criterion(instance_row, child, principal=principal)
+            if err is None:
+                return None
+            errors.append(err)
+        return custom or (errors[0] if errors else "submission criterion failed: any")
+
+    if "principal" in criterion:
+        if principal is None:
+            return custom or "submission criterion failed: principal unavailable"
+        field = criterion["principal"]
+        actual = getattr(principal, field, None)
         operator = criterion["operator"]
         expected = criterion["value"]
-        actual = instance_row.get(property_name)
         try:
             passed = _OPERATORS[operator](actual, expected)
-        except TypeError:
-            # e.g. `gt` between a string and a number — not comparable,
-            # so the criterion cannot have been satisfied.
+        except (TypeError, KeyError):
             passed = False
         if not passed:
-            return f"submission criterion failed: {property_name} {operator} {expected!r} (actual: {actual!r})"
+            return custom or f"submission criterion failed: principal.{field} {operator} {expected!r} (actual: {actual!r})"
+        return None
+
+    property_name = criterion["property"]
+    operator = criterion["operator"]
+    expected = criterion["value"]
+    actual = instance_row.get(property_name)
+    try:
+        passed = _OPERATORS[operator](actual, expected)
+    except TypeError:
+        passed = False
+    if not passed:
+        return custom or f"submission criterion failed: {property_name} {operator} {expected!r} (actual: {actual!r})"
     return None
+
+
+def _deep_set(obj: dict, path: list[str], value: Any) -> dict:
+    """Return a copy of ``obj`` with ``path`` set to ``value`` (nested dicts)."""
+    root = dict(obj)
+    cur = root
+    for key in path[:-1]:
+        nxt = cur.get(key)
+        cur[key] = dict(nxt) if isinstance(nxt, dict) else {}
+        cur = cur[key]
+    cur[path[-1]] = value
+    return root
 
 
 async def _write_instance_edits(
@@ -80,24 +134,43 @@ async def _write_instance_edits(
     action_urn: str,
     actor: Principal,
     at: datetime,
+    base_instance: Optional[dict] = None,
 ) -> tuple[dict, dict]:
-    """The shared upsert-into-`object_instance_edit` + prior-value-capture
-    core, factored out of `_apply_declarative_edits` so a function-backed
-    Action Type (`__init__._resolve_function_backed_edits`) can write its
-    *already-resolved* `{property: value}` dict through the exact same
-    path a static `edits` list uses — one row per property, upsert,
-    instead of a bespoke per-Action table. Returns `(result, prior)`:
-    `result` is `{property: newValue, ...}`, the same shape the two
-    hardcoded apply functions already return; `prior` is
-    `{property: {"existed": bool, "value": ...}}`, captured before each
-    upsert — `__init__.py` persists it onto `action_invocation` so
-    `revert_declarative_action` below can restore it later. `existed`
-    disambiguates "never set before" from "explicitly set to JSON null",
-    which a bare prior value could never do on its own.
+    """Upsert into ``object_instance_edit`` + prior-value capture.
+
+    Keys may be dotted paths (``address.city``) — the top-level property
+    is rewritten as a merged struct (P2d nested struct edit).
     """
     result: dict[str, Any] = {}
     prior: dict[str, Any] = {}
-    for property_name, value in resolved.items():
+
+    # Collapse dotted paths into top-level property writes.
+    top_level: dict[str, Any] = {}
+    for key, value in resolved.items():
+        if "." not in key:
+            top_level[key] = value
+            continue
+        top, *rest = key.split(".")
+        existing_val = top_level.get(top)
+        if existing_val is None:
+            # Seed from prior overlay / base instance when available.
+            existing_row = await conn.fetchrow(
+                "SELECT property_value FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 "
+                "AND instance_id = $3 AND property_name = $4",
+                tenant_id, object_type, instance_id, top,
+            )
+            if existing_row is not None:
+                existing_val = json.loads(existing_row["property_value"])
+            elif base_instance is not None:
+                existing_val = base_instance.get(top)
+            if not isinstance(existing_val, dict):
+                existing_val = {}
+            top_level[top] = existing_val
+        if not isinstance(top_level[top], dict):
+            top_level[top] = {}
+        top_level[top] = _deep_set(top_level[top], rest, value)
+
+    for property_name, value in top_level.items():
         existing = await conn.fetchrow(
             "SELECT property_value FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 "
             "AND instance_id = $3 AND property_name = $4 FOR UPDATE",
@@ -135,19 +208,46 @@ async def _apply_declarative_edits(
     action_urn: str,
     actor: Principal,
     at: datetime,
+    workspace_id: str = "global",
 ) -> tuple[dict, dict]:
-    """The generic counterpart to `hardcoded._apply_put_on_credit_hold`/
-    `_apply_close_account` — resolves a static `edits` declaration
-    (`source: "parameter"|"literal"`) into a flat `{property: value}`
-    dict, then writes it via `_write_instance_edits`.
+    """Resolve a static `edits` declaration into property overlays plus
+    optional structural rules (create/delete object + link), then write
+    both in the same transaction. Property results stay flat
+    (`{property: value}`); structural ops are bagged under
+    `__structural__` so response splatting and writeback stay compatible.
     """
+    from ..action_structural import (
+        STRUCTURAL_KEY,
+        apply_structural_edits,
+        is_property_edit,
+    )
+
     resolved = {
-        edit["property"]: (parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"])
+        edit["property"]: (
+            parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
+        )
         for edit in edits
+        if is_property_edit(edit)
     }
-    return await _write_instance_edits(
+    result, prior = await _write_instance_edits(
         conn, tenant_id, object_type, instance_id, resolved, action_urn=action_urn, actor=actor, at=at,
     )
+    structural = await apply_structural_edits(
+        conn,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        target_object_type=object_type,
+        target_instance_id=instance_id,
+        edits=edits,
+        parameters=parameters,
+        action_urn=action_urn,
+        actor=actor,
+        at=at,
+    )
+    if structural.get("links") or structural.get("objects"):
+        result = {**result, STRUCTURAL_KEY: structural}
+        prior = {**prior, STRUCTURAL_KEY: structural}
+    return result, prior
 
 
 async def _compensate_declarative_action(
@@ -185,7 +285,10 @@ async def _compensate_declarative_action(
         tenant_id, action_name, instance_urn,
     )
     edits = json.loads(invocation["edits"]) if invocation and invocation["edits"] else {}
-    property_names = list(edits.keys())
+    from ..action_structural import STRUCTURAL_KEY, property_edit_keys, revert_structural
+
+    property_names = property_edit_keys(edits)
+    structural = edits.get(STRUCTURAL_KEY) if isinstance(edits, dict) else None
 
     at = datetime.now(timezone.utc)
     event = _event(
@@ -198,11 +301,21 @@ async def _compensate_declarative_action(
     )
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 AND instance_id = $3 "
-                "AND property_name = ANY($4::text[])",
-                tenant_id, object_type, instance_id, property_names,
-            )
+            if property_names:
+                await conn.execute(
+                    "DELETE FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 AND instance_id = $3 "
+                    "AND property_name = ANY($4::text[])",
+                    tenant_id, object_type, instance_id, property_names,
+                )
+            if structural:
+                await revert_structural(
+                    conn,
+                    tenant_id=tenant_id,
+                    structural=structural,
+                    action_urn="compensate",
+                    actor=decider,
+                    at=at,
+                )
             await conn.execute(
                 "UPDATE action_approval SET status = 'failed', decision_note = $1 WHERE id = $2",
                 f"compensated: {error}", approval_id,
@@ -253,6 +366,22 @@ async def revert_declarative_action(
     prior_values = row["prior_values"]
     if isinstance(prior_values, str):
         prior_values = json.loads(prior_values)
+    edits_payload = row["edits"]
+    if isinstance(edits_payload, str):
+        edits_payload = json.loads(edits_payload)
+
+    from ..action_structural import STRUCTURAL_KEY, property_edit_keys, revert_structural
+
+    property_priors = {
+        key: prior_values[key]
+        for key in property_edit_keys(prior_values)
+        if isinstance(prior_values.get(key), dict) and "existed" in prior_values[key]
+    }
+    structural = None
+    if isinstance(edits_payload, dict):
+        structural = edits_payload.get(STRUCTURAL_KEY)
+    if structural is None and isinstance(prior_values, dict):
+        structural = prior_values.get(STRUCTURAL_KEY)
 
     at = datetime.now(timezone.utc)
     event = _event(
@@ -265,7 +394,7 @@ async def revert_declarative_action(
     )
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for property_name, prior in prior_values.items():
+            for property_name, prior in property_priors.items():
                 if prior["existed"]:
                     await conn.execute(
                         "UPDATE object_instance_edit SET property_value = $1::jsonb, set_by_action_urn = $2, "
@@ -279,10 +408,24 @@ async def revert_declarative_action(
                         "AND instance_id = $3 AND property_name = $4",
                         tenant_id, object_type, instance_id, property_name,
                     )
+            if structural:
+                await revert_structural(
+                    conn,
+                    tenant_id=tenant_id,
+                    structural=structural,
+                    action_urn="revert",
+                    actor=actor,
+                    at=at,
+                )
             await conn.execute("UPDATE action_invocation SET reverted_at = $1 WHERE id = $2", at, invocation_id)
             await outbox.enqueue(conn, event)
 
-    return {"status": "reverted", "invocationId": invocation_id, "restoredProperties": list(prior_values.keys())}
+    return {
+        "status": "reverted",
+        "invocationId": invocation_id,
+        "restoredProperties": list(property_priors.keys()),
+        "revertedStructural": bool(structural),
+    }
 
 
 async def _get_unmasked_instance(
@@ -311,6 +454,8 @@ async def _get_unmasked_instance(
     row = await serving_store.get_instance(pool, object_type, tenant_id, instance_id)
     if row is not None:
         return row
+    if await serving_store.is_tombstoned(pool, object_type, tenant_id, instance_id):
+        return None
 
     object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
     definition = await ontology.get_object_type(pool, object_type_urn)
@@ -339,14 +484,13 @@ async def request_generic_action(
     parameters: dict,
     ttl_seconds: Optional[int] = None,
 ) -> dict:
-    """The generic entry point for a declarative Action Type — parallel
-    to `hardcoded`'s implicit `request_action` (Customer-only, untouched)
-    rather than a replacement, since that one's signature is baked into
-    every existing caller. Validates every declared parameter against
-    its Value Type (real format enforcement, not just a declared schema)
-    and every submission criterion against the instance's actual current
-    state, *before* creating any approval or applying anything — a
-    failure here is a clean 400, never a partially-applied write.
+    """The generic entry point for a declarative Action Type — every
+    Action Type is declarative now, so this is the only invocation path.
+    Validates every declared parameter against its Value Type (real
+    format enforcement, not just a declared schema) and every submission
+    criterion against the instance's actual current state, *before*
+    creating any approval or applying anything — a failure here is a
+    clean 400, never a partially-applied write.
     """
     from .. import ontology
     from . import APPROVAL_TTL, _apply_now
@@ -355,28 +499,24 @@ async def request_generic_action(
     if action_type is None:
         raise LookupError(f"unknown Action Type: {action_name}")
 
-    # Resolved once, reused below both for the target check (ObjectType-
-    # or Interface-scoped) and the property-control check further down —
-    # previously fetched twice.
     object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
     definition = await ontology.get_object_type(pool, object_type_urn)
 
+    from ..action_structural import is_property_edit
+
     target_interface = action_type.get("target_interface")
     if target_interface:
-        # Actions on interfaces: invocable against any ObjectType that
-        # currently `implements` this interface — same generalization
-        # Foundry's own "interface action rules" apply, restricted the
-        # same way: only the interface's own `required_properties` may
-        # ever be edited, never a type-specific one, checked against
-        # every declared edit (not just the ones this call happens to
-        # touch) since the restriction is a property of the Action Type
-        # itself, not of any one invocation.
         if target_interface not in ((definition or {}).get("implements") or []):
             raise ValueError(f"{action_name} targets interface {target_interface!r}, which {object_type!r} does not implement")
         interface = await ontology.get_interface_type(pool, tenant_id, target_interface)
         allowed_properties = set((interface or {}).get("required_properties") or [])
         for edit in action_type["edits"]:
-            if edit["property"] not in allowed_properties:
+            if not is_property_edit(edit):
+                raise ValueError(
+                    f"{action_name} is scoped to interface {target_interface!r} and cannot use "
+                    f"structural edit kind {edit.get('kind')!r} — only modify_property is allowed"
+                )
+            if edit["property"].split(".", 1)[0] not in allowed_properties and edit["property"] not in allowed_properties:
                 raise ValueError(
                     f"{action_name} is scoped to interface {target_interface!r} and cannot edit "
                     f"{edit['property']!r} — only the interface's required_properties are allowed"
@@ -397,6 +537,24 @@ async def request_generic_action(
             referenced_instance = await _get_unmasked_instance(pool, referenced_type, tenant_id, workspace_id, str(value))
             if referenced_instance is None:
                 raise ValueError(f"parameter {name!r}: {referenced_type}/{value} does not exist")
+            set_name = declaration.get("object_set")
+            if set_name:
+                set_urn = ontology.object_set_urn(tenant_id, workspace_id, set_name)
+                obj_set = await ontology.get_object_set(pool, set_urn)
+                if obj_set is None:
+                    raise ValueError(f"parameter {name!r}: unknown object_set {set_name!r}")
+                set_ot = str(obj_set["object_type_urn"]).rsplit(":", 1)[-1]
+                if set_ot != referenced_type:
+                    raise ValueError(
+                        f"parameter {name!r}: object_set {set_name!r} targets {set_ot!r}, "
+                        f"not {referenced_type!r}"
+                    )
+                set_ot_def = await ontology.get_object_type(pool, obj_set["object_type_urn"])
+                mapping = (set_ot_def or {}).get("property_mapping") or {}
+                if not ontology.matches_predicates(referenced_instance, obj_set["definition"], mapping):
+                    raise ValueError(
+                        f"parameter {name!r}: {referenced_type}/{value} is not in object set {set_name!r}"
+                    )
             continue
         value_type = await ontology.get_value_type(pool, tenant_id, declaration["value_type"])
         if value_type is None:
@@ -405,32 +563,38 @@ async def request_generic_action(
         if error is not None:
             raise ValueError(f"parameter {name!r}: {error}")
 
-    # Property control: an edit may target a property the ObjectType has
-    # declared non-editable, or may null out one declared required — both
-    # real teeth on `property_types`' `editable`/`required` flags, checked
-    # here (against the edits this Action Type will actually perform)
-    # rather than at Action Type registration time, since the target
-    # ObjectType's `property_types` is live state, same "structural now,
-    # real references at invocation" split `value_type` above already
-    # follows. A property with no `property_types` entry is unaffected —
-    # every Action Type predating this feature keeps working. `definition`
-    # already resolved above for the target check.
     property_types = (definition or {}).get("property_types") or {}
     for edit in action_type["edits"]:
-        rule = property_types.get(edit["property"])
+        if not is_property_edit(edit):
+            continue
+        prop_key = edit["property"]
+        top_property = prop_key.split(".", 1)[0]
+        rule = property_types.get(top_property)
         if rule is None:
             continue
         edit_value = parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
         if rule.get("editable") is False:
-            raise ValueError(f"property {edit['property']!r} is not editable")
+            raise ValueError(f"property {top_property!r} is not editable")
+        # Nested path edits write a leaf into a struct — skip whole-struct required/type checks.
+        if "." in prop_key:
+            continue
         if rule.get("required") and edit_value is None:
             raise ValueError(f"property {edit['property']!r} is required and cannot be set to null")
+        if edit_value is not None and rule.get("kind") in ("value_type", "shared_property_type", "struct", "array"):
+            type_error = await ontology.validate_typed_property_value(
+                pool, tenant_id, rule, edit_value, property_name=edit["property"]
+            )
+            if type_error is not None:
+                raise ValueError(type_error)
 
     instance_row = await _get_unmasked_instance(pool, object_type, tenant_id, workspace_id, instance_id)
     if instance_row is None:
         raise LookupError(f"{object_type}/{instance_id} not found")
-    criteria_error = _evaluate_criteria(instance_row, action_type["submission_criteria"])
+    criteria_error = _evaluate_criteria(
+        instance_row, action_type["submission_criteria"], principal=principal
+    )
     if criteria_error is not None:
+        ACTION_EVENTS.labels("criteria_reject", action_name).inc()
         raise ValueError(criteria_error)
 
     instance_urn = build_urn(tenant_id, workspace_id, "instance", f"{object_type}/{instance_id}")
@@ -441,10 +605,6 @@ async def request_generic_action(
             object_type=object_type, instance_id=instance_id, parameters=parameters,
         )
 
-    # High risk: propose only, same shape `hardcoded`'s implicit
-    # `request_action` already uses — `parameters` persisted alongside
-    # so `approve_action` can apply the right `edits` once a decision
-    # actually comes in.
     ttl = timedelta(seconds=ttl_seconds) if ttl_seconds is not None else APPROVAL_TTL
     expires_at = datetime.now(timezone.utc) + ttl
     event = _event(
