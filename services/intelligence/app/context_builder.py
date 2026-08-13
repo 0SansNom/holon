@@ -30,18 +30,10 @@ from .vector_store import semantic_search
 
 logger = logging.getLogger("intelligence.context_builder")
 
-_OBJECT_TYPE_NAMES = ["Customer", "Order", "SupportTicket", "ProductReview", "Supplier", "InventoryLevel"]
-
-# One hop, from the existing hard-coded relation-traversal endpoints —
-# reused as-is, not reimplemented.
-_RELATION_PATHS = {
-    "Customer": {"Order": "/objects/Customer/{id}/orders", "SupportTicket": "/objects/Customer/{id}/tickets"},
-    "Order": {"ProductReview": "/objects/Order/{id}/reviews"},
-}
-
-# Known status-like values in this build's actual seeded data, mapped to
+# Status-like values for a couple of illustrative ObjectTypes, mapped to
 # the property that holds them — the controlled vocabulary aggregation
-# questions are matched against.
+# questions are matched against. Narrow on purpose: a real per-tenant
+# equivalent would read this from ValueType/property metadata instead.
 _STATUS_VALUES_BY_OBJECT_TYPE = {
     "Order": ("status", ["pending", "shipped", "delivered"]),
     "SupportTicket": ("status", ["open", "closed"]),
@@ -68,9 +60,6 @@ class ContextResult:
 
 def _resolve_object_type(query_text: str, glossary_terms: list[dict]) -> Optional[str]:
     lowered = query_text.lower()
-    for name in _OBJECT_TYPE_NAMES:
-        if name.lower() in lowered:
-            return name
     for term in glossary_terms:
         related = term.get("related_object_type_urn")
         if not related:
@@ -94,8 +83,6 @@ def classify_intent(query_text: str, *, resolved_object_type: Optional[str], res
         return "aggregation"
     if _TEMPORAL_MARKERS.search(lowered):
         return "temporal"
-    if resolved_object_type and resolved_id and any(name.lower() in lowered for name in _OBJECT_TYPE_NAMES if name != resolved_object_type):
-        return "traversal"
     if resolved_object_type and resolved_id:
         return "lookup"
     return "semantic"
@@ -110,21 +97,6 @@ async def _structural_lookup(
         return None
     data = response.json()
     return _object_card(object_type, instance_id, data)
-
-
-async def _structural_traversal(
-    http: httpx.AsyncClient, knowledge_url: str, headers: dict, query_text: str, source_type: str, source_id: str
-) -> list[ContextItem]:
-    lowered = query_text.lower()
-    targets = _RELATION_PATHS.get(source_type, {})
-    for target_type, path_template in targets.items():
-        if target_type.lower() in lowered or any(k in lowered for k in ("order", "commande", "ticket")):
-            response = await http.get(f"{knowledge_url}{path_template.format(id=source_id)}", headers=headers)
-            if response.status_code == 200:
-                return [
-                    _object_card(target_type, str(row.get("id")), row) for row in response.json()
-                ]
-    return []
 
 
 async def _structural_aggregation(
@@ -215,10 +187,6 @@ async def build_context(
             item = await _structural_lookup(http, knowledge_url, headers, resolved_object_type, resolved_id, as_of)
             if item:
                 result.items.append(item)
-        elif intent == "traversal" and resolved_object_type and resolved_id:
-            result.items.extend(
-                await _structural_traversal(http, knowledge_url, headers, query_text, resolved_object_type, resolved_id)
-            )
 
         # Semantic search is a fallback, only reached
         # when structural resolution produced nothing.
