@@ -1188,6 +1188,25 @@ async def get_write_target(dataset_name: str, principal: Principal = Depends(cur
     return target
 
 
+@app.delete("/write-targets/{dataset_name}")
+async def delete_write_target(dataset_name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await write_target_registry.get_write_target(app.state.pool, principal.tenant_id, dataset_name) is None:
+        raise HolonError.not_found('DatasetNotFound', f"no write target registered for dataset {dataset_name!r}")
+    await write_target_registry.delete_write_target(app.state.pool, principal.tenant_id, dataset_name)
+    emit_audit(
+        category="access",
+        action="connectivity.write_target.deleted",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="write_target",
+        resource_urn=build_urn(principal.tenant_id, "global", "write-target", dataset_name),
+    )
+    return {"deleted": dataset_name}
+
+
 class WriteSourceRequest(BaseModel):
     edits: dict[str, object]
 

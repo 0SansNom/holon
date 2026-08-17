@@ -1,5 +1,10 @@
 import { useSuspenseQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { connectivityApi, type RegisterSourceRequest, type RegisterConnectionRequest } from "../connectivity";
+import {
+  connectivityApi,
+  type RegisterSourceRequest,
+  type RegisterConnectionRequest,
+  type RegisterWriteTargetRequest,
+} from "../connectivity";
 import { queryKeys } from "../queryKeys";
 import { useOptionalSuspenseQuery } from "../optionalSuspenseQuery";
 
@@ -97,6 +102,26 @@ export function useDeleteConnection() {
   return useMutation({
     mutationFn: (name: string) => connectivityApi.deleteConnection(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.connections() }),
+  });
+}
+
+export function useWriteTargets() {
+  return useSuspenseQuery({ queryKey: queryKeys.writeTargets(), queryFn: connectivityApi.listWriteTargets });
+}
+
+export function useRegisterWriteTarget() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterWriteTargetRequest) => connectivityApi.registerWriteTarget(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.writeTargets() }),
+  });
+}
+
+export function useDeleteWriteTarget() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (datasetName: string) => connectivityApi.deleteWriteTarget(datasetName),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.writeTargets() }),
   });
 }
 
