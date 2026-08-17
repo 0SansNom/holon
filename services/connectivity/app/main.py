@@ -514,6 +514,22 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
     Connectivity pod runs due-source work per tick. Quiesce is read from
     `connectivity_runtime` (shared), not process memory.
     """
+    async def _run_if_due(*, dataset_name: str, tenant_id: str, workspace_id: str, interval: timedelta) -> None:
+        dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
+        last_finished_at = await pool.fetchval(
+            "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
+            "ORDER BY finished_at DESC LIMIT 1",
+            tenant_id, dataset_urn,
+        )
+        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
+        if not due:
+            return
+        try:
+            result = await _run_sync_for_dataset(dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=workspace_id)
+            logger.info("scheduled sync completed for %r (tenant=%s): %d rows", dataset_name, tenant_id, result.row_count)
+        except Exception:
+            logger.exception("scheduled sync failed for %r (tenant=%s) — will retry next poll", dataset_name, tenant_id)
+
     actor = EventActor(type="service_account", urn=SCHEDULER_ACTOR_URN, on_behalf_of=None)
     while True:
         try:
@@ -528,35 +544,26 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
                         continue
                     sources = await generic_source_registry.list_all_scheduled_sources(pool)
                     for source in sources:
-                        dataset_name = source["name"]
-                        tenant_id = source["tenant_id"]
-                        workspace_id = source.get("workspace_id") or WORKSPACE_ID
-                        interval = timedelta(minutes=source["schedule_interval_minutes"])
-                        dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
-                        last_finished_at = await pool.fetchval(
-                            "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
-                            "ORDER BY finished_at DESC LIMIT 1",
-                            tenant_id, dataset_urn,
+                        await _run_if_due(
+                            dataset_name=source["name"],
+                            tenant_id=source["tenant_id"],
+                            workspace_id=source.get("workspace_id") or WORKSPACE_ID,
+                            interval=timedelta(minutes=source["schedule_interval_minutes"]),
                         )
-                        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
-                        if not due:
+                    # Same due-check, for connector plugins — plugins have
+                    # no workspace_id of their own (see plugin_registration's
+                    # schema), so scheduled plugin syncs always land in the
+                    # default workspace, same as an unscoped manual /sync.
+                    plugins = await plugin_registry.list_all_scheduled_plugins(pool)
+                    for plugin in plugins:
+                        if not plugin["dataset_name"]:
                             continue
-                        try:
-                            result = await _run_sync_for_dataset(
-                                dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=workspace_id
-                            )
-                            logger.info(
-                                "scheduled sync completed for %r (tenant=%s): %d rows",
-                                dataset_name,
-                                tenant_id,
-                                result.row_count,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "scheduled sync failed for %r (tenant=%s) — will retry next poll",
-                                dataset_name,
-                                tenant_id,
-                            )
+                        await _run_if_due(
+                            dataset_name=plugin["dataset_name"],
+                            tenant_id=plugin["tenant_id"],
+                            workspace_id=WORKSPACE_ID,
+                            interval=timedelta(minutes=plugin["schedule_interval_minutes"]),
+                        )
                 finally:
                     await conn.fetchval("SELECT pg_advisory_unlock($1)", _SCHEDULER_LOCK_KEY)
         except Exception:
@@ -770,6 +777,12 @@ class RegisterPluginRequest(BaseModel):
     entry_point: str
 
 
+@app.get("/plugins")
+async def list_plugins(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await plugin_registry.list_plugin_registrations(app.state.pool, principal.tenant_id)
+
+
 @app.post("/plugins")
 async def register_plugin(body: RegisterPluginRequest, principal: Principal = Depends(current_principal)) -> dict:
     await _authorize_workspace(principal, "write")
@@ -852,6 +865,39 @@ async def enable_plugin(name: str, principal: Principal = Depends(current_princi
         actor_type=principal.type,
         resource_type="connector_plugin",
         resource_urn=build_urn(principal.tenant_id, "global", "connector-plugin", name),
+    )
+    return result
+
+
+class SetPluginScheduleRequest(BaseModel):
+    schedule_interval_minutes: Optional[int] = None
+
+
+@app.post("/plugins/{name}/schedule")
+async def set_plugin_schedule(name: str, body: SetPluginScheduleRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """Same scheduling model as `/sources` — `run_scheduler_forever` picks
+    this up on its next poll, no restart needed. `null` clears it back to
+    manual-only, same as omitting `schedule_interval_minutes` on a source.
+    """
+    await _authorize_workspace(principal, "write")
+    if body.schedule_interval_minutes is not None and body.schedule_interval_minutes <= 0:
+        raise HolonError.invalid_argument(
+            "InvalidSchedule", "schedule_interval_minutes must be a positive number of minutes"
+        )
+    registration = await plugin_registry.get_plugin_registration(app.state.pool, name)
+    if registration is None:
+        raise _plugin_not_found(name)
+    result = await plugin_registry.set_plugin_schedule(app.state.pool, name, body.schedule_interval_minutes)
+    emit_audit(
+        category="access",
+        action="connectivity.plugin.schedule_updated",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="connector_plugin",
+        resource_urn=build_urn(principal.tenant_id, "global", "connector-plugin", name),
+        extra={"schedule_interval_minutes": body.schedule_interval_minutes},
     )
     return result
 

@@ -6,6 +6,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -120,3 +121,105 @@ def test_disabling_a_plugin_blocks_sync_and_enabling_restores_it(jdoe_token: str
 
     status, restored = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "exchange_rates"})
     assert status == 200, restored
+
+
+def test_plugins_list_includes_registered_plugins_with_status_and_schedule(jdoe_token: str) -> None:
+    """`GET /plugins` — the Data Sources UI's counterpart to `GET /sources`,
+    so connector plugins (Postgres/Mongo/CSV/…) show up next to no-code
+    REST sources instead of being API-only.
+    """
+    status, _ = _request(
+        "POST", f"{CONNECTIVITY}/plugins", token=jdoe_token,
+        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+    )
+    assert status == 200
+
+    status, plugins = _request("GET", f"{CONNECTIVITY}/plugins", token=jdoe_token)
+    assert status == 200, plugins
+    registered = next((p for p in plugins if p["name"] == "exchange-rate-feed"), None)
+    assert registered is not None, plugins
+    assert registered["status"] == "active", registered
+    assert registered["manifest"]["dataset_name"] == "exchange_rates", registered
+    assert "schedule_interval_minutes" in registered, registered
+
+
+def test_setting_a_plugin_schedule_validates_and_persists(jdoe_token: str) -> None:
+    status, _ = _request(
+        "POST", f"{CONNECTIVITY}/plugins", token=jdoe_token,
+        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+    )
+    assert status == 200
+
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/plugins/exchange-rate-feed/schedule", token=jdoe_token,
+        body={"schedule_interval_minutes": 0},
+    )
+    assert status == 400, body
+
+    try:
+        status, scheduled = _request(
+            "POST", f"{CONNECTIVITY}/plugins/exchange-rate-feed/schedule", token=jdoe_token,
+            body={"schedule_interval_minutes": 30},
+        )
+        assert status == 200 and scheduled["schedule_interval_minutes"] == 30, scheduled
+
+        status, refetched = _request("GET", f"{CONNECTIVITY}/plugins/exchange-rate-feed", token=jdoe_token)
+        assert status == 200 and refetched["schedule_interval_minutes"] == 30, refetched
+    finally:
+        status, cleared = _request(
+            "POST", f"{CONNECTIVITY}/plugins/exchange-rate-feed/schedule", token=jdoe_token,
+            body={"schedule_interval_minutes": None},
+        )
+        assert status == 200 and cleared["schedule_interval_minutes"] is None, cleared
+
+
+def test_a_scheduled_plugin_syncs_itself_with_no_manual_trigger(jdoe_token: str) -> None:
+    """The plugin counterpart of `test_generic_source_connector.py`'s
+    `test_a_scheduled_source_syncs_itself_with_no_manual_trigger` — same
+    scheduler loop, same real (not mocked) end-to-end wait.
+    """
+    status, _ = _request(
+        "POST", f"{CONNECTIVITY}/plugins", token=jdoe_token,
+        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+    )
+    assert status == 200
+    marker = time.time()
+
+    try:
+        status, scheduled = _request(
+            "POST", f"{CONNECTIVITY}/plugins/exchange-rate-feed/schedule", token=jdoe_token,
+            body={"schedule_interval_minutes": 1},
+        )
+        assert status == 200 and scheduled["schedule_interval_minutes"] == 1, scheduled
+
+        # Unlike the REST-source equivalent (a brand-new dataset name, so
+        # `last_finished_at` starts at None and the very first poll is
+        # already due), `exchange-rate-feed` is a shared fixture this
+        # module's earlier tests already synced — the 1-minute due-clock
+        # starts from whenever that last sync finished, not from `marker`.
+        # Worst case: due almost a full interval from now, then up to one
+        # more `SCHEDULER_POLL_SECONDS` (60s) before the loop notices.
+        deadline = time.monotonic() + 190
+        matched: dict | None = None
+        while time.monotonic() < deadline:
+            status, runs = _request("GET", f"{CONNECTIVITY}/syncs", token=jdoe_token)
+            assert status == 200, runs
+            matched = next(
+                (
+                    r for r in runs
+                    if r["dataset_urn"] == "hl:acme:main:dataset:exchange_rates"
+                    and datetime.fromisoformat(r["finished_at"].replace("Z", "+00:00")).timestamp() > marker
+                ),
+                None,
+            )
+            if matched is not None:
+                break
+            time.sleep(5)
+        assert matched is not None, "scheduler never auto-synced exchange-rate-feed within 190s"
+        assert matched["row_count"] == 5, matched
+    finally:
+        status, cleared = _request(
+            "POST", f"{CONNECTIVITY}/plugins/exchange-rate-feed/schedule", token=jdoe_token,
+            body={"schedule_interval_minutes": None},
+        )
+        assert status == 200 and cleared["schedule_interval_minutes"] is None, cleared

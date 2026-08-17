@@ -76,6 +76,7 @@ export const queryKeys = {
   projectPins: (projectUrn: string) => ["projectPins", projectUrn] as const,
 
   sources: () => ["sources"] as const,
+  plugins: () => ["plugins"] as const,
   syncs: () => ["syncs"] as const,
   connections: () => ["connections"] as const,
   pipelines: () => ["pipelines"] as const,
