@@ -14,11 +14,12 @@ import base64
 import boto3
 import httpx
 from botocore.config import Config as BotoConfig
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Request
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
 
 from holon_common import (
+    HolonError,
     EventProducer,
     Principal,
     active_jwt,
@@ -37,8 +38,15 @@ from holon_common import (
     retry_with_backoff,
     run_migrations,
 )
+from holon_common.audit import clear_durable_audit_hooks, emit_audit
+from holon_common.audit_store import (
+    ensure_schema as ensure_audit_schema,
+    install_durable_audit,
+    list_events_page,
+)
 from holon_common.authz import PermissionClient
 
+from .knowledge_urls import holon_url
 from . import agent_runtime, evaluation, model_registry, spend_limits, tool_plugin_registry, vector_store
 from .context_builder import ask as context_builder_ask
 from .embeddings import build_embedding_client
@@ -76,6 +84,18 @@ logger = logging.getLogger("intelligence")
 def _intelligence_enabled() -> bool:
     # Default on for local; production posture requires explicit false.
     return os.environ.get("HOLON_INTELLIGENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+
+def _allow_tool_plugin_register() -> bool:
+    """In-process entry_point load is not a sandbox. Off in production;
+    local DX defaults on unless HOLON_ALLOW_TOOL_PLUGIN_REGISTER=false.
+    """
+    raw = (os.environ.get("HOLON_ALLOW_TOOL_PLUGIN_REGISTER") or "").strip().lower()
+    if is_production():
+        return raw in {"1", "true", "yes"}
+    if raw == "":
+        return True
+    return raw in {"1", "true", "yes"}
 
 
 def _indexer_token() -> str:
@@ -117,8 +137,12 @@ async def lifespan(app: FastAPI):
         await tool_plugin_registry.ensure_schema(conn)
         await model_registry.ensure_schema(conn)
         await spend_limits.ensure_schema(conn)
+        await ensure_audit_schema(conn)
         await outbox.ensure_schema(conn)
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    clear_durable_audit_hooks()
+    install_durable_audit(app.state.pool)
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
@@ -188,10 +212,7 @@ current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 def _require_intelligence_enabled() -> None:
     if not getattr(app.state, "intelligence_enabled", True):
-        raise HTTPException(
-            status_code=503,
-            detail="Intelligence is disabled (HOLON_INTELLIGENCE_ENABLED=false)",
-        )
+        raise HolonError.unavailable('PrincipalDisabled', "Intelligence is disabled (HOLON_INTELLIGENCE_ENABLED=false)",)
 
 
 async def _authorize_workspace(principal: Principal, permission: str) -> None:
@@ -202,7 +223,7 @@ async def _authorize_workspace(principal: Principal, permission: str) -> None:
         permission=permission,
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 async def _enforce_spend(principal: Principal) -> None:
@@ -211,7 +232,7 @@ async def _enforce_spend(principal: Principal) -> None:
             app.state.pool, tenant_id=principal.tenant_id, principal_urn=principal.urn
         )
     except SpendLimitExceeded as exc:
-        raise HTTPException(status_code=429, detail=exc.detail) from exc
+        raise HolonError.rate_limited('RateLimited', exc.detail) from exc
 
 
 async def _record_response_tokens(principal: Principal, body: dict) -> None:
@@ -239,6 +260,30 @@ async def ready() -> dict:
     return {"status": "ok", "intelligence_enabled": bool(getattr(app.state, "intelligence_enabled", True))}
 
 
+@app.get("/audit-events")
+async def list_intelligence_audit_events(
+    principal: Principal = Depends(current_principal),
+    category: Optional[str] = None,
+    action: Optional[str] = None,
+    actor: Optional[str] = None,
+    outcome: Optional[str] = None,
+    pageSize: Optional[int] = None,
+    pageToken: Optional[str] = None,
+) -> dict:
+    """Durable Intelligence audit (sessions, tool plugins)."""
+    await _authorize_workspace(principal, "approve")
+    return await list_events_page(
+        app.state.pool,
+        principal.tenant_id,
+        category=category,
+        action=action,
+        actor_urn=actor,
+        outcome=outcome,
+        page_size=50 if pageSize is None else pageSize,
+        page_token=pageToken,
+    )
+
+
 class AskRequest(BaseModel):
     query: str
 
@@ -253,7 +298,7 @@ async def ask(request: AskRequest, http_request: Request, principal: Principal =
     await _enforce_spend(principal)
     authorization = http_request.headers.get("authorization", "")
     async with httpx.AsyncClient(timeout=15.0) as http:
-        response = await http.get(f"{KNOWLEDGE_URL}/glossary", headers={"Authorization": authorization})
+        response = await http.get(holon_url(KNOWLEDGE_URL, "/glossary"), headers={"Authorization": authorization})
         response.raise_for_status()
         glossary_terms = response.json()
 
@@ -268,7 +313,7 @@ async def ask(request: AskRequest, http_request: Request, principal: Principal =
             llm=app.state.llm,
         )
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text) from exc
+        raise HolonError.from_http(exc.response.status_code, exc.response.text, error_name='UpstreamError') from exc
     await _record_response_tokens(principal, body)
     return body
 
@@ -279,7 +324,7 @@ class TurnRequest(BaseModel):
 
 def _require_own_session(session: dict | None, principal: Principal) -> dict:
     if session is None or session["agent_urn"] != principal.urn:
-        raise HTTPException(status_code=404, detail="no agent_session found for that urn")
+        raise HolonError.not_found('AgentSessionNotFound', "no agent_session found for that urn")
     return session
 
 
@@ -316,7 +361,7 @@ async def create_agent_session(
     await _authorize_workspace(principal, "read")
     await _enforce_spend(principal)
     try:
-        return await agent_runtime.create_session(
+        session = await agent_runtime.create_session(
             app.state.pool,
             tenant_id=principal.tenant_id,
             agent_urn=principal.urn,
@@ -330,7 +375,23 @@ async def create_agent_session(
             budget=request.budget,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('AgentRequestInvalid', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="intelligence.agent_session.created",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="agent_session",
+        resource_urn=session.get("urn"),
+        extra={
+            "chain_trigger": request.chain_trigger,
+            "causation_depth": request.causation_depth,
+            "on_behalf_of": principal.on_behalf_of,
+        },
+    )
+    return session
 
 
 @app.get("/tools")
@@ -375,7 +436,7 @@ async def run_agent_turn(
             llm=app.state.llm,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('AgentRequestInvalid', str(exc)) from exc
     await _record_response_tokens(principal, body)
     return body
 
@@ -389,7 +450,7 @@ async def replay_agent_session(session_urn: str, principal: Principal = Depends(
     try:
         return await agent_runtime.replay_session(app.state.pool, session_urn=session_urn, llm=app.state.llm)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('AgentRequestInvalid', str(exc)) from exc
 
 
 @app.post("/evaluate")
@@ -404,7 +465,7 @@ async def evaluate(http_request: Request, principal: Principal = Depends(current
     await _enforce_spend(principal)
     authorization = http_request.headers.get("authorization", "")
     async with httpx.AsyncClient(timeout=15.0) as http:
-        response = await http.get(f"{KNOWLEDGE_URL}/glossary", headers={"Authorization": authorization})
+        response = await http.get(holon_url(KNOWLEDGE_URL, "/glossary"), headers={"Authorization": authorization})
         response.raise_for_status()
         glossary_terms = response.json()
 
@@ -436,20 +497,37 @@ async def register_tool_plugin(
     `tool_plugin_registry.py`'s module docstring for details.
     """
     _require_intelligence_enabled()
+    if not _allow_tool_plugin_register():
+        raise HolonError.forbidden('PrincipalDisabled', "tool plugin registration disabled "
+            "(HOLON_ALLOW_TOOL_PLUGIN_REGISTER — refused in production posture)",)
     await _authorize_workspace(principal, "write")
     authorization = http_request.headers.get("authorization", "")
     async with httpx.AsyncClient(timeout=15.0) as http:
         try:
-            return await tool_plugin_registry.register_tool_plugin(
+            registration = await tool_plugin_registry.register_tool_plugin(
                 app.state.pool, http, entry_point=body.entry_point, knowledge_url=KNOWLEDGE_URL,
                 headers={"Authorization": authorization},
             )
+        except ValueError as exc:
+            raise HolonError.invalid_argument('PluginValidationFailed', str(exc)) from exc
         except tool_plugin_registry.PluginConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HolonError.conflict('PluginConflict', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="intelligence.tool_plugin.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="tool_plugin",
+        resource_urn=build_urn(principal.tenant_id, "global", "tool-plugin", registration["name"]),
+        extra={"entry_point": body.entry_point},
+    )
+    return registration
 
 
-def _tool_plugin_not_found(name: str) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no agent tool plugin registered as {name!r}")
+def _tool_plugin_not_found(name: str) -> HolonError:
+    return HolonError.not_found("ToolPluginNotFound", f"no agent tool plugin registered as {name!r}", name=name)
 
 
 @app.get("/tool-plugins/{name}")
@@ -498,7 +576,7 @@ async def register_model(
     try:
         artifact_bytes = base64.b64decode(body.artifact_base64)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"artifact_base64 is not valid base64: {exc}") from exc
+        raise HolonError.invalid_argument('InvalidBase64Artifact', f"artifact_base64 is not valid base64: {exc}") from exc
     try:
         return await model_registry.register_model(
             app.state.pool,
@@ -512,11 +590,13 @@ async def register_model(
             input_schema=body.input_schema,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = str(exc)
+        code = 403 if "joblib model" in detail.lower() or "disabled" in detail.lower() else 400
+        raise HolonError.from_http(code, detail, error_name='ModelRegistryError') from exc
 
 
-def _model_not_found(name: str) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no model registered as {name!r}")
+def _model_not_found(name: str) -> HolonError:
+    return HolonError.not_found("ModelNotFound", f"no model registered as {name!r}", name=name)
 
 
 @app.get("/models")
@@ -571,5 +651,7 @@ async def predict(name: str, body: PredictRequest, principal: Principal = Depend
             app.state.pool, app.state.s3, MODEL_BUCKET, name=name, features=body.features
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = str(exc)
+        code = 403 if "joblib model" in detail.lower() or "disabled" in detail.lower() else 400
+        raise HolonError.from_http(code, detail, error_name='ModelRegistryError') from exc
     return {"model": name, "prediction": prediction}

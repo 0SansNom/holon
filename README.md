@@ -31,25 +31,33 @@ enterprise:
   `main`); no bundled demo. Ontology, connectors, and extra principals
   are created through APIs (or CI fixtures — see
   [docs/ops/seed-data.md](docs/ops/seed-data.md)).
-- **SSO / secrets** — OIDC client + pluggable `SecretProvider` + JWT
-  `kid` rotation land in-tree; running Vault/IdP for the customer is not.
-  Prefer connector `secret_ref` over plaintext headers.
-- **Intelligence is experimental** — gate with
-  `HOLON_INTELLIGENCE_ENABLED`; use `HOLON_LLM_PROVIDER=fake` when you
-  do not want spend. Production posture refuses a truthy Intelligence
-  flag. See [`SECURITY.md`](SECURITY.md).
-- **No load testing at real scale.** Everything here has only ever run
-  on a 2-CPU/4GB local VM; two real missing-timeout bugs (S3, Qdrant)
-  were found there, under trivial load, not synthetic production
-  traffic.
-- **Operator pack** — see `docs/ops/` (deploy, backup-restore,
-  seed-data), [`SECURITY.md`](SECURITY.md), Helm under
-  `deploy/helm/holon/`, and `.github/workflows/publish.yml` for OCI+SBOM.
-  Customer ArgoCD/Flux remains theirs.
+- **SSO / secrets / JWT ops** — OIDC + `SecretProvider` + JWT `kid`
+  rotation and optional RS256 (`make gen-jwt-rsa`,
+  `HOLON_JWT_REQUIRE_ASYMMETRIC`) are in-tree; Vault/IdP wiring and
+  key custody are yours. Prefer connector `secret_ref`.
+- **Intelligence is experimental** — leave
+  `HOLON_INTELLIGENCE_ENABLED=false` in prod (posture-enforced). Joblib
+  model upload and tool-plugin register are refused in production;
+  tool-plugin `entry_point`s are prefix-allowlisted. Prefer
+  `HOLON_LLM_PROVIDER=fake` locally; set
+  `services.intelligence.runtimeClassName` (gVisor) in Helm.
+- **Capacity & HA are yours.** CI is compose HTTP pytest;
+  `make smoke-load` is a light probe only — no soak/chaos suite.
+  Enable `HOLON_SERVING_STORE_REQUIRE_MATERIALIZED` in prod (posture +
+  Helm overlay). Backup/DR tooling and HA data-plane are **your** SI.
+- **Operator pack** — runbooks in `docs/ops/` (deploy, backup-restore,
+  seed-data, observability), [`SECURITY.md`](SECURITY.md), Helm under
+  `deploy/helm/holon/`, Prometheus artefacts under `deploy/observability/`,
+  API overview in [`docs/api/overview.md`](docs/api/overview.md),
+  API error contract in [`docs/api/errors.md`](docs/api/errors.md),
+  `.github/workflows/publish.yml` for OCI+SBOM.
 
 Services expose `/metrics` (Prometheus text) and optional OTLP traces
-(`HOLON_OTLP_ENDPOINT`; unset = tracing off); point your own
-observability stack at them (see `docs/ops/deploy.md`).
+(`HOLON_OTLP_ENDPOINT`; unset = tracing off). SLO recording rules, alerts,
+and a Grafana dashboard live under `deploy/observability/` (optional Helm
+`ServiceMonitor` / `PrometheusRule`) — see
+[`docs/ops/observability.md`](docs/ops/observability.md). Point your own
+observability stack at them.
 
 ## What's here
 
@@ -115,21 +123,19 @@ npm run dev   # http://localhost:5173, CORS to the services above
 
 ## Tests
 
-E2e tests expect a running stack **and** the CI fixture path above
-(`provision-test-fixtures`, `seed`, sync). PR CI runs
-`.github/workflows/tests.yml` with `HOLON_LLM_PROVIDER=fake` and
-excludes metered LLM tests.
+Layout: [`tests/README.md`](tests/README.md) — `tests/unit/` (no stack) and
+`tests/integration/{service}/` (compose HTTP).
 
 ```bash
 pip install -r tests/requirements.txt
-python3 -m pytest -q tests -m "not llm"   # default; no real LLM spend
-python3 -m pytest -q tests -m llm         # needs real keys + stack
+make test-unit                            # fast; no compose
+python3 -m pytest -q -m "not llm" tests   # full suite; needs stack
+python3 -m pytest -q -m llm tests         # needs real keys + stack
 ```
 
-Black-box: most tests talk to the running stack over HTTP (a few
-white-box helpers hit Postgres or import host-side units). Nightly
-metered agent runs live in `.github/workflows/llm-nightly.yml` (secret
-`ANTHROPIC_API_KEY`, never on PR).
+PR CI runs unit first (no stack), then compose e2e with
+`HOLON_LLM_PROVIDER=fake`, excluding metered LLM tests. Nightly metered
+agent runs live in `.github/workflows/llm-nightly.yml`.
 
 ## License
 

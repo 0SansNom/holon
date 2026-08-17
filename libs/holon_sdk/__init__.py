@@ -97,7 +97,7 @@ class HolonClient:
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status, datasets = self.request("GET", f"{knowledge_url}/catalog/datasets", token=token)
+            status, datasets = self.request("GET", f"{knowledge_url}/api/holon/catalog/datasets", token=token)
             if status != 200:
                 raise RuntimeError(f"GET /catalog/datasets failed ({status}): {datasets}")
             match = next((d for d in datasets if d["urn"] == result["dataset_urn"]), None)

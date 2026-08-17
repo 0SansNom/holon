@@ -49,6 +49,7 @@ from .approval import (
     sweep_expired_approvals_forever,
 )
 from .declarative import (
+    ActionValidationError,
     _apply_declarative_edits,
     _compensate_declarative_action,
     _get_unmasked_instance,
@@ -56,16 +57,20 @@ from .declarative import (
     _write_instance_edits,
     request_generic_action,
     revert_declarative_action,
+    validate_generic_action,
 )
 from .hardcoded import (
     _event,
     WORKFLOW_ENGINE_URN_NAME,
 )
 from .timeline import list_instance_timeline
+from .wire import operation_id, resolve_target, success_envelope, validation_report
 
 __all__ = [
     "ensure_schema",
+    "ActionValidationError",
     "request_generic_action",
+    "validate_generic_action",
     "revert_declarative_action",
     "approve_action",
     "reject_action",
@@ -77,6 +82,10 @@ __all__ = [
     "list_instance_timeline",
     "WORKFLOW_ENGINE_URN_NAME",
     "APPROVAL_TTL",
+    "operation_id",
+    "resolve_target",
+    "success_envelope",
+    "validation_report",
 ]
 
 DDL = """
@@ -393,7 +402,21 @@ async def _apply_now(
     except Exception:
         logger.exception("action notification delivery raised unexpectedly")
 
+    from holon_common.audit import emit_audit
     from ..action_structural import split_result_for_response
+
+    emit_audit(
+        category="action",
+        action="knowledge.action.invoked",
+        outcome="success",
+        tenant_id=tenant_id,
+        actor_urn=actor.urn,
+        actor_type=actor.type,
+        resource_type="instance",
+        resource_urn=instance_urn,
+        reason=reason,
+        extra={"actionName": action_name, "invocationId": invocation_id, "riskLevel": definition["risk_level"]},
+    )
 
     return {
         "status": "applied",
@@ -496,7 +519,21 @@ async def approve_action(
             await outbox.enqueue(conn, event)
 
     saga_status = "processing" if writeback_edits is not None else "completed"
+    from holon_common.audit import emit_audit
     from ..action_structural import split_result_for_response
+
+    emit_audit(
+        category="action",
+        action="knowledge.action.approved",
+        outcome="success",
+        tenant_id=tenant_id,
+        actor_urn=decider.urn,
+        actor_type=decider.type,
+        resource_type="instance",
+        resource_urn=instance_urn,
+        reason=note or reason,
+        extra={"actionName": action_name, "approvalId": approval_id, "invocationId": invocation_id},
+    )
 
     return {
         "status": "approved", "approvalId": approval_id, "action": action_name, "sagaStatus": saga_status,

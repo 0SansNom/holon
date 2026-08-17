@@ -54,3 +54,7 @@ data:
   {{- if .Values.corsOrigins }}
   HOLON_CORS_ORIGINS: {{ .Values.corsOrigins | quote }}
   {{- end }}
+  HOLON_JWT_ALG: {{ .Values.jwt.algorithm | default "HS256" | quote }}
+  {{- if .Values.jwt.requireAsymmetric }}
+  HOLON_JWT_REQUIRE_ASYMMETRIC: "true"
+  {{- end }}

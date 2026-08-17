@@ -21,10 +21,11 @@ from typing import Optional
 
 import asyncpg
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, Query
 from pydantic import BaseModel
 
 from holon_common import (
+    HolonError,
     EventActor,
     EventEnvelope,
     EventProducer,
@@ -43,6 +44,12 @@ from holon_common import (
     outbox,
     require_tenant_match,
     run_migrations,
+)
+from holon_common.audit import clear_durable_audit_hooks, emit_audit
+from holon_common.audit_store import (
+    ensure_schema as ensure_audit_schema,
+    install_durable_audit,
+    list_events_page,
 )
 from holon_common.authz import PermissionClient
 
@@ -75,7 +82,7 @@ OPA_URL = os.environ["HOLON_OPA_URL"]
 def _source_db_url() -> str:
     url = (os.environ.get("HOLON_SOURCE_DB_URL") or "").strip()
     if not url:
-        raise HTTPException(status_code=503, detail="HOLON_SOURCE_DB_URL is not configured")
+        raise HolonError.unavailable('Unavailable', "HOLON_SOURCE_DB_URL is not configured")
     return url
 
 ICEBERG_CONFIG = dict(
@@ -130,6 +137,7 @@ async def lifespan(app: FastAPI):
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
         await conn.execute(_DDL)
+        await ensure_audit_schema(conn)
         await outbox.ensure_schema(conn)
         await plugin_registry.ensure_schema(conn)
         await generic_source_registry.ensure_schema(conn)
@@ -137,6 +145,9 @@ async def lifespan(app: FastAPI):
         await write_target_registry.ensure_schema(conn)
         await stream_connector.ensure_schema(conn)
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    clear_durable_audit_hooks()
+    install_durable_audit(app.state.pool)
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
@@ -221,7 +232,7 @@ async def _authorize_workspace(
         principal, resource_type="workspace", resource_urn=urn, permission=permission
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 @app.get("/health")
@@ -238,6 +249,31 @@ async def live() -> dict:
 async def ready() -> dict:
     await app.state.pool.fetchval("SELECT 1")
     return {"status": "ok", "quiesced": await _is_quiesced(app.state.pool)}
+
+
+@app.get("/audit-events")
+async def list_connectivity_audit_events(
+    principal: Principal = Depends(current_principal),
+    category: Optional[str] = None,
+    action: Optional[str] = None,
+    actor: Optional[str] = None,
+    outcome: Optional[str] = None,
+    pageSize: Optional[int] = None,
+    pageToken: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> dict:
+    """Durable Connectivity audit (syncs, plugins, sources, quiesce)."""
+    await _authorize_workspace(principal, "approve", workspace_id=workspace_id)
+    return await list_events_page(
+        app.state.pool,
+        principal.tenant_id,
+        category=category,
+        action=action,
+        actor_urn=actor,
+        outcome=outcome,
+        page_size=50 if pageSize is None else pageSize,
+        page_token=pageToken,
+    )
 
 
 class QuiesceRequest(BaseModel):
@@ -258,6 +294,17 @@ async def admin_quiesce(body: QuiesceRequest, principal: Principal = Depends(cur
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
         """,
         "true" if body.quiesced else "false",
+    )
+    emit_audit(
+        category="access",
+        action="connectivity.quiesce",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="connectivity_runtime",
+        resource_urn=build_urn(principal.tenant_id, "global", "connectivity-runtime", "quiesced"),
+        extra={"quiesced": body.quiesced},
     )
     return {"quiesced": body.quiesced}
 
@@ -340,6 +387,23 @@ async def _finalize_sync(
             )
             await outbox.enqueue(conn, event)
 
+    emit_audit(
+        category="access",
+        action="connectivity.sync.completed",
+        outcome="success",
+        tenant_id=tenant_id,
+        actor_urn=actor.urn,
+        actor_type=actor.type,
+        resource_type="dataset",
+        resource_urn=dataset_urn,
+        extra={
+            "connector_urn": connector_urn,
+            "dataset_version_urn": dataset_version_urn,
+            "snapshot_id": result.snapshot_id,
+            "row_count": result.row_count,
+        },
+    )
+
     return SyncResult(
         dataset_urn=dataset_urn,
         dataset_version_urn=dataset_version_urn,
@@ -356,7 +420,7 @@ async def _run_sync_for_dataset(
     of the `/sync` route so the scheduler background task (below) can
     trigger the identical path under its own service-account actor,
     instead of duplicating this dispatch a second time. Raises
-    `HTTPException` on a bad dataset/fetch failure even though the
+    `HolonError` on a bad dataset/fetch failure even though the
     scheduler is not a request handler — it's just a plain exception
     carrying a status code and message there, caught and logged like any
     other error, never turned into an actual HTTP response.
@@ -375,20 +439,22 @@ async def _run_sync_for_dataset(
     else:
         source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
         if source is not None:
-            raise HTTPException(status_code=409, detail=f"source {dataset_name!r} is disabled — enable it first")
-        raise HTTPException(status_code=404, detail=f"unknown dataset: {dataset_name}")
+            raise HolonError.conflict(
+                "SourceDisabled",
+                f"source {dataset_name!r} is disabled — enable it first",
+                dataset_name=dataset_name,
+            )
+        raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
 
     started_at = datetime.now(timezone.utc)
     try:
         rows = await read()
     except generic_source_registry.SourceFetchError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"source returned {exc.response.status_code}: {exc.response.text[:300]}"
-        ) from exc
+        raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=400, detail=f"could not reach the source: {exc}") from exc
+        raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
     result = await asyncio.to_thread(iceberg_writer.write_snapshot, rows, dataset_name, **ICEBERG_CONFIG)
     finished_at = datetime.now(timezone.utc)
 
@@ -420,12 +486,15 @@ async def run_sync(
     if source is not None and source.get("workspace_id"):
         stored = source["workspace_id"]
         if request.workspace_id and request.workspace_id != stored:
-            raise HTTPException(
-                status_code=400,
-                detail=(
+            raise HolonError.invalid_argument(
+                "SourceWorkspaceMismatch",
+                (
                     f"source {request.dataset!r} is bound to workspace {stored!r}; "
                     f"got {request.workspace_id!r}"
                 ),
+                dataset=request.dataset,
+                expected_workspace_id=stored,
+                got_workspace_id=request.workspace_id,
             )
         target_workspace = stored
     await _authorize_workspace(principal, "write", workspace_id=target_workspace)
@@ -567,7 +636,7 @@ async def create_pipeline(
             steps=[step.model_dump() for step in request.steps],
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('PipelineValidationFailed', str(exc)) from exc
 
 
 @app.get("/pipelines")
@@ -581,7 +650,7 @@ async def get_pipeline(name: str, principal: Principal = Depends(current_princip
     await _authorize_workspace(principal, "read")
     definition = await pipeline.get_pipeline(app.state.pool, name)
     if definition is None:
-        raise HTTPException(status_code=404, detail=f"unknown pipeline: {name}")
+        raise HolonError.not_found('PipelineNotFound', f"unknown pipeline: {name}", name=name)
     return definition
 
 
@@ -592,7 +661,7 @@ async def delete_pipeline(name: str, principal: Principal = Depends(current_prin
         app.state.pool, tenant_id=principal.tenant_id, name=name
     )
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"unknown pipeline: {name}")
+        raise HolonError.not_found('PipelineNotFound', f"unknown pipeline: {name}", name=name)
     return {"deleted": name}
 
 
@@ -617,7 +686,7 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
     """
     definition = await pipeline.get_pipeline(app.state.pool, name)
     if definition is None:
-        raise HTTPException(status_code=404, detail=f"unknown pipeline: {name}")
+        raise HolonError.not_found('PipelineNotFound', f"unknown pipeline: {name}", name=name)
 
     run_started_at = datetime.now(timezone.utc)
     step_results: list[dict] = []
@@ -632,7 +701,7 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
-                    f"{KNOWLEDGE_URL}/functions/{step['function_name']}/invoke",
+                    f"{KNOWLEDGE_URL}/api/holon/functions/{step['function_name']}/invoke",
                     json={"rows": input_rows},
                     headers={"Authorization": f"Bearer {_function_invocation_token()}"},
                 )
@@ -683,7 +752,7 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
             step_results=step_results,
             error=str(exc),
         )
-        raise HTTPException(status_code=400, detail=f"pipeline run failed: {exc}") from exc
+        raise HolonError.invalid_argument('PipelineRunFailed', f"pipeline run failed: {exc}") from exc
 
     run_finished_at = datetime.now(timezone.utc)
     return await pipeline.record_run(
@@ -708,18 +777,30 @@ async def register_plugin(body: RegisterPluginRequest, principal: Principal = De
     entry point. See `plugin_registry.py`'s module docstring for details.
     """
     try:
-        return await plugin_registry.register_plugin(
+        registration = await plugin_registry.register_plugin(
             app.state.pool,
             entry_point=body.entry_point,
             tenant_id=principal.tenant_id,
             reserved_dataset_names=RESERVED_DATASET_NAMES,
         )
     except plugin_registry.PluginConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('PluginConflict', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="connectivity.plugin.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="connector_plugin",
+        resource_urn=build_urn(principal.tenant_id, "global", "connector-plugin", registration["name"]),
+        extra={"entry_point": body.entry_point},
+    )
+    return registration
 
 
-def _plugin_not_found(name: str) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no plugin registered as {name!r}")
+def _plugin_not_found(name: str) -> HolonError:
+    return HolonError.not_found("PluginNotFound", f"no plugin registered as {name!r}", name=name)
 
 
 @app.get("/plugins/{name}")
@@ -741,7 +822,18 @@ async def disable_plugin(name: str, principal: Principal = Depends(current_princ
     registration = await plugin_registry.get_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _plugin_not_found(name)
-    return await plugin_registry.set_plugin_status(app.state.pool, name, "disabled")
+    result = await plugin_registry.set_plugin_status(app.state.pool, name, "disabled")
+    emit_audit(
+        category="access",
+        action="connectivity.plugin.disabled",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="connector_plugin",
+        resource_urn=build_urn(principal.tenant_id, "global", "connector-plugin", name),
+    )
+    return result
 
 
 @app.post("/plugins/{name}/enable")
@@ -750,7 +842,18 @@ async def enable_plugin(name: str, principal: Principal = Depends(current_princi
     registration = await plugin_registry.get_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _plugin_not_found(name)
-    return await plugin_registry.set_plugin_status(app.state.pool, name, "active")
+    result = await plugin_registry.set_plugin_status(app.state.pool, name, "active")
+    emit_audit(
+        category="access",
+        action="connectivity.plugin.enabled",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="connector_plugin",
+        resource_urn=build_urn(principal.tenant_id, "global", "connector-plugin", name),
+    )
+    return result
 
 
 class RegisterConnectionRequest(BaseModel):
@@ -793,11 +896,11 @@ async def list_connections(principal: Principal = Depends(current_principal)) ->
 async def delete_connection(name: str, principal: Principal = Depends(current_principal)) -> dict:
     await _authorize_workspace(principal, "write")
     if await generic_source_registry.get_connection(app.state.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"no connection registered as {name!r}")
+        raise HolonError.not_found('ConnectionNotFound', f"no connection registered as {name!r}", name=name)
     try:
         await generic_source_registry.delete_connection(app.state.pool, principal.tenant_id, name)
     except generic_source_registry.ConnectionInUseError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('ConnectionConflict', str(exc)) from exc
     return {"deleted": name}
 
 
@@ -834,7 +937,7 @@ async def register_source(
     )
     await _authorize_workspace(principal, "write", workspace_id=target_workspace)
     try:
-        return await generic_source_registry.register_source(
+        registration = await generic_source_registry.register_source(
             app.state.pool,
             tenant_id=principal.tenant_id,
             name=body.name,
@@ -852,9 +955,21 @@ async def register_source(
             reserved_dataset_names=RESERVED_DATASET_NAMES,
         )
     except generic_source_registry.SourceConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('PluginConflict', str(exc)) from exc
     except generic_source_registry.SourceConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('PluginValidationFailed', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="connectivity.source.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="source",
+        resource_urn=build_urn(principal.tenant_id, target_workspace, "source", body.name),
+        extra={"base_url": body.base_url},
+    )
+    return registration
 
 
 @app.get("/sources")
@@ -863,8 +978,8 @@ async def list_sources(principal: Principal = Depends(current_principal)) -> lis
     return await generic_source_registry.list_sources(app.state.pool, principal.tenant_id)
 
 
-def _source_not_found(name: str) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no source registered as {name!r}")
+def _source_not_found(name: str) -> HolonError:
+    return HolonError.not_found("SourceNotFound", f"no source registered as {name!r}", name=name)
 
 
 @app.post("/sources/{name}/disable")
@@ -896,6 +1011,16 @@ async def delete_source(name: str, principal: Principal = Depends(current_princi
     if source is None:
         raise _source_not_found(name)
     await generic_source_registry.delete_source(app.state.pool, principal.tenant_id, name)
+    emit_audit(
+        category="access",
+        action="connectivity.source.deleted",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="source",
+        resource_urn=build_urn(principal.tenant_id, WORKSPACE_ID, "source", name),
+    )
     return {"deleted": name}
 
 
@@ -922,9 +1047,9 @@ def _require_workflow_engine(principal: Principal) -> None:
     """
     expected_suffix = f":global:service-account:{WORKFLOW_ENGINE_LOCAL_NAME}"
     if principal.type != "service_account" or not principal.urn.endswith(expected_suffix):
-        raise HTTPException(
-            status_code=403,
-            detail="close-account is restricted to Automation's Workflow Engine — use the approval flow",
+        raise HolonError.forbidden(
+            "AutomationOnlyEndpoint",
+            "close-account is restricted to Automation's Workflow Engine — use the approval flow",
         )
 
 
@@ -939,7 +1064,7 @@ async def close_source_customer_account(
     _require_workflow_engine(principal)
     await _authorize_workspace(principal, "write")
     if request.reason == CLOSE_ACCOUNT_FAILURE_SENTINEL:
-        raise HTTPException(status_code=500, detail="simulated downstream failure")
+        raise HolonError.internal('InternalError', "simulated downstream failure")
 
     conn = await asyncpg.connect(_source_db_url())
     try:
@@ -951,7 +1076,7 @@ async def close_source_customer_account(
         await conn.close()
 
     if row is None:
-        raise HTTPException(status_code=404, detail=f"customer {customer_id} not found in source_erp")
+        raise HolonError.not_found('SourceCustomerNotFound', f"customer {customer_id} not found in source_erp", customer_id=customer_id)
     return dict(row)
 
 
@@ -965,7 +1090,7 @@ async def get_source_customer(customer_id: int, principal: Principal = Depends(c
         await conn.close()
 
     if row is None:
-        raise HTTPException(status_code=404, detail=f"customer {customer_id} not found in source_erp")
+        raise HolonError.not_found('SourceCustomerNotFound', f"customer {customer_id} not found in source_erp", customer_id=customer_id)
     return dict(row)
 
 
@@ -999,7 +1124,7 @@ async def register_write_target(
             created_by_urn=principal.urn,
         )
     except write_target_registry.WriteTargetConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('PluginValidationFailed', str(exc)) from exc
 
 
 @app.get("/write-targets")
@@ -1013,7 +1138,7 @@ async def get_write_target(dataset_name: str, principal: Principal = Depends(cur
     await _authorize_workspace(principal, "read")
     target = await write_target_registry.get_write_target(app.state.pool, principal.tenant_id, dataset_name)
     if target is None:
-        raise HTTPException(status_code=404, detail=f"no write target registered for dataset {dataset_name!r}")
+        raise HolonError.not_found('DatasetNotFound', f"no write target registered for dataset {dataset_name!r}")
     return target
 
 
@@ -1039,8 +1164,8 @@ async def write_source(
             tenant_id=principal.tenant_id, dataset_name=dataset_name, instance_id=instance_id, edits=request.edits,
         )
     except write_target_registry.UnknownWriteTargetError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HolonError.not_found("WriteTargetNotFound", str(exc)) from exc
     except write_target_registry.InstanceNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HolonError.not_found("WriteTargetInstanceNotFound", str(exc)) from exc
     except write_target_registry.WriteTargetConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('SourceValidationFailed', str(exc)) from exc

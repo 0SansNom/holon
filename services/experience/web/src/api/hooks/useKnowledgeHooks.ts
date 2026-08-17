@@ -297,7 +297,17 @@ export function useDeleteInterface() {
 }
 
 export function useMarkings() {
-  return useSuspenseQuery({ queryKey: queryKeys.markings(), queryFn: knowledgeApi.listMarkings });
+  return useSuspenseQuery({
+    queryKey: queryKeys.markings(),
+    queryFn: () => knowledgeApi.listMarkings(),
+  });
+}
+
+export function useMarkingCategories() {
+  return useQuery({
+    queryKey: queryKeys.markingCategories(),
+    queryFn: knowledgeApi.listMarkingCategories,
+  });
 }
 
 // Non-suspense: consumed from inside a dialog nested in an already-loaded
@@ -312,6 +322,15 @@ export function useCreateMarking() {
   return useMutation({
     mutationFn: (body: Parameters<typeof knowledgeApi.createMarking>[0]) => knowledgeApi.createMarking(body),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.markings() }),
+  });
+}
+
+export function useCreateMarkingCategory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof knowledgeApi.createMarkingCategory>[0]) =>
+      knowledgeApi.createMarkingCategory(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.markingCategories() }),
   });
 }
 

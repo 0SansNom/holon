@@ -253,6 +253,21 @@ class PermissionClient:
             decision, expires_at = cached
             if now < expires_at:
                 _DECISION_CACHE_HITS.inc()
+                # Denials stay audible even on cache hits (security signal).
+                if not decision.allowed:
+                    emit_audit(
+                        category="authz",
+                        action="authz.decide",
+                        outcome="deny",
+                        tenant_id=principal.tenant_id,
+                        actor_urn=principal.urn,
+                        actor_type=principal.type,
+                        resource_type=resource_type,
+                        resource_urn=resource_urn,
+                        permission=permission,
+                        reason=decision.reason,
+                        extra={"cacheHit": True},
+                    )
                 return decision
             del self._decision_cache[cache_key]
 
@@ -284,12 +299,15 @@ class PermissionClient:
             decision = Decision(False, f"rebac_denied: {principal.urn} has no '{permission}' on {resource_urn}")
             logger.info("authz: %s", decision.reason)
             emit_audit(
+                category="authz",
                 action="authz.decide",
                 outcome="deny" if not decision.allowed else "allow",
                 tenant_id=principal.tenant_id,
                 actor_urn=principal.urn,
+                actor_type=principal.type,
                 resource_type=resource_type,
                 resource_urn=resource_urn,
+                permission=permission,
                 reason=decision.reason,
             )
             return decision
@@ -306,12 +324,15 @@ class PermissionClient:
                 )
                 logger.info("authz: %s", decision.reason)
                 emit_audit(
+                    category="authz",
                     action="authz.decide",
                     outcome="deny",
                     tenant_id=principal.tenant_id,
                     actor_urn=principal.urn,
+                    actor_type=principal.type,
                     resource_type=resource_type,
                     resource_urn=resource_urn,
+                    permission=permission,
                     reason=decision.reason,
                 )
                 return decision
@@ -321,12 +342,15 @@ class PermissionClient:
             decision = Decision(False, f"abac_denied: policy restricted '{permission}' on {resource_urn}")
             logger.info("authz: %s", decision.reason)
             emit_audit(
+                category="authz",
                 action="authz.decide",
                 outcome="deny",
                 tenant_id=principal.tenant_id,
                 actor_urn=principal.urn,
+                actor_type=principal.type,
                 resource_type=resource_type,
                 resource_urn=resource_urn,
+                permission=permission,
                 reason=decision.reason,
             )
             return decision
@@ -334,12 +358,15 @@ class PermissionClient:
         decision = Decision(True, f"granted: {principal.urn} -> {permission} on {resource_urn}")
         logger.info("authz: %s", decision.reason)
         emit_audit(
+            category="authz",
             action="authz.decide",
             outcome="allow",
             tenant_id=principal.tenant_id,
             actor_urn=principal.urn,
+            actor_type=principal.type,
             resource_type=resource_type,
             resource_urn=resource_urn,
+            permission=permission,
             reason=decision.reason,
         )
         return decision

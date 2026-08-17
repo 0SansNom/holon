@@ -23,6 +23,7 @@ from typing import Any, Optional
 import httpx
 from qdrant_client import AsyncQdrantClient
 
+from .knowledge_urls import holon_url, ontology_url
 from .embeddings import EmbeddingClient
 from .groundedness import check_groundedness
 from .llm_gateway import LLMClient
@@ -92,7 +93,7 @@ async def _structural_lookup(
     http: httpx.AsyncClient, knowledge_url: str, headers: dict, object_type: str, instance_id: str, as_of: Optional[str]
 ) -> Optional[ContextItem]:
     params = {"as_of": as_of} if as_of else {}
-    response = await http.get(f"{knowledge_url}/objects/{object_type}/{instance_id}", headers=headers, params=params)
+    response = await http.get(ontology_url(knowledge_url, f"/objects/{object_type}/{instance_id}"), headers=headers, params=params)
     if response.status_code != 200:
         return None
     data = response.json()
@@ -109,7 +110,7 @@ async def _structural_aggregation(
         for value in values:
             if value in lowered:
                 response = await http.post(
-                    f"{knowledge_url}/execute",
+                    holon_url(knowledge_url, "/execute"),
                     headers=headers,
                     json={
                         "object_type": object_type,

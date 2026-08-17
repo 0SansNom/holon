@@ -26,7 +26,7 @@ export function RelatedLinkPanel({
   const { data, isLoading, isFetching, refetch } = useObjectLinks(type, id, link.linkName, true);
   const putLink = usePutObjectLink(type, id);
   const deleteLink = useDeleteObjectLink(type, id);
-  const count = data?.items.length;
+  const count = data?.data.length;
   const midLinks = data?.link_objects ?? [];
   const busy = putLink.isPending || deleteLink.isPending;
 
@@ -113,10 +113,10 @@ export function RelatedLinkPanel({
             </div>
           )}
           {isLoading && <Spinner size={16} />}
-          {data && data.items.length === 0 && (
+          {data && data.data.length === 0 && (
             <p className="hl-text-muted-sm hl-my-xs">No related instances.</p>
           )}
-          {data && data.items.length > 0 && (
+          {data && data.data.length > 0 && (
             <table className="hl-data-table hl-data-table-compact">
               <thead>
                 <tr>
@@ -126,7 +126,7 @@ export function RelatedLinkPanel({
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((item) => {
+                {data.data.map((item) => {
                   const itemId = String(item.id);
                   const itemLabel =
                     (item.title as string | undefined) ?? (item.name as string | undefined) ?? itemId;

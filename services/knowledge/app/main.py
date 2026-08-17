@@ -24,6 +24,8 @@ from holon_common import (
     retry_with_backoff,
     run_migrations,
 )
+from holon_common.audit import clear_durable_audit_hooks
+from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
 from holon_common.authz import PermissionClient
 
 from . import (
@@ -42,6 +44,8 @@ from . import (
     search,
     serving_store,
 )
+from .api import ApiPathRewriteMiddleware, ontologies_router
+from .api.public_only import PublicApiOnlyMiddleware
 from .routers import actions as actions_router
 from .routers import execute as execute_router
 from .routers import objects as objects_router
@@ -100,8 +104,12 @@ async def lifespan(app: FastAPI):
         await function_registry.ensure_schema(conn)
         await glossary.ensure_schema(conn)
         await query_log.ensure_schema(conn)
+        await ensure_audit_schema(conn)
         await outbox.ensure_schema(conn)
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    clear_durable_audit_hooks()
+    install_durable_audit(app.state.pool)
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
     core.authz = app.state.authz
@@ -168,10 +176,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Holon — Knowledge Platform", lifespan=lifespan)
+app.add_middleware(ApiPathRewriteMiddleware, default_ontology=WORKSPACE_ID)
+app.add_middleware(PublicApiOnlyMiddleware)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
+app.include_router(ontologies_router)
 app.include_router(plugins_router.router)
 app.include_router(ontology_admin_router.router)
 app.include_router(actions_router.router)

@@ -46,7 +46,7 @@ function EvaluatePanel({ name, objectType }: { name: string; objectType: string 
       {data && (
         <p className="hl-text-muted-sm">
           {data.count} object{data.count === 1 ? "" : "s"} of type {data.object_type}
-          {data.items.slice(0, 5).map((item) => (
+          {data.data.slice(0, 5).map((item) => (
             <Link
               key={String(item.id)}
               to="/objects/$type/$id"

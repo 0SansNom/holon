@@ -33,13 +33,21 @@ bootstrap:
 
 secretBackend: kubernetes
 # Must include at least:
-#   HOLON_JWT_SECRET, HOLON_SPICEDB_PRESHARED_KEY, POSTGRES_PASSWORD,
+#   HOLON_JWT_SECRET (HS256) — or HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS (RS256),
+#   HOLON_SPICEDB_PRESHARED_KEY, POSTGRES_PASSWORD,
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (S3/MinIO — connectivity/knowledge/intelligence),
 #   HOLON_OPENSEARCH_PASSWORD (knowledge),
 #   ANTHROPIC_API_KEY (intelligence)
 # Conditionally, only if the matching feature is enabled:
 #   HOLON_OIDC_CLIENT_SECRET (if oidc.enabled), VOYAGE_API_KEY (if HOLON_EMBEDDING_PROVIDER=voyage)
 existingSecret: holon-secrets
+
+# JWT algorithm. HS256 (default) uses HOLON_JWT_SECRET in existingSecret.
+# For RS256: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS in the secret
+# (make gen-jwt-rsa), set algorithm: RS256, and ideally requireAsymmetric: true.
+jwt:
+  algorithm: HS256
+  requireAsymmetric: false
 
 oidc:
   enabled: false
@@ -81,6 +89,16 @@ intelligenceEnabled: true
 llmProvider: anthropic
 servingStoreRequireMaterialized: false
 
+# Optional Prometheus Operator CRs. Off by default — enable when your
+# cluster has ServiceMonitor / PrometheusRule CRDs. Artefacts also live
+# standalone under deploy/observability/ (see docs/ops/observability.md).
+observability:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+  prometheusRule:
+    enabled: false
+
 services:
   identity:
     replicas: 2
@@ -101,3 +119,5 @@ services:
   intelligence:
     replicas: 1
     port: 8006
+    # Cluster must define this RuntimeClass (e.g. gVisor). Empty = node default.
+    runtimeClassName: ""

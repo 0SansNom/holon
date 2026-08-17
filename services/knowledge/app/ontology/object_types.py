@@ -261,18 +261,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS ontology_branch_resource_unique
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS project_urn TEXT;
 
--- Markings: a genuinely separate mechanism from `classification`
--- above, not a replacement — named, admin-created labels (e.g. "PII",
--- "Export-Controlled") that compose (a resource can carry several; a
--- principal must hold every one, checked via the SpiceDB `marking` resource's
--- `hold` permission, `main.py`'s `_authorize_markings`). `object_type`/
--- `object_type_version` carry ObjectType-wide markings the same versioned
--- way `implements`/`derived_properties` do (validated at publish time,
--- `_validate_markings`); `instance_marking` is the separate, unversioned
--- per-instance case the plan calls out as the other attachment point —
--- a marking set directly on one object (e.g. this one Customer row, not
--- every Customer), enforced at the same read choke point (`_resolve_one`/
--- `_resolve_many` in `main.py`) rather than a second one.
+-- Markings: separate from `classification`. Named labels live in a
+-- category (CONJUNCTIVE = hold all applied in that category; DISJUNCTIVE =
+-- hold at least one). SpiceDB `marking` stays flat (`hold`); names remain
+-- unique per tenant. Migration 0003 adds id/category_id + Default category
+-- for existing rows; ensure_schema creates the category table and columns.
+CREATE TABLE IF NOT EXISTS marking_category (
+    id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    category_type TEXT NOT NULL CHECK (category_type IN ('CONJUNCTIVE', 'DISJUNCTIVE')),
+    marking_type TEXT NOT NULL DEFAULT 'MANDATORY' CHECK (marking_type IN ('MANDATORY')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS marking (
     tenant_id TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -280,6 +284,11 @@ CREATE TABLE IF NOT EXISTS marking (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, name)
 );
+
+ALTER TABLE marking ADD COLUMN IF NOT EXISTS id UUID;
+ALTER TABLE marking ADD COLUMN IF NOT EXISTS category_id UUID;
+CREATE INDEX IF NOT EXISTS marking_category_tenant_idx ON marking_category (tenant_id);
+CREATE INDEX IF NOT EXISTS marking_tenant_category_idx ON marking (tenant_id, category_id);
 
 CREATE TABLE IF NOT EXISTS instance_marking (
     object_type_urn TEXT NOT NULL REFERENCES object_type(urn),

@@ -123,9 +123,9 @@ def _emit_object_type(
 
 
 def _emit_action_function(action: ActionTypeSchema) -> str:
-    # Every Action Type is declarative — the one generic
-    # `/objects/{object_type}/{id}/actions/{full_name}` route (full
-    # dotted `name`, `parameters` always present) is the only shape.
+    # Every Action Type is declarative — the generic
+    # `/api/ontologies/{ontology}/objects/{object_type}/{id}/actions/{full_name}`
+    # route (full dotted `name`, `parameters` always present) is the only shape.
     url_action_name = action.name
     # Two different ObjectTypes can both declare, say, an "archive"
     # action — a bare `local_name` function would silently overwrite the
@@ -149,7 +149,7 @@ def _emit_action_function(action: ActionTypeSchema) -> str:
         # HTTP response's own unpacking must use names no ontology
         # property or parameter could ever shadow.
         f'    _status, _result = client.request(\n'
-        f'        "POST", f"{{knowledge_url}}/objects/{action.target_object_type}/{{instance_id}}/actions/{url_action_name}",\n'
+        f'        "POST", f"{{knowledge_url}}/api/ontologies/main/objects/{action.target_object_type}/{{instance_id}}/actions/{url_action_name}",\n'
         f"        token=token, body={body_literal},\n"
         f"    )\n"
         f"    if _status not in (200,):\n"
@@ -175,7 +175,7 @@ def _emit_link_accessors(relation: RelationTypeSchema) -> str:
         f"def get_{fwd}(client: HolonClient, knowledge_url: str, token: str, instance_id: str) -> dict:\n"
         f'    """Traverse `{relation.name}` forward ({relation.source_api_name})."""\n'
         f'    _status, _result = client.request(\n'
-        f'        "GET", f"{{knowledge_url}}/objects/{relation.source_object_type}/{{instance_id}}/links/{relation.source_api_name}",\n'
+        f'        "GET", f"{{knowledge_url}}/api/ontologies/main/objects/{relation.source_object_type}/{{instance_id}}/links/{relation.source_api_name}",\n'
         f"        token=token,\n"
         f"    )\n"
         f"    if _status != 200:\n"
@@ -188,7 +188,7 @@ def _emit_link_accessors(relation: RelationTypeSchema) -> str:
         f"def get_{rev}(client: HolonClient, knowledge_url: str, token: str, instance_id: str) -> dict:\n"
         f'    """Traverse `{relation.name}` reverse ({relation.target_api_name})."""\n'
         f'    _status, _result = client.request(\n'
-        f'        "GET", f"{{knowledge_url}}/objects/{relation.target_object_type}/{{instance_id}}/links/{relation.target_api_name}",\n'
+        f'        "GET", f"{{knowledge_url}}/api/ontologies/main/objects/{relation.target_object_type}/{{instance_id}}/links/{relation.target_api_name}",\n'
         f"        token=token,\n"
         f"    )\n"
         f"    if _status != 200:\n"
@@ -200,7 +200,7 @@ def _emit_link_accessors(relation: RelationTypeSchema) -> str:
             f"def link_{fwd}(client: HolonClient, knowledge_url: str, token: str, instance_id: str, *, target_id: Any) -> dict:\n"
             f'    """Link write for `{relation.name}` (sets FK `{relation.source_property}`)."""\n'
             f'    _status, _result = client.request(\n'
-            f'        "PUT", f"{{knowledge_url}}/objects/{relation.source_object_type}/{{instance_id}}/links/{relation.source_api_name}",\n'
+            f'        "PUT", f"{{knowledge_url}}/api/ontologies/main/objects/{relation.source_object_type}/{{instance_id}}/links/{relation.source_api_name}",\n'
             f'        token=token, body={{"target_id": target_id}},\n'
             f"    )\n"
             f"    if _status != 200:\n"
@@ -211,7 +211,7 @@ def _emit_link_accessors(relation: RelationTypeSchema) -> str:
             f"def unlink_{fwd}(client: HolonClient, knowledge_url: str, token: str, instance_id: str) -> dict:\n"
             f'    """Unlink for `{relation.name}` (clears FK `{relation.source_property}`)."""\n'
             f'    _status, _result = client.request(\n'
-            f'        "DELETE", f"{{knowledge_url}}/objects/{relation.source_object_type}/{{instance_id}}/links/{relation.source_api_name}",\n'
+            f'        "DELETE", f"{{knowledge_url}}/api/ontologies/main/objects/{relation.source_object_type}/{{instance_id}}/links/{relation.source_api_name}",\n'
             f"        token=token,\n"
             f"    )\n"
             f"    if _status != 200:\n"
@@ -260,7 +260,7 @@ def _emit_ontology_interface(
         f"def {fn}(client: HolonClient, knowledge_url: str, token: str) -> list[dict]:\n"
         f'    """Polymorphic instances of interface `{iface.name}`."""\n'
         f'    _status, _result = client.request(\n'
-        f'        "GET", f"{{knowledge_url}}/interfaces/{iface.name}/objects",\n'
+        f'        "GET", f"{{knowledge_url}}/api/ontologies/main/interfaceTypes/{iface.name}/objects",\n'
         f"        token=token,\n"
         f"    )\n"
         f"    if _status != 200:\n"

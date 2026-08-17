@@ -5,10 +5,10 @@ Indexed here: ObjectType/Action definitions (their descriptions) and
 glossary terms (with synonyms) — pulled from Knowledge's own **HTTP**
 API, never its database directly, keeping the same platform boundary
 every other cross-service interaction in this build already respects.
-All three source endpoints (`/ontology`, `/actions`, `/glossary`) are
-auth-only in Knowledge, so a bare service-account JWT is enough.
-`/ontology` lists whatever ObjectTypes currently exist — self-serve,
-no fixed type list to keep in sync.
+Sources are the public Knowledge surface (`/api/ontologies/…/objectTypes`,
+`/api/holon/actions`, `/api/holon/glossary`) — auth-only, so a bare
+service-account JWT is enough. ObjectTypes are whatever currently exist
+(self-serve; no fixed type list to keep in sync).
 
 Deliberately *not* indexing instance-level free text (e.g. ProductReview
 comments) in this round: doing so correctly would need the indexer to
@@ -28,6 +28,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from .embeddings import EmbeddingClient
+from .knowledge_urls import holon_url, ontology_url
 
 logger = logging.getLogger("intelligence.vector_store")
 
@@ -53,7 +54,7 @@ async def index_metadata(
     documents: list[dict] = []
 
     async with httpx.AsyncClient(timeout=30.0) as http:
-        response = await http.get(f"{knowledge_url}/ontology", headers=headers)
+        response = await http.get(ontology_url(knowledge_url, "/objectTypes"), headers=headers)
         response.raise_for_status()
         for data in response.json():
             documents.append(
@@ -65,7 +66,7 @@ async def index_metadata(
                 }
             )
 
-        response = await http.get(f"{knowledge_url}/actions", headers=headers)
+        response = await http.get(holon_url(knowledge_url, "/actions"), headers=headers)
         response.raise_for_status()
         for action in response.json():
             documents.append(
@@ -77,7 +78,7 @@ async def index_metadata(
                 }
             )
 
-        response = await http.get(f"{knowledge_url}/glossary", headers=headers)
+        response = await http.get(holon_url(knowledge_url, "/glossary"), headers=headers)
         response.raise_for_status()
         for term in response.json():
             synonyms = ", ".join(term["synonyms"])

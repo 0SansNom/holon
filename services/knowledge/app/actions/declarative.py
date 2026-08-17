@@ -16,10 +16,37 @@ from typing import Any, Optional
 
 import asyncpg
 
-from holon_common import Principal, build_urn, outbox
+from holon_common import HolonError, Principal, build_urn, outbox
 
 from .hardcoded import _event
 from .metrics import ACTION_EVENTS
+
+
+class ActionValidationError(Exception):
+    """Declarative Action failed parameter / criteria validation.
+
+    Carry the full validation report so HTTP handlers can emit
+    ``ActionValidationFailed`` with ``parameters.validation``.
+    """
+
+    def __init__(self, report: dict) -> None:
+        self.report = report
+        messages = report.get("messages") or []
+        detail = messages[0] if messages else "action validation failed"
+        super().__init__(detail)
+
+    def to_holon_error(self) -> HolonError:
+        return HolonError.invalid_argument(
+            "ActionValidationFailed",
+            str(self),
+            validation={
+                "result": self.report.get("result"),
+                "parameters": self.report.get("parameters") or {},
+                "submissionCriteriaResult": self.report.get("submissionCriteriaResult"),
+                "messages": self.report.get("messages") or [],
+            },
+        )
+
 
 _OPERATORS = {
     "eq": lambda actual, expected: actual == expected,
@@ -52,7 +79,7 @@ def _evaluate_criteria(
 
     Leaf kinds: property comparison, principal field comparison.
     Groups: ``all`` / ``any``. Optional ``message`` overrides the default
-    failure string (Foundry-style failure messages).
+    failure string.
     """
     for criterion in criteria:
         error = _evaluate_one_criterion(instance_row, criterion, principal=principal)
@@ -479,6 +506,187 @@ async def _get_unmasked_instance(
     return dict(rows[0]) if rows else None
 
 
+async def validate_generic_action(
+    pool: asyncpg.Pool,
+    *,
+    action_name: str,
+    tenant_id: str,
+    workspace_id: str,
+    object_type: str,
+    instance_id: str,
+    principal: Principal,
+    parameters: dict,
+) -> dict:
+    """Validate an action application without writing.
+
+    Returns a report with top-level ``result`` ``VALID``|``INVALID`` and
+    per-parameter evaluation entries. Raises ``LookupError`` only when the
+    Action Type or target instance cannot be resolved.
+    """
+    from .. import ontology
+    from ..action_structural import is_property_edit
+
+    action_type = await ontology.get_action_type(pool, tenant_id, action_name)
+    if action_type is None:
+        raise LookupError(f"unknown Action Type: {action_name}")
+
+    object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
+    definition = await ontology.get_object_type(pool, object_type_urn)
+
+    param_results: dict[str, dict] = {}
+    messages: list[str] = []
+
+    def _fail_param(name: str, message: str, *, required: bool = True) -> None:
+        param_results[name] = {
+            "result": "INVALID",
+            "required": required,
+            "evaluatedConstraints": [],
+            "message": message,
+        }
+        messages.append(message)
+
+    def _ok_param(name: str, *, required: bool = True) -> None:
+        param_results.setdefault(
+            name,
+            {"result": "VALID", "required": required, "evaluatedConstraints": []},
+        )
+
+    target_interface = action_type.get("target_interface")
+    if target_interface:
+        if target_interface not in ((definition or {}).get("implements") or []):
+            messages.append(
+                f"{action_name} targets interface {target_interface!r}, which {object_type!r} does not implement"
+            )
+        else:
+            interface = await ontology.get_interface_type(pool, tenant_id, target_interface)
+            allowed_properties = set((interface or {}).get("required_properties") or [])
+            for edit in action_type["edits"]:
+                if not is_property_edit(edit):
+                    messages.append(
+                        f"{action_name} is scoped to interface {target_interface!r} and cannot use "
+                        f"structural edit kind {edit.get('kind')!r} — only modify_property is allowed"
+                    )
+                elif edit["property"].split(".", 1)[0] not in allowed_properties and edit["property"] not in allowed_properties:
+                    messages.append(
+                        f"{action_name} is scoped to interface {target_interface!r} and cannot edit "
+                        f"{edit['property']!r} — only the interface's required_properties are allowed"
+                    )
+    elif action_type["target_object_type"] != object_type:
+        messages.append(f"{action_name} targets {action_type['target_object_type']!r}, not {object_type!r}")
+
+    declared_parameters = {p["name"]: p for p in action_type["parameters"]}
+    for name, declaration in declared_parameters.items():
+        required = declaration.get("required", True)
+        if required and name not in parameters:
+            _fail_param(name, f"missing required parameter: {name!r}", required=True)
+            continue
+        if name not in parameters:
+            _ok_param(name, required=required)
+            continue
+        value = parameters[name]
+        if declaration.get("kind", "value_type") == "object_reference":
+            referenced_type = declaration["object_type"]
+            referenced_instance = await _get_unmasked_instance(
+                pool, referenced_type, tenant_id, workspace_id, str(value)
+            )
+            if referenced_instance is None:
+                _fail_param(name, f"parameter {name!r}: {referenced_type}/{value} does not exist", required=required)
+                continue
+            set_name = declaration.get("object_set")
+            if set_name:
+                set_urn = ontology.object_set_urn(tenant_id, workspace_id, set_name)
+                obj_set = await ontology.get_object_set(pool, set_urn)
+                if obj_set is None:
+                    _fail_param(name, f"parameter {name!r}: unknown object_set {set_name!r}", required=required)
+                    continue
+                set_ot = str(obj_set["object_type_urn"]).rsplit(":", 1)[-1]
+                if set_ot != referenced_type:
+                    _fail_param(
+                        name,
+                        f"parameter {name!r}: object_set {set_name!r} targets {set_ot!r}, not {referenced_type!r}",
+                        required=required,
+                    )
+                    continue
+                set_ot_def = await ontology.get_object_type(pool, obj_set["object_type_urn"])
+                mapping = (set_ot_def or {}).get("property_mapping") or {}
+                if not ontology.matches_predicates(referenced_instance, obj_set["definition"], mapping):
+                    _fail_param(
+                        name,
+                        f"parameter {name!r}: {referenced_type}/{value} is not in object set {set_name!r}",
+                        required=required,
+                    )
+                    continue
+            _ok_param(name, required=required)
+            continue
+        value_type = await ontology.get_value_type(pool, tenant_id, declaration["value_type"])
+        if value_type is None:
+            _fail_param(
+                name,
+                f"parameter {name!r} references unknown value_type {declaration['value_type']!r}",
+                required=required,
+            )
+            continue
+        error = ontology.validate_value(value, value_type)
+        if error is not None:
+            _fail_param(name, f"parameter {name!r}: {error}", required=required)
+            continue
+        _ok_param(name, required=required)
+
+    for name, value in parameters.items():
+        if name == "reason":
+            continue
+        if name not in declared_parameters:
+            _fail_param(name, f"unknown parameter: {name!r}", required=False)
+
+    property_types = (definition or {}).get("property_types") or {}
+    for edit in action_type["edits"]:
+        if not is_property_edit(edit):
+            continue
+        prop_key = edit["property"]
+        top_property = prop_key.split(".", 1)[0]
+        rule = property_types.get(top_property)
+        if rule is None:
+            continue
+        edit_value = parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
+        if rule.get("editable") is False:
+            messages.append(f"property {top_property!r} is not editable")
+            continue
+        if "." in prop_key:
+            continue
+        if rule.get("required") and edit_value is None:
+            messages.append(f"property {edit['property']!r} is required and cannot be set to null")
+            continue
+        if edit_value is not None and rule.get("kind") in ("value_type", "shared_property_type", "struct", "array"):
+            type_error = await ontology.validate_typed_property_value(
+                pool, tenant_id, rule, edit_value, property_name=edit["property"]
+            )
+            if type_error is not None:
+                messages.append(type_error)
+
+    instance_row = await _get_unmasked_instance(pool, object_type, tenant_id, workspace_id, instance_id)
+    if instance_row is None:
+        raise LookupError(f"{object_type}/{instance_id} not found")
+
+    criteria_error = _evaluate_criteria(
+        instance_row, action_type["submission_criteria"], principal=principal
+    )
+    submission_result = "VALID"
+    if criteria_error is not None:
+        ACTION_EVENTS.labels("criteria_reject", action_name).inc()
+        messages.append(criteria_error)
+        submission_result = "INVALID"
+
+    any_param_invalid = any(p.get("result") == "INVALID" for p in param_results.values())
+    result = "INVALID" if messages or any_param_invalid else "VALID"
+    return {
+        "result": result,
+        "parameters": param_results,
+        "submissionCriteriaResult": submission_result,
+        "messages": messages,
+        "actionType": action_type,
+    }
+
+
 async def request_generic_action(
     pool: asyncpg.Pool,
     *,
@@ -492,121 +700,27 @@ async def request_generic_action(
     parameters: dict,
     ttl_seconds: Optional[int] = None,
 ) -> dict:
-    """The generic entry point for a declarative Action Type — every
-    Action Type is declarative now, so this is the only invocation path.
-    Validates every declared parameter against its Value Type (real
-    format enforcement, not just a declared schema) and every submission
-    criterion against the instance's actual current state, *before*
-    creating any approval or applying anything — a failure here is a
-    clean 400, never a partially-applied write.
+    """Apply a declarative Action Type after validation.
+
+    Validation failures raise ``ActionValidationError`` (HTTP 400
+    ``ActionValidationFailed`` on public routes).
     """
-    from .. import ontology
     from . import APPROVAL_TTL, _apply_now
 
-    action_type = await ontology.get_action_type(pool, tenant_id, action_name)
-    if action_type is None:
-        raise LookupError(f"unknown Action Type: {action_name}")
-
-    object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
-    definition = await ontology.get_object_type(pool, object_type_urn)
-
-    from ..action_structural import is_property_edit
-
-    target_interface = action_type.get("target_interface")
-    if target_interface:
-        if target_interface not in ((definition or {}).get("implements") or []):
-            raise ValueError(f"{action_name} targets interface {target_interface!r}, which {object_type!r} does not implement")
-        interface = await ontology.get_interface_type(pool, tenant_id, target_interface)
-        allowed_properties = set((interface or {}).get("required_properties") or [])
-        for edit in action_type["edits"]:
-            if not is_property_edit(edit):
-                raise ValueError(
-                    f"{action_name} is scoped to interface {target_interface!r} and cannot use "
-                    f"structural edit kind {edit.get('kind')!r} — only modify_property is allowed"
-                )
-            if edit["property"].split(".", 1)[0] not in allowed_properties and edit["property"] not in allowed_properties:
-                raise ValueError(
-                    f"{action_name} is scoped to interface {target_interface!r} and cannot edit "
-                    f"{edit['property']!r} — only the interface's required_properties are allowed"
-                )
-    elif action_type["target_object_type"] != object_type:
-        raise ValueError(f"{action_name} targets {action_type['target_object_type']!r}, not {object_type!r}")
-
-    declared_parameters = {p["name"]: p for p in action_type["parameters"]}
-    for name, declaration in declared_parameters.items():
-        if declaration.get("required", True) and name not in parameters:
-            raise ValueError(f"missing required parameter: {name!r}")
-    for name, value in parameters.items():
-        if name == "reason":
-            continue  # always an implicit, undeclared edit source — see _apply_declarative_edits
-        declaration = declared_parameters.get(name)
-        if declaration is None:
-            raise ValueError(f"unknown parameter: {name!r}")
-        if declaration.get("kind", "value_type") == "object_reference":
-            referenced_type = declaration["object_type"]
-            referenced_instance = await _get_unmasked_instance(pool, referenced_type, tenant_id, workspace_id, str(value))
-            if referenced_instance is None:
-                raise ValueError(f"parameter {name!r}: {referenced_type}/{value} does not exist")
-            set_name = declaration.get("object_set")
-            if set_name:
-                set_urn = ontology.object_set_urn(tenant_id, workspace_id, set_name)
-                obj_set = await ontology.get_object_set(pool, set_urn)
-                if obj_set is None:
-                    raise ValueError(f"parameter {name!r}: unknown object_set {set_name!r}")
-                set_ot = str(obj_set["object_type_urn"]).rsplit(":", 1)[-1]
-                if set_ot != referenced_type:
-                    raise ValueError(
-                        f"parameter {name!r}: object_set {set_name!r} targets {set_ot!r}, "
-                        f"not {referenced_type!r}"
-                    )
-                set_ot_def = await ontology.get_object_type(pool, obj_set["object_type_urn"])
-                mapping = (set_ot_def or {}).get("property_mapping") or {}
-                if not ontology.matches_predicates(referenced_instance, obj_set["definition"], mapping):
-                    raise ValueError(
-                        f"parameter {name!r}: {referenced_type}/{value} is not in object set {set_name!r}"
-                    )
-            continue
-        value_type = await ontology.get_value_type(pool, tenant_id, declaration["value_type"])
-        if value_type is None:
-            raise ValueError(f"parameter {name!r} references unknown value_type {declaration['value_type']!r}")
-        error = ontology.validate_value(value, value_type)
-        if error is not None:
-            raise ValueError(f"parameter {name!r}: {error}")
-
-    property_types = (definition or {}).get("property_types") or {}
-    for edit in action_type["edits"]:
-        if not is_property_edit(edit):
-            continue
-        prop_key = edit["property"]
-        top_property = prop_key.split(".", 1)[0]
-        rule = property_types.get(top_property)
-        if rule is None:
-            continue
-        edit_value = parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
-        if rule.get("editable") is False:
-            raise ValueError(f"property {top_property!r} is not editable")
-        # Nested path edits write a leaf into a struct — skip whole-struct required/type checks.
-        if "." in prop_key:
-            continue
-        if rule.get("required") and edit_value is None:
-            raise ValueError(f"property {edit['property']!r} is required and cannot be set to null")
-        if edit_value is not None and rule.get("kind") in ("value_type", "shared_property_type", "struct", "array"):
-            type_error = await ontology.validate_typed_property_value(
-                pool, tenant_id, rule, edit_value, property_name=edit["property"]
-            )
-            if type_error is not None:
-                raise ValueError(type_error)
-
-    instance_row = await _get_unmasked_instance(pool, object_type, tenant_id, workspace_id, instance_id)
-    if instance_row is None:
-        raise LookupError(f"{object_type}/{instance_id} not found")
-    criteria_error = _evaluate_criteria(
-        instance_row, action_type["submission_criteria"], principal=principal
+    report = await validate_generic_action(
+        pool,
+        action_name=action_name,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        object_type=object_type,
+        instance_id=instance_id,
+        principal=principal,
+        parameters=parameters,
     )
-    if criteria_error is not None:
-        ACTION_EVENTS.labels("criteria_reject", action_name).inc()
-        raise ValueError(criteria_error)
+    if report["result"] != "VALID":
+        raise ActionValidationError(report)
 
+    action_type = report["actionType"]
     instance_urn = build_urn(tenant_id, workspace_id, "instance", f"{object_type}/{instance_id}")
 
     if action_type["risk_level"] == "low":
@@ -636,6 +750,21 @@ async def request_generic_action(
                 tenant_id, action_name, instance_urn, principal.urn, reason, expires_at, json.dumps(parameters),
             )
             await outbox.enqueue(conn, event)
+
+    from holon_common.audit import emit_audit
+
+    emit_audit(
+        category="action",
+        action="knowledge.action.requested",
+        outcome="pending",
+        tenant_id=tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="instance",
+        resource_urn=instance_urn,
+        reason=reason,
+        extra={"actionName": action_name, "approvalId": approval_id, "riskLevel": action_type["risk_level"]},
+    )
 
     return {
         "status": "pending_approval",

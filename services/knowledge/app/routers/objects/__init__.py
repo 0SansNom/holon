@@ -1,9 +1,8 @@
 """All `/objects/*` reads — export, relation traversal, and instance-graph
-(all in `seeded.py`, despite the name — every route in it is generic over
-any ObjectType via `core._type_handle`), plus the generic self-serve
-list/get/action-invoke routes (`generic.py`).
+(`object_reads.py` — generic over any ObjectType via `core._type_handle`),
+plus the self-serve list/get/action-invoke routes (`generic.py`).
 
-Router ordering constraint: `seeded` must combine into this package's
+Router ordering constraint: `object_reads` must combine into this package's
 `router` *before* `generic` — Starlette matches routes in registration
 order, and `export_objects`'s `/objects/{object_type}/export` would
 otherwise be shadowed by `generic.py`'s `/objects/{object_type}/{instance_id}`
@@ -14,8 +13,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import generic, seeded
+from . import generic, object_reads
 
 router = APIRouter()
-router.include_router(seeded.router)
+router.include_router(object_reads.router)
 router.include_router(generic.router)

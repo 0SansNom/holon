@@ -51,6 +51,23 @@ networkPolicy:
     # allowPublicHttps: false.
     llmEgressCidrs: []
 
+# Prefer RS256 in real prod: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS
+# in existingSecret (`make gen-jwt-rsa`), then:
+# jwt:
+#   algorithm: RS256
+#   requireAsymmetric: true
+jwt:
+  algorithm: HS256
+  requireAsymmetric: false
+
+# Prefer enabling once Prometheus Operator is installed and
+# HOLON_METRICS_TOKEN is in existingSecret:
+# observability:
+#   serviceMonitor:
+#     enabled: true
+#   prometheusRule:
+#     enabled: true
+
 services:
   connectivity:
     replicas: 2
@@ -64,3 +81,5 @@ services:
     replicas: 2
   intelligence:
     replicas: 2
+    # Requires a cluster RuntimeClass named gvisor (or change to your name).
+    runtimeClassName: gvisor

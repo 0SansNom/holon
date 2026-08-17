@@ -31,6 +31,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 from typing import Any, Optional
 
 import asyncpg
@@ -52,6 +53,28 @@ CREATE TABLE IF NOT EXISTS model_registration (
 """
 
 _VALID_FRAMEWORKS = {"sklearn"}
+
+
+def joblib_models_allowed() -> bool:
+    """joblib/pickle deserialize is an RCE surface — off in production unless
+    explicitly forced (posture refuses that force). Local DX defaults on.
+    """
+    from holon_common.security_posture import is_production
+
+    raw = (os.environ.get("HOLON_ALLOW_JOBLIB_MODELS") or "").strip().lower()
+    if is_production():
+        return raw in {"1", "true", "yes"}
+    if raw == "":
+        return True
+    return raw in {"1", "true", "yes"}
+
+
+def _require_joblib_allowed() -> None:
+    if not joblib_models_allowed():
+        raise ValueError(
+            "joblib model register/predict disabled "
+            "(set HOLON_ALLOW_JOBLIB_MODELS=true only for local DX — refused in production posture)"
+        )
 
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
@@ -97,6 +120,7 @@ async def register_model(
     artifact_bytes: bytes,
     input_schema: dict,
 ) -> dict:
+    _require_joblib_allowed()
     if framework not in _VALID_FRAMEWORKS:
         raise ValueError(f"unknown framework {framework!r} (must be one of {sorted(_VALID_FRAMEWORKS)})")
     try:
@@ -147,6 +171,7 @@ def _predict_sync(s3_client, bucket: str, artifact_key: str, properties: list[st
 
 
 async def predict(pool: asyncpg.Pool, s3_client, bucket: str, *, name: str, features: dict) -> Any:
+    _require_joblib_allowed()
     registration = await get_model(pool, name)
     if registration is None:
         raise ValueError(f"no model registered as {name!r}")

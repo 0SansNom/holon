@@ -6,7 +6,8 @@ first extracted to calibrate the pattern for the rest.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from holon_common import HolonError
 from pydantic import BaseModel
 
 from .. import execution_adapter_registry, export_format_registry, function_registry
@@ -28,14 +29,14 @@ async def register_execution_adapter_plugin(
             core.pool, entry_point=body.entry_point
         )
     except execution_adapter_registry.PluginConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('PluginConflict', str(exc)) from exc
 
 
 @router.get("/execution-adapter-plugins/{name}")
 async def get_execution_adapter_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await execution_adapter_registry.get_execution_adapter_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no execution adapter plugin registered as {name!r}")
+        raise HolonError.not_found('ExecutionAdapterPluginNotFound', f"no execution adapter plugin registered as {name!r}", name=name)
     return registration
 
 
@@ -43,7 +44,7 @@ async def get_execution_adapter_plugin(name: str, principal=Depends(core.current
 async def disable_execution_adapter_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await execution_adapter_registry.get_execution_adapter_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no execution adapter plugin registered as {name!r}")
+        raise HolonError.not_found('ExecutionAdapterPluginNotFound', f"no execution adapter plugin registered as {name!r}", name=name)
     return await execution_adapter_registry.set_execution_adapter_status(core.pool, name, "disabled")
 
 
@@ -51,7 +52,7 @@ async def disable_execution_adapter_plugin(name: str, principal=Depends(core.cur
 async def enable_execution_adapter_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await execution_adapter_registry.get_execution_adapter_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no execution adapter plugin registered as {name!r}")
+        raise HolonError.not_found('ExecutionAdapterPluginNotFound', f"no execution adapter plugin registered as {name!r}", name=name)
     return await execution_adapter_registry.set_execution_adapter_status(core.pool, name, "active")
 
 
@@ -66,14 +67,14 @@ async def register_export_format_plugin(
     try:
         return await export_format_registry.register_export_format_plugin(core.pool, entry_point=body.entry_point)
     except export_format_registry.PluginConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('PluginConflict', str(exc)) from exc
 
 
 @router.get("/export-format-plugins/{name}")
 async def get_export_format_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await export_format_registry.get_export_format_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no export format plugin registered as {name!r}")
+        raise HolonError.not_found('ExportFormatPluginNotFound', f"no export format plugin registered as {name!r}", name=name)
     return registration
 
 
@@ -81,7 +82,7 @@ async def get_export_format_plugin(name: str, principal=Depends(core.current_pri
 async def disable_export_format_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await export_format_registry.get_export_format_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no export format plugin registered as {name!r}")
+        raise HolonError.not_found('ExportFormatPluginNotFound', f"no export format plugin registered as {name!r}", name=name)
     return await export_format_registry.set_export_format_status(core.pool, name, "disabled")
 
 
@@ -89,7 +90,7 @@ async def disable_export_format_plugin(name: str, principal=Depends(core.current
 async def enable_export_format_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await export_format_registry.get_export_format_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no export format plugin registered as {name!r}")
+        raise HolonError.not_found('ExportFormatPluginNotFound', f"no export format plugin registered as {name!r}", name=name)
     return await export_format_registry.set_export_format_status(core.pool, name, "active")
 
 
@@ -104,14 +105,14 @@ async def register_function_plugin(
     try:
         return await function_registry.register_function_plugin(core.pool, entry_point=body.entry_point)
     except function_registry.PluginConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('PluginConflict', str(exc)) from exc
 
 
 @router.get("/function-plugins/{name}")
 async def get_function_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await function_registry.get_function_plugin_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no function plugin registered as {name!r}")
+        raise HolonError.not_found('FunctionPluginNotFound', f"no function plugin registered as {name!r}", name=name)
     return registration
 
 
@@ -119,7 +120,7 @@ async def get_function_plugin(name: str, principal=Depends(core.current_principa
 async def disable_function_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await function_registry.get_function_plugin_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no function plugin registered as {name!r}")
+        raise HolonError.not_found('FunctionPluginNotFound', f"no function plugin registered as {name!r}", name=name)
     return await function_registry.set_function_plugin_status(core.pool, name, "disabled")
 
 
@@ -127,7 +128,7 @@ async def disable_function_plugin(name: str, principal=Depends(core.current_prin
 async def enable_function_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
     registration = await function_registry.get_function_plugin_registration(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no function plugin registered as {name!r}")
+        raise HolonError.not_found('FunctionPluginNotFound', f"no function plugin registered as {name!r}", name=name)
     return await function_registry.set_function_plugin_status(core.pool, name, "active")
 
 
@@ -155,7 +156,7 @@ async def invoke_function(
     """
     registration = await function_registry.find_active_function_by_name(core.pool, name)
     if registration is None:
-        raise HTTPException(status_code=404, detail=f"no active function plugin registered for {name!r}")
+        raise HolonError.not_found('FunctionPluginNotFound', f"no active function plugin registered for {name!r}", name=name)
     plugin = function_registry.load_function_plugin(registration["manifest"])
     output_rows = []
     for row in request.rows:

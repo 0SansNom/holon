@@ -4,20 +4,23 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import HTTPException, Query
+from fastapi import Query
+from holon_common import HolonError
 
 from ... import paging
 
 
 def paging_query(
     page_size: Optional[int] = Query(None, ge=1, le=paging.MAX_PAGE_SIZE),
+    pageSize: Optional[int] = Query(None, ge=1, le=paging.MAX_PAGE_SIZE),
     cursor: Optional[str] = Query(None),
+    pageToken: Optional[str] = Query(None),
 ) -> tuple[int, Optional[str]]:
-    # No page_size → one shot up to MAX_WALK_ITEMS (legacy callers / small demos).
-    # Explicit page_size → capped at MAX_PAGE_SIZE for real walks.
-    if page_size is None:
-        return paging.MAX_WALK_ITEMS, cursor
-    return page_size, cursor
+    size = page_size if page_size is not None else pageSize
+    token = cursor if cursor is not None else pageToken
+    if size is None:
+        return paging.MAX_WALK_ITEMS, token
+    return size, token
 
 
 def page_response(
@@ -37,7 +40,7 @@ def page_response(
             kwargs["key_of"] = key_of
         return paging.paginate_rows(rows, **kwargs)
     except paging.PagingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('InvalidPageCursor', str(exc)) from exc
 
 
 def page_from_resolved(rows: list[dict], *, page_size: int, key_of=None) -> dict:
@@ -45,11 +48,15 @@ def page_from_resolved(rows: list[dict], *, page_size: int, key_of=None) -> dict
     key_fn = key_of or paging.instance_id_of
     has_more = len(rows) > page_size
     items = rows[:page_size]
-    next_cursor = None
+    next_token = None
     if has_more and items:
-        next_cursor = paging.encode_cursor(after_id=key_fn(items[-1]))
+        next_token = paging.encode_cursor(after_id=key_fn(items[-1]))
     reported = page_size if page_size <= paging.MAX_PAGE_SIZE else paging.DEFAULT_PAGE_SIZE
-    return {"items": items, "next_cursor": next_cursor, "page_size": reported}
+    return {
+        "data": items,
+        "nextPageToken": next_token,
+        "pageSize": reported,
+    }
 
 
 def after_id_from_cursor(cursor: Optional[str]) -> Optional[str]:
@@ -58,4 +65,4 @@ def after_id_from_cursor(cursor: Optional[str]) -> Optional[str]:
     try:
         return str(paging.decode_cursor(cursor))
     except paging.PagingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('InvalidPageCursor', str(exc)) from exc

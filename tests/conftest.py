@@ -1,18 +1,12 @@
-"""Shared test harness — every integration test in this suite talks to
-the real, running docker-compose stack over plain HTTP (no mocking),
-and until now each of the ~60 test files hand-copied the same
-`_request`/`_token_for`/`_unique_name` helpers and the same four seeded-
-principal token fixtures. Extracted here — real integration tests
-against the live stack catch cross-service bugs a mocked test would
-miss, which is why this suite is built this way rather than mocking
-each service's dependencies.
+"""Shared pytest fixtures for Holon.
 
-`_request`'s default `timeout=30` is deliberately the most generous
-value any single test file used standalone (some used 15/20/60/180) —
-raising it never breaks a test that used to pass (client timeout is
-just a ceiling, not something under test), only avoids spuriously
-failing a slow-but-healthy call. A test needing a shorter or longer
-ceiling than the default can still pass `timeout=` explicitly.
+Stack helpers (`jdoe_token`, `ontology_url`, …) are for integration tests.
+Unit tests under ``tests/unit/`` should not need the compose stack.
+
+Markers (see ``pytest.ini``):
+- ``unit`` — no live stack
+- ``integration`` — compose HTTP / local infra
+- ``llm`` — real LLM spend (excluded from default CI)
 """
 
 from __future__ import annotations
@@ -23,6 +17,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -39,27 +34,55 @@ INTELLIGENCE = "http://localhost:8006"
 OPENSEARCH = "http://localhost:9200"
 
 TENANT_ID = "acme"
+WORKSPACE_ID = "main"
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """Auto-mark by path: ``tests/unit/`` → unit, else integration (unless llm-only)."""
+    for item in items:
+        path = Path(str(getattr(item, "path", item.fspath)))
+        if "unit" in path.parts:
+            item.add_marker(pytest.mark.unit)
+            continue
+        markers = {m.name for m in item.iter_markers()}
+        if "llm" in markers:
+            # LLM suite is its own slice; still integration in practice.
+            item.add_marker(pytest.mark.integration)
+            continue
+        if "unit" not in markers:
+            item.add_marker(pytest.mark.integration)
+
+
+def ontology_url(path: str = "") -> str:
+    """Knowledge Ontology surface: `/api/ontologies/{workspace}/…`."""
+    suffix = path if path.startswith("/") else f"/{path}" if path else ""
+    return f"{KNOWLEDGE}/api/ontologies/{WORKSPACE_ID}{suffix}"
+
+
+def holon_url(path: str = "") -> str:
+    """Knowledge Holon-native surface: `/api/holon/…`."""
+    suffix = path if path.startswith("/") else f"/{path}" if path else ""
+    return f"{KNOWLEDGE}/api/holon{suffix}"
 
 
 def as_items(body):
-    """Normalize collection responses to a list of instances.
-
-    List/link/interface reads now return `{items, next_cursor, page_size}`
-    (links also keep relation metadata). Legacy bare arrays still work.
-    """
+    """Normalize collection responses to a list of instances."""
     if isinstance(body, list):
         return body
-    if isinstance(body, dict) and "items" in body:
-        return body["items"]
+    if isinstance(body, dict):
+        if "data" in body and isinstance(body["data"], list):
+            return body["data"]
+        if "items" in body:
+            return body["items"]
     return body
 
 
 def _is_pure_object_page(body) -> bool:
     return (
         isinstance(body, dict)
-        and "items" in body
-        and "next_cursor" in body
-        and "page_size" in body
+        and "data" in body
+        and "nextPageToken" in body
+        and "pageSize" in body
         and "relation" not in body
     )
 
@@ -84,7 +107,7 @@ def _request(
     except urllib.error.HTTPError as exc:
         status, payload = exc.code, json.loads(exc.read())
     if unwrap_pages and _is_pure_object_page(payload):
-        return status, payload["items"]
+        return status, payload["data"]
     return status, payload
 
 
@@ -111,37 +134,36 @@ def _clear_app_modules() -> None:
         del sys.modules[key]
 
 
+def _clear_magicmock_third_party() -> None:
+    """Drop stand-in modules so a later file can import the real package.
+
+    White-box tests plant ``MagicMock()`` or empty ``types.ModuleType`` under
+    names like ``httpx``. Those survive across collection and break FastAPI
+    TestClient (needs a real ``httpx.Response``).
+    """
+    from unittest.mock import MagicMock
+
+    for name in ("httpx", "asyncpg", "anthropic", "joblib", "httpcore"):
+        mod = sys.modules.get(name)
+        if mod is None:
+            continue
+        if isinstance(mod, MagicMock) or getattr(mod, "__file__", None) is None:
+            del sys.modules[name]
+
+
 # Per-file snapshot of whatever `app`/`app.*` stubs that file's own module-level
 # code left in `sys.modules` right after it was imported/collected.
 _app_module_snapshots: dict = {}
 
 
 def pytest_collectstart(collector) -> None:
-    """Several test files stub `sys.modules["app"...]` with lightweight fakes
-    to unit-test pure ontology logic without importing this service's full
-    dependency chain (asyncpg/httpx/...). Those stubs are hand-built per file
-    and only implement what that one file needs — none of them clean up
-    after themselves, so whichever file's stub happens to import (i.e.
-    *collect*, since the stub-building runs at module scope) first
-    permanently shadows the real module for every file collected after it in
-    the same process (surfaces as `ImportError: cannot import name X from
-    'app.ontology.Y' (unknown location)` in an unrelated file). Clearing
-    `app`/`app.*` out of `sys.modules` before each file is collected gives
-    every file a clean slate regardless of collection order.
-    """
+    """Several test files stub `sys.modules["app"...]` with lightweight fakes."""
     _clear_app_modules()
+    _clear_magicmock_third_party()
 
 
 def pytest_itemcollected(item) -> None:
-    """Collection fully finishes for every file before any test runs — so by
-    execution time, only the *last*-collected file's stubs are still in
-    `sys.modules`. Some tests also reach into `sys.modules["app...]` from
-    inside the test function itself (not just at module scope), expecting
-    whatever their own file's module-level code set up there. Snapshot each
-    file's post-import `app.*` state once, right after it's collected, so
-    `pytest_runtest_setup` below can restore exactly that file's state before
-    any of its tests run — independent of collection order.
-    """
+    """Collection fully finishes for every file before any test runs."""
     path = item.path
     if path not in _app_module_snapshots:
         _app_module_snapshots[path] = {

@@ -33,6 +33,7 @@ from holon_common import (
     build_urn,
     issue_token,
 )
+from holon_common.audit import emit_audit
 
 logger = logging.getLogger("automation.agent_chain_trigger")
 
@@ -116,6 +117,17 @@ async def _spawn_next_session(
         return response.json()
 
     await breaker.call(_run_turn)
+    emit_audit(
+        category="action",
+        action="automation.agent_chain.spawned",
+        outcome="success",
+        tenant_id=tenant_id,
+        actor_urn=chain_agent_principal(tenant_id, on_behalf_of=on_behalf_of).urn,
+        actor_type="agent",
+        resource_type="agent_session",
+        resource_urn=session.get("urn"),
+        extra={"causation_depth": causation_depth, "max_chain_depth": max_chain_depth},
+    )
 
 
 async def consume_events(consumer: EventConsumer, *, intelligence_url: str, jwt_secret: str) -> None:
@@ -142,6 +154,16 @@ async def consume_events(consumer: EventConsumer, *, intelligence_url: str, jwt_
                     logger.info(
                         "agent chain cut off after depth %d (max_chain_depth=%d) for session %s — loop guard",
                         depth, max_chain_depth, event.payload.get("session_urn"),
+                    )
+                    emit_audit(
+                        category="action",
+                        action="automation.agent_chain.cutoff",
+                        outcome="deny",
+                        tenant_id=event.tenant_id,
+                        resource_type="agent_session",
+                        resource_urn=event.payload.get("session_urn"),
+                        reason="max_chain_depth",
+                        extra={"depth": depth, "max_chain_depth": max_chain_depth},
                     )
                     continue
                 await _spawn_next_session(

@@ -17,11 +17,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from holon_common import (
+    HolonError,
     EventActor,
     EventEnvelope,
     EventProducer,
@@ -44,6 +45,8 @@ from holon_common import (
     run_migrations,
     set_session_cookie,
 )
+from holon_common.audit import clear_durable_audit_hooks, emit_audit
+from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
 
 from . import oidc as oidc_client
 from .seed import (
@@ -92,8 +95,12 @@ async def lifespan(app: FastAPI):
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
         await ensure_schema(conn)
+        await ensure_audit_schema(conn)
         await outbox.ensure_schema(conn)
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    clear_durable_audit_hooks()
+    install_durable_audit(app.state.pool)
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
     await retry_with_backoff(
@@ -163,9 +170,9 @@ async def _fetch_principal(pool: asyncpg.Pool, urn: str) -> Principal | None:
 async def _require_active_principal_row(urn: str) -> asyncpg.Record:
     row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
     if row is None:
-        raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
+        raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     if row["status"] != "active":
-        raise HTTPException(status_code=403, detail="principal is disabled")
+        raise HolonError.forbidden('PrincipalDisabled', "principal is disabled")
     return row
 
 
@@ -173,18 +180,15 @@ def _reject_dev_secret_if_disabled(client_secret: str) -> None:
     if allow_dev_login():
         return
     if isinstance(client_secret, str) and client_secret.endswith("-dev-secret"):
-        raise HTTPException(
-            status_code=403,
-            detail="dev client_secret login disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",
-        )
+        raise HolonError.forbidden('PrincipalDisabled', "dev client_secret login disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",)
 
 
 async def _require_grant_target(urn: str, *, tenant_id: str) -> Principal:
     target = await _fetch_principal(app.state.pool, urn)
     if target is None:
-        raise HTTPException(status_code=404, detail=f"unknown principal: {urn}")
+        raise HolonError.not_found('PrincipalNotFound', f"unknown principal: {urn}")
     if target.tenant_id != tenant_id:
-        raise HTTPException(status_code=400, detail="principal belongs to another tenant")
+        raise HolonError.invalid_argument('CrossTenantPrincipal', "principal belongs to another tenant")
     return target
 
 
@@ -198,21 +202,21 @@ async def _authorize_bootstrap_governance(principal: Principal) -> None:
         permission="approve",
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 async def _authorize_workspace_governance(principal: Principal, tenant_id: str, workspace_id: str) -> str:
     ws = await get_workspace(app.state.pool, workspace_id)
     if ws is None or ws["tenant_id"] != tenant_id:
-        raise HTTPException(status_code=404, detail=f"unknown workspace: {workspace_id}")
+        raise HolonError.not_found('WorkspaceNotFound', f"unknown workspace: {workspace_id}")
     if ws["status"] != "active":
-        raise HTTPException(status_code=400, detail="workspace is disabled")
+        raise HolonError.invalid_argument('WorkspaceDisabled', "workspace is disabled")
     w_urn = workspace_urn(tenant_id, workspace_id)
     decision = await app.state.authz.authorize(
         principal, resource_type="workspace", resource_urn=w_urn, permission="approve"
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
     return w_urn
 
 
@@ -254,10 +258,55 @@ async def mint_token(request: TokenRequest) -> dict:
     row = await _require_active_principal_row(request.principal_urn)
     _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
-        raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
+        raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     principal = _principal_from_row(row)
     return {"access_token": _issue(principal), "token_type": "bearer"}
 
+
+class OAuth2TokenForm(BaseModel):
+    """OAuth2 client_credentials token request.
+
+    `client_id` may be a full principal URN or the local name (resolved
+    against the default tenant). Same JWT as `/token`.
+    """
+
+    grant_type: str = "client_credentials"
+    client_id: str
+    client_secret: str
+    scope: str = ""
+
+
+@app.post("/api/oauth2/token")
+async def oauth2_token(request: OAuth2TokenForm) -> dict:
+    if request.grant_type != "client_credentials":
+        raise HolonError.invalid_argument(
+            "UnsupportedGrantType",
+            f"unsupported grant_type: {request.grant_type}",
+            grant_type=request.grant_type,
+        )
+    client_id = request.client_id.strip()
+    if client_id.startswith("hl:"):
+        principal_urn = client_id
+    else:
+        principal_urn = build_urn(TENANT_ID, "global", "user", client_id)
+        # Also try service-account if user lookup fails below.
+    try:
+        row = await _require_active_principal_row(principal_urn)
+    except HolonError:
+        if client_id.startswith("hl:"):
+            raise
+        sa_urn = build_urn(TENANT_ID, "global", "service-account", client_id)
+        row = await _require_active_principal_row(sa_urn)
+    _reject_dev_secret_if_disabled(request.client_secret)
+    if not secrets.compare_digest(row["client_secret"], request.client_secret):
+        raise HolonError.unauthorized("InvalidCredentials", "invalid client_id or client_secret")
+    principal = _principal_from_row(row)
+    _ = request.scope
+    return {
+        "access_token": _issue(principal),
+        "token_type": "bearer",
+        "expires_in": 3600,
+    }
 
 @app.post("/login")
 async def login(request: TokenRequest, response: Response) -> dict:
@@ -267,12 +316,31 @@ async def login(request: TokenRequest, response: Response) -> dict:
     (defeats XSS-based token theft, `localStorage`'s weakness — see
     `holon_common.auth`'s `set_session_cookie`/module docstring).
     """
-    row = await _require_active_principal_row(request.principal_urn)
-    _reject_dev_secret_if_disabled(request.client_secret)
-    if not secrets.compare_digest(row["client_secret"], request.client_secret):
-        raise HTTPException(status_code=401, detail="invalid principal_urn or client_secret")
+    try:
+        row = await _require_active_principal_row(request.principal_urn)
+        _reject_dev_secret_if_disabled(request.client_secret)
+        if not secrets.compare_digest(row["client_secret"], request.client_secret):
+            raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
+    except HolonError as exc:
+        emit_audit(
+            category="identity",
+            action="identity.login",
+            outcome="failure",
+            tenant_id=TENANT_ID,
+            actor_urn=request.principal_urn,
+            reason=exc.detail,
+        )
+        raise
     principal = _principal_from_row(row)
     set_session_cookie(response, _issue(principal))
+    emit_audit(
+        category="identity",
+        action="identity.login",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+    )
     return {"status": "ok"}
 
 
@@ -286,7 +354,7 @@ async def logout(response: Response) -> dict:
 async def oidc_login() -> dict:
     """Start OIDC authorization-code + PKCE. 404 when HOLON_OIDC_ISSUER unset."""
     if not oidc_client.oidc_enabled():
-        raise HTTPException(status_code=404, detail="OIDC is not configured")
+        raise HolonError.not_found('OidcNotConfigured', "OIDC is not configured")
     redirect_uri = os.environ.get(
         "HOLON_OIDC_REDIRECT_URI", "http://localhost:8001/oidc/callback"
     )
@@ -296,19 +364,41 @@ async def oidc_login() -> dict:
 @app.get("/oidc/callback")
 async def oidc_callback(code: str, state: str):
     if not oidc_client.oidc_enabled():
-        raise HTTPException(status_code=404, detail="OIDC is not configured")
+        raise HolonError.not_found('OidcNotConfigured', "OIDC is not configured")
     try:
         claims = await oidc_client.exchange_code(app.state.pool, code=code, state=state)
     except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"OIDC exchange failed: {exc}") from exc
+        emit_audit(
+            category="identity",
+            action="identity.oidc.login",
+            outcome="failure",
+            tenant_id=TENANT_ID,
+            reason=str(exc),
+        )
+        raise HolonError.unauthorized('OidcError', f"OIDC exchange failed: {exc}") from exc
 
     sub = str(claims.get("sub") or "")
     if not sub:
-        raise HTTPException(status_code=401, detail="OIDC claims missing sub")
+        emit_audit(
+            category="identity",
+            action="identity.oidc.login",
+            outcome="failure",
+            tenant_id=TENANT_ID,
+            reason="OIDC claims missing sub",
+        )
+        raise HolonError.unauthorized('OidcError', "OIDC claims missing sub")
     tenant_id = oidc_client.tenant_from_claims(claims, default_tenant=TENANT_ID)
     tenant = await get_tenant(app.state.pool, tenant_id)
     if tenant is None or tenant["status"] != "active":
-        raise HTTPException(status_code=403, detail=f"unknown or disabled tenant for OIDC login: {tenant_id}")
+        emit_audit(
+            category="identity",
+            action="identity.oidc.login",
+            outcome="failure",
+            tenant_id=tenant_id,
+            actor_urn=sub,
+            reason=f"unknown or disabled tenant: {tenant_id}",
+        )
+        raise HolonError.forbidden('TenantDisabled', f"unknown or disabled tenant for OIDC login: {tenant_id}")
 
     row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE oidc_sub = $1", sub)
     if row is None:
@@ -342,33 +432,71 @@ async def oidc_callback(code: str, state: str):
     else:
         # Returning user: keep original DB tenant mapping
         if row["tenant_id"] != tenant_id:
-            raise HTTPException(
-                status_code=403,
-                detail=(
+            emit_audit(
+                category="identity",
+                action="identity.oidc.login",
+                outcome="failure",
+                tenant_id=row["tenant_id"],
+                actor_urn=row["urn"],
+                reason="OIDC tenant claim mismatch",
+            )
+            raise HolonError.forbidden('OidcError', (
                     f"OIDC tenant claim {tenant_id!r} does not match linked principal "
                     f"tenant {row['tenant_id']!r}; unlink oidc_sub or update the principal"
-                ),
-            )
+                ),)
 
     if row["status"] != "active":
-        raise HTTPException(status_code=403, detail="principal is disabled")
+        raise HolonError.forbidden('PrincipalDisabled', "principal is disabled")
     principal = _principal_from_row(row)
 
-    # Optional group → workspace relation sync (viewer) within this tenant.
-    group_prefix = os.environ.get("HOLON_OIDC_WORKSPACE_GROUP_PREFIX", "workspace:")
-    for group in oidc_client.groups_from_claims(claims):
-        if not group.startswith(group_prefix):
-            continue
-        workspace_id = group[len(group_prefix) :]
+    # Group → workspace relation sync (admin/editor/viewer). Highest privilege wins;
+    # alternate relations on the same workspace are removed for this principal.
+    synced: list[dict] = []
+    desired = oidc_client.workspace_roles_from_claims(claims)
+    for workspace_id, relation in desired.items():
         ws = await get_workspace(app.state.pool, workspace_id)
         if ws is None or ws["tenant_id"] != principal.tenant_id:
             continue
+        w_urn = workspace_urn(principal.tenant_id, workspace_id)
         await app.state.authz.write_relationship(
             resource_type="workspace",
-            resource_urn=workspace_urn(principal.tenant_id, workspace_id),
-            relation="viewer",
+            resource_urn=w_urn,
+            relation=relation,
             subject_urn=principal.urn,
         )
+        for other in VALID_WORKSPACE_RELATIONS - {relation}:
+            try:
+                await app.state.authz.delete_relationship(
+                    resource_type="workspace",
+                    resource_urn=w_urn,
+                    relation=other,
+                    subject_urn=principal.urn,
+                )
+            except Exception:
+                logger.debug("OIDC sync: no %s relation to delete on %s", other, workspace_id, exc_info=True)
+        synced.append({"workspaceId": workspace_id, "relation": relation})
+        emit_audit(
+            category="identity",
+            action="identity.oidc.group_sync",
+            outcome="success",
+            tenant_id=principal.tenant_id,
+            actor_urn=principal.urn,
+            actor_type=principal.type,
+            resource_type="workspace",
+            resource_urn=w_urn,
+            permission=relation,
+            extra={"source": "oidc_groups"},
+        )
+
+    emit_audit(
+        category="identity",
+        action="identity.oidc.login",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        extra={"syncedWorkspaces": synced},
+    )
 
     # Set session cookie on RedirectResponse object
     frontend = os.environ.get("HOLON_OIDC_POST_LOGIN_REDIRECT", "http://localhost:5173/objects")
@@ -380,6 +508,102 @@ async def oidc_callback(code: str, state: str):
 @app.get("/whoami", response_model=Principal)
 async def whoami(principal: Principal = Depends(current_principal)) -> Principal:
     return principal
+
+
+@app.get("/.well-known/jwks.json")
+async def jwks() -> dict:
+    """Public JWKS for RS256 verify pods — private keys stay on Identity only.
+
+    HS256 deployments return an empty key set (shared secret is not published).
+    """
+    from holon_common.auth import jwt_algorithm, load_jwt_verify_keys
+
+    if jwt_algorithm() != "RS256":
+        return {"keys": []}
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+        import base64
+    except ImportError as exc:
+        raise HolonError.unavailable("JwksUnavailable", "cryptography required for JWKS") from exc
+
+    keys = []
+    for kid, pem in load_jwt_verify_keys().items():
+        public = serialization.load_pem_public_key(pem.encode(), backend=default_backend())
+        numbers = public.public_numbers()
+
+        def _b64url_int(value: int) -> str:
+            raw = value.to_bytes((value.bit_length() + 7) // 8, "big")
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+        keys.append(
+            {
+                "kty": "RSA",
+                "kid": kid,
+                "use": "sig",
+                "alg": "RS256",
+                "n": _b64url_int(numbers.n),
+                "e": _b64url_int(numbers.e),
+            }
+        )
+    return {"keys": keys}
+
+
+@app.get("/audit-events")
+async def list_identity_audit_events(
+    principal: Principal = Depends(current_principal),
+    category: str | None = None,
+    action: str | None = None,
+    actor: str | None = None,
+    outcome: str | None = None,
+    pageSize: int | None = None,
+    pageToken: str | None = None,
+    workspace_id: str | None = None,
+) -> dict:
+    """Queryable Identity durable audit trail (login, grants, OIDC sync).
+
+    Distinct from Knowledge ``/api/holon/audit-events`` — each service owns
+    its Postgres ``audit_event`` table. Requires workspace ``approve``.
+    """
+    import base64
+    import json as json_mod
+
+    from holon_common.audit import CATEGORIES
+    from holon_common.audit_store import list_events
+
+    tid, _wid = await _resolve_workspace_governance(
+        principal, tenant_id=principal.tenant_id, workspace_id=workspace_id
+    )
+    if category is not None and category not in CATEGORIES:
+        raise HolonError.invalid_argument("InvalidAuditCategory", f"unknown category: {category}", category=category)
+    page_size = 50 if pageSize is None else pageSize
+    if page_size < 1 or page_size > 100:
+        raise HolonError.invalid_argument("InvalidPageSize", "pageSize must be between 1 and 100")
+    after_id = None
+    if pageToken:
+        try:
+            padded = pageToken + "=" * (-len(pageToken) % 4)
+            payload = json_mod.loads(base64.urlsafe_b64decode(padded.encode()))
+            after_id = int(payload["after_id"])
+        except Exception as exc:
+            raise HolonError.invalid_argument("InvalidPageToken", "invalid pageToken") from exc
+
+    rows = await list_events(
+        app.state.pool,
+        tid,
+        category=category,
+        action=action,
+        actor_urn=actor,
+        outcome=outcome,
+        after_id=after_id,
+        page_size=page_size + 1,
+    )
+    next_token = None
+    if len(rows) > page_size:
+        rows = rows[:page_size]
+        raw = json_mod.dumps({"after_id": rows[-1]["id"]}, separators=(",", ":")).encode()
+        next_token = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return {"data": rows, "nextPageToken": next_token, "pageSize": page_size}
 
 
 # ---- Multi-org provisioning (ADR 026) ---------------------------------
@@ -427,7 +651,7 @@ async def tenants_create(request: CreateTenantRequest, principal: Principal = De
     """
     await _authorize_bootstrap_governance(principal)
     if await get_tenant(app.state.pool, request.tenant_id) is not None:
-        raise HTTPException(status_code=409, detail=f"tenant already exists: {request.tenant_id}")
+        raise HolonError.conflict('TenantAlreadyExists', f"tenant already exists: {request.tenant_id}")
     return await create_tenant(app.state.pool, tenant_id=request.tenant_id, display_name=request.display_name)
 
 
@@ -437,7 +661,7 @@ async def tenants_set_status(
 ) -> dict:
     await _authorize_bootstrap_governance(principal)
     if await get_tenant(app.state.pool, tenant_id) is None:
-        raise HTTPException(status_code=404, detail=f"unknown tenant: {tenant_id}")
+        raise HolonError.not_found('TenantNotFound', f"unknown tenant: {tenant_id}")
     updated = await set_tenant_status(app.state.pool, tenant_id, request.status)
     return updated  # type: ignore[return-value]
 
@@ -450,7 +674,7 @@ async def workspaces_list(
     try:
         await _authorize_bootstrap_governance(principal)
         return await list_workspaces(app.state.pool, tenant_id)
-    except HTTPException:
+    except HolonError:
         return await list_workspaces(app.state.pool, principal.tenant_id)
 
 
@@ -460,9 +684,9 @@ async def workspaces_create(
 ) -> dict:
     tenant = await get_tenant(app.state.pool, request.tenant_id)
     if tenant is None:
-        raise HTTPException(status_code=404, detail=f"unknown tenant: {request.tenant_id}")
+        raise HolonError.not_found('TenantNotFound', f"unknown tenant: {request.tenant_id}")
     if tenant["status"] != "active":
-        raise HTTPException(status_code=400, detail="tenant is disabled")
+        raise HolonError.invalid_argument('TenantDisabled', "tenant is disabled")
     # Bootstrap admins may create the first workspace on a new filiale;
     # otherwise require approve on an existing workspace in that tenant.
     existing = await list_workspaces(app.state.pool, request.tenant_id)
@@ -471,7 +695,7 @@ async def workspaces_create(
     else:
         await _authorize_workspace_governance(principal, request.tenant_id, existing[0]["workspace_id"])
     if await get_workspace(app.state.pool, request.workspace_id) is not None:
-        raise HTTPException(status_code=409, detail=f"workspace already exists: {request.workspace_id}")
+        raise HolonError.conflict('WorkspaceAlreadyExists', f"workspace already exists: {request.workspace_id}")
 
     # Never grant workspace admin to a principal from another tenant —
     # instance admins nominate a same-tenant `initial_admin_urn`.
@@ -479,19 +703,13 @@ async def workspaces_create(
         admin_urn = principal.urn
     else:
         if not request.initial_admin_urn:
-            raise HTTPException(
-                status_code=400,
-                detail="initial_admin_urn is required when creating a workspace outside your tenant "
-                "(create the filiale principal first, then pass their URN)",
-            )
+            raise HolonError.invalid_argument('InitialAdminRequired', "initial_admin_urn is required when creating a workspace outside your tenant "
+                "(create the filiale principal first, then pass their URN)",)
         admin = await _fetch_principal(app.state.pool, request.initial_admin_urn)
         if admin is None:
-            raise HTTPException(status_code=404, detail=f"unknown principal: {request.initial_admin_urn}")
+            raise HolonError.not_found('PrincipalNotFound', f"unknown principal: {request.initial_admin_urn}")
         if admin.tenant_id != request.tenant_id:
-            raise HTTPException(
-                status_code=400,
-                detail="initial_admin_urn must belong to the workspace's tenant",
-            )
+            raise HolonError.invalid_argument('InitialAdminTenantMismatch', "initial_admin_urn must belong to the workspace's tenant")
         admin_urn = admin.urn
 
     workspace = await create_workspace(
@@ -522,7 +740,7 @@ async def workspaces_set_status(
 ) -> dict:
     ws = await get_workspace(app.state.pool, workspace_id)
     if ws is None:
-        raise HTTPException(status_code=404, detail=f"unknown workspace: {workspace_id}")
+        raise HolonError.not_found('WorkspaceNotFound', f"unknown workspace: {workspace_id}")
     await _authorize_workspace_governance(principal, ws["tenant_id"], workspace_id)
     updated = await set_workspace_status(app.state.pool, workspace_id, request.status)
     return updated  # type: ignore[return-value]
@@ -534,7 +752,7 @@ async def principals_create(
 ) -> dict:
     tenant = await get_tenant(app.state.pool, request.tenant_id)
     if tenant is None:
-        raise HTTPException(status_code=404, detail=f"unknown tenant: {request.tenant_id}")
+        raise HolonError.not_found('TenantNotFound', f"unknown tenant: {request.tenant_id}")
     workspaces = await list_workspaces(app.state.pool, request.tenant_id)
     if not workspaces:
         await _authorize_bootstrap_governance(principal)
@@ -551,7 +769,7 @@ async def principals_create(
             on_behalf_of=request.on_behalf_of,
         )
     except asyncpg.UniqueViolationError as exc:
-        raise HTTPException(status_code=409, detail="principal already exists") from exc
+        raise HolonError.conflict('PrincipalAlreadyExists', "principal already exists") from exc
     await app.state.authz.write_relationship(
         resource_type="tenant",
         resource_urn=tenant_urn(request.tenant_id),
@@ -577,7 +795,7 @@ async def principals_set_status(
 ) -> dict:
     target = await _fetch_principal(app.state.pool, principal_urn)
     if target is None:
-        raise HTTPException(status_code=404, detail=f"unknown principal: {principal_urn}")
+        raise HolonError.not_found('PrincipalNotFound', f"unknown principal: {principal_urn}")
     workspaces = await list_workspaces(app.state.pool, target.tenant_id)
     if not workspaces:
         await _authorize_bootstrap_governance(principal)
@@ -605,18 +823,20 @@ async def _resolve_workspace_governance(
         return TENANT_ID, WORKSPACE_ID
     workspaces = await list_workspaces(app.state.pool, tenant_id)
     if not workspaces:
-        raise HTTPException(status_code=400, detail=f"tenant {tenant_id!r} has no workspace")
-    last_exc: HTTPException | None = None
+        raise HolonError.invalid_argument('TenantHasNoWorkspace', f"tenant {tenant_id!r} has no workspace", tenant_id=tenant_id)
+    last_exc: HolonError | None = None
     for ws in workspaces:
         try:
             await _authorize_workspace_governance(principal, tenant_id, ws["workspace_id"])
             return tenant_id, ws["workspace_id"]
-        except HTTPException as exc:
+        except HolonError as exc:
             if exc.status_code == 403:
                 last_exc = exc
                 continue
             raise
-    raise last_exc or HTTPException(status_code=403, detail="access denied: workspace approve required")
+    raise last_exc or HolonError.forbidden(
+        "PermissionDenied", "access denied: workspace approve required"
+    )
 
 
 async def _access_listing(resource_type: str, resource_urn: str, valid_relations: set[str]) -> list[dict]:
@@ -656,9 +876,7 @@ async def _access_listing(resource_type: str, resource_urn: str, valid_relations
 
 def _validate_relation(relation: str) -> None:
     if relation not in VALID_WORKSPACE_RELATIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid relation: {relation!r} (must be one of {sorted(VALID_WORKSPACE_RELATIONS)})",
+        raise HolonError.invalid_argument('InvalidWorkspaceRelation', f"invalid relation: {relation!r} (must be one of {sorted(VALID_WORKSPACE_RELATIONS)})",
         )
 
 
@@ -706,7 +924,7 @@ async def grant_access(
     _validate_relation(request.relation)
     target = await _fetch_principal(app.state.pool, principal_urn)
     if target is None:
-        raise HTTPException(status_code=404, detail=f"unknown principal: {principal_urn}")
+        raise HolonError.not_found('PrincipalNotFound', f"unknown principal: {principal_urn}")
     tid, wid = await _resolve_workspace_governance(
         principal, tenant_id=target.tenant_id, workspace_id=request.workspace_id
     )
@@ -728,6 +946,19 @@ async def grant_access(
         tenant_id=tid,
         workspace_id=wid,
     )
+    emit_audit(
+        category="identity",
+        action="identity.permission.granted",
+        outcome="success",
+        tenant_id=tid,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="workspace",
+        resource_urn=w_urn,
+        permission=request.relation,
+        reason=f"granted {request.relation} to {principal_urn}",
+        extra={"targetPrincipalUrn": principal_urn},
+    )
     return {"status": "granted", "principalUrn": principal_urn, "relation": request.relation, "workspace_id": wid}
 
 
@@ -741,7 +972,7 @@ async def revoke_access(
     _validate_relation(request.relation)
     target = await _fetch_principal(app.state.pool, principal_urn)
     if target is None:
-        raise HTTPException(status_code=404, detail=f"unknown principal: {principal_urn}")
+        raise HolonError.not_found('PrincipalNotFound', f"unknown principal: {principal_urn}")
     tid, wid = await _resolve_workspace_governance(
         principal, tenant_id=target.tenant_id, workspace_id=request.workspace_id
     )
@@ -763,6 +994,20 @@ async def revoke_access(
         actor=principal,
         tenant_id=tid,
         workspace_id=wid,
+    )
+
+    emit_audit(
+        category="identity",
+        action="identity.permission.revoked",
+        outcome="success",
+        tenant_id=tid,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="workspace",
+        resource_urn=w_urn,
+        permission=request.relation,
+        reason=f"revoked {request.relation} from {principal_urn}",
+        extra={"targetPrincipalUrn": principal_urn},
     )
 
     return {"status": "revoked", "principalUrn": principal_urn, "relation": request.relation, "workspace_id": wid}
@@ -803,7 +1048,7 @@ async def create_project_endpoint(request: CreateProjectRequest, principal: Prin
     )
     urn = project_urn(tid, wid, request.name)
     if await get_project(app.state.pool, urn) is not None:
-        raise HTTPException(status_code=409, detail=f"project already exists: {request.name}")
+        raise HolonError.conflict('ProjectAlreadyExists', f"project already exists: {request.name}", name=request.name)
     project = await create_project(app.state.pool, tenant_id=tid, workspace_id=wid, name=request.name)
     await app.state.authz.write_relationship(
         resource_type="project",
@@ -825,7 +1070,7 @@ async def get_project_endpoint(name: str, principal: Principal = Depends(current
     projects = await list_projects(app.state.pool, principal.tenant_id)
     project = next((p for p in projects if p["name"] == name), None)
     if project is None:
-        raise HTTPException(status_code=404, detail=f"unknown project: {name}")
+        raise HolonError.not_found('ProjectNotFound', f"unknown project: {name}")
     return project
 
 
@@ -838,19 +1083,17 @@ async def _authorize_project_governance(principal: Principal, project_name: str)
     projects = await list_projects(app.state.pool, principal.tenant_id)
     project = next((p for p in projects if p["name"] == project_name), None)
     if project is None:
-        raise HTTPException(status_code=404, detail=f"unknown project: {project_name}")
+        raise HolonError.not_found('ProjectNotFound', f"unknown project: {project_name}")
     urn = project["urn"]
     decision = await app.state.authz.authorize(principal, resource_type="project", resource_urn=urn, permission="approve")
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
     return urn
 
 
 def _validate_project_relation(relation: str) -> None:
     if relation not in VALID_PROJECT_RELATIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid relation: {relation!r} (must be one of {sorted(VALID_PROJECT_RELATIONS)})",
+        raise HolonError.invalid_argument('InvalidProjectRelation', f"invalid relation: {relation!r} (must be one of {sorted(VALID_PROJECT_RELATIONS)})",
         )
 
 

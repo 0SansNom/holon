@@ -28,6 +28,9 @@ at them.
   (`external.qdrantUrl`).
 - An OTLP collector (`external.otlpEndpoint`) if you want traces — the
   exporter soft-fails (logged, non-blocking) without one.
+- Prometheus Operator CRDs only if you enable `observability.serviceMonitor`
+  / `observability.prometheusRule` (see `docs/ops/observability.md` and
+  standalone YAML under `deploy/observability/`).
 
 ## Secrets
 
@@ -38,7 +41,8 @@ least:
 
 | Key | Used by |
 |---|---|
-| `HOLON_JWT_SECRET` | every service |
+| `HOLON_JWT_SECRET` | every service (HS256) |
+| `HOLON_JWT_PRIVATE_KEYS` / `HOLON_JWT_PUBLIC_KEYS` | every service when `jwt.algorithm=RS256` (`make gen-jwt-rsa`) |
 | `HOLON_SPICEDB_PRESHARED_KEY` | every service |
 | `POSTGRES_PASSWORD` | every service |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | connectivity, knowledge, intelligence (S3/MinIO) |
@@ -63,5 +67,14 @@ you've wired the app side to fetch from Vault directly instead.
   overlay; set `networkPolicy.dataPlaneCidrs` to your SI ranges, and
   optionally `networkPolicy.intelligence.llmEgressCidrs` for Anthropic /
   Voyage instead of open public `:443`.
+- **Intelligence sandbox** — set `services.intelligence.runtimeClassName`
+  (production overlay defaults to `gvisor`). The cluster must define that
+  RuntimeClass; leave empty only for clusters without gVisor.
 - **No load / soak suite** in CI — e2e is compose HTTP pytest only. Treat
-  capacity validation as an operator gate before go-live.
+  green CI as correctness, not capacity. Local light probe: `make smoke-load`.
+- **JWT** — ConfigMap sets `HOLON_JWT_ALG` from `jwt.algorithm` (default
+  HS256). RS256 keys live in `existingSecret`; set `jwt.requireAsymmetric`
+  to force posture checks.
+- **Observability** — `observability.serviceMonitor` /
+  `observability.prometheusRule` are off by default (need Prometheus
+  Operator CRDs). Standalone YAML: `deploy/observability/`.

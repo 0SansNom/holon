@@ -35,6 +35,7 @@ from holon_common import (
     issue_token,
     outbox,
 )
+from holon_common.audit import emit_audit
 
 logger = logging.getLogger("automation.workflow")
 
@@ -96,7 +97,7 @@ async def _fetch_writeback_dataset(
     already-public `GET /actions/{name}` every other Action-metadata reader uses.
     """
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
-    response = await client.get(f"{knowledge_url}/actions/{action_name}", headers={"Authorization": f"Bearer {token}"})
+    response = await client.get(f"{knowledge_url}/api/holon/actions/{action_name}", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
     return response.json().get("writeback_dataset")
 
@@ -146,7 +147,7 @@ async def _request_compensation(
 
     async def _do() -> httpx.Response:
         response = await client.post(
-            f"{knowledge_url}/internal/approvals/{approval_id}/compensate",
+            f"{knowledge_url}/api/holon/internal/approvals/{approval_id}/compensate",
             json={"error": error},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -223,6 +224,18 @@ async def _run_workflow(
             )
         except (httpx.HTTPError, CircuitBreakerOpenError):
             logger.exception("compensation callback to Knowledge failed for approval %s", approval_id)
+        emit_audit(
+            category="action",
+            action="automation.workflow.compensated",
+            outcome="failure",
+            tenant_id=tenant_id,
+            actor_urn=build_urn(tenant_id, "global", "service-account", WORKFLOW_ENGINE_URN_NAME),
+            actor_type="service_account",
+            resource_type="object",
+            resource_urn=instance_urn,
+            reason=error,
+            extra={"approval_id": approval_id, "action_name": action_name},
+        )
         return
 
     await pool.execute(
@@ -236,6 +249,17 @@ async def _run_workflow(
                 action_name=action_name, approval_id=approval_id,
             ),
         )
+    emit_audit(
+        category="action",
+        action="automation.workflow.completed",
+        outcome="success",
+        tenant_id=tenant_id,
+        actor_urn=build_urn(tenant_id, "global", "service-account", WORKFLOW_ENGINE_URN_NAME),
+        actor_type="service_account",
+        resource_type="object",
+        resource_urn=instance_urn,
+        extra={"approval_id": approval_id, "action_name": action_name},
+    )
 
 
 async def consume_events(

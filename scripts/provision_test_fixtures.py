@@ -259,7 +259,7 @@ def main() -> None:
         dataset_urn = f"hl:{TENANT_ID}:{WORKSPACE_ID}:dataset:{dataset}"
         status, body = client.request(
             "POST",
-            f"{KNOWLEDGE}/object-types",
+            f"{KNOWLEDGE}/api/holon/object-types",
             token=admin_or_msmith,
             body={
                 "name": name,
@@ -277,7 +277,7 @@ def main() -> None:
 
     for relation_type in RELATION_TYPES:
         status, body = client.request(
-            "POST", f"{KNOWLEDGE}/relation-types", token=admin_or_msmith, body=relation_type
+            "POST", f"{KNOWLEDGE}/api/holon/relation-types", token=admin_or_msmith, body=relation_type
         )
         if status not in (201, 409):
             raise SystemExit(f"relation-type {relation_type['name']}: {status} {body}")
@@ -285,7 +285,7 @@ def main() -> None:
 
     for action_type in ACTION_TYPES:
         status, body = client.request(
-            "POST", f"{KNOWLEDGE}/action-types", token=admin_or_msmith, body=action_type
+            "POST", f"{KNOWLEDGE}/api/holon/action-types", token=admin_or_msmith, body=action_type
         )
         if status not in (201, 409):
             raise SystemExit(f"action-type {action_type['name']}: {status} {body}")
@@ -294,7 +294,7 @@ def main() -> None:
     for term, definition, synonyms, related_object_type in GLOSSARY_TERMS:
         status, body = client.request(
             "POST",
-            f"{KNOWLEDGE}/glossary",
+            f"{KNOWLEDGE}/api/holon/glossary",
             token=admin_or_msmith,
             body={"term": term, "definition": definition, "synonyms": synonyms, "related_object_type": related_object_type},
         )
@@ -304,7 +304,7 @@ def main() -> None:
 
     status, body = client.request(
         "POST",
-        f"{KNOWLEDGE}/function-plugins",
+        f"{KNOWLEDGE}/api/holon/function-plugins",
         token=admin_or_msmith,
         body={"entry_point": "app.plugins.lifetime_tier_function:LifetimeTierFunction"},
     )

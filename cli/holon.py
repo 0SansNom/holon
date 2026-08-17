@@ -59,6 +59,15 @@ from typing import Any, Optional
 IDENTITY_URL = os.environ.get("HOLON_CLI_IDENTITY_URL", "http://localhost:8001")
 CONNECTIVITY_URL = os.environ.get("HOLON_CLI_CONNECTIVITY_URL", "http://localhost:8002")
 KNOWLEDGE_URL = os.environ.get("HOLON_CLI_KNOWLEDGE_URL", "http://localhost:8003")
+WORKSPACE_ID = os.environ.get("HOLON_CLI_WORKSPACE_ID", "main")
+
+
+def _ontology(path: str) -> str:
+    return f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}{path}"
+
+
+def _holon(path: str) -> str:
+    return f"{KNOWLEDGE_URL}/api/holon{path}"
 EXPERIENCE_URL = os.environ.get("HOLON_CLI_EXPERIENCE_URL", "http://localhost:8004")
 INTELLIGENCE_URL = os.environ.get("HOLON_CLI_INTELLIGENCE_URL", "http://localhost:8006")
 
@@ -179,23 +188,23 @@ def cmd_workspace_revoke(args: argparse.Namespace) -> None:
 
 
 def cmd_ontology_list(args: argparse.Namespace) -> None:
-    _print_json(_call("GET", f"{KNOWLEDGE_URL}/ontology", token=_require_token()))
+    _print_json(_call("GET", _ontology("/objectTypes"), token=_require_token()))
 
 
 def cmd_ontology_get(args: argparse.Namespace) -> None:
-    _print_json(_call("GET", f"{KNOWLEDGE_URL}/ontology/{args.name}", token=_require_token()))
+    _print_json(_call("GET", _ontology(f"/objectTypes/{args.name}"), token=_require_token()))
 
 
 def cmd_objects_list(args: argparse.Namespace) -> None:
-    _print_json(_call("GET", f"{KNOWLEDGE_URL}/objects/{args.object_type}", token=_require_token()))
+    _print_json(_call("GET", _ontology(f"/objects/{args.object_type}"), token=_require_token()))
 
 
 def cmd_objects_get(args: argparse.Namespace) -> None:
-    _print_json(_call("GET", f"{KNOWLEDGE_URL}/objects/{args.object_type}/{args.id}", token=_require_token()))
+    _print_json(_call("GET", _ontology(f"/objects/{args.object_type}/{args.id}"), token=_require_token()))
 
 
 def cmd_actions_list(args: argparse.Namespace) -> None:
-    _print_json(_call("GET", f"{KNOWLEDGE_URL}/actions", token=_require_token()))
+    _print_json(_call("GET", _holon("/actions"), token=_require_token()))
 
 
 def cmd_actions_invoke(args: argparse.Namespace) -> None:
@@ -203,7 +212,7 @@ def cmd_actions_invoke(args: argparse.Namespace) -> None:
         print("error: action must be 'ObjectType.actionName', e.g. Customer.putOnCreditHold", file=sys.stderr)
         sys.exit(1)
     object_type, local_action = args.action.split(".", 1)
-    url = f"{KNOWLEDGE_URL}/objects/{object_type}/{args.id}/actions/{local_action}"
+    url = _ontology(f"/objects/{object_type}/{args.id}/actions/{local_action}")
     _print_json(_call("POST", url, token=_require_token(), body={"reason": args.reason}))
 
 

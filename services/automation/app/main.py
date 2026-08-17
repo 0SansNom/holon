@@ -16,9 +16,10 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI
 
 from holon_common import (
+    HolonError,
     EventConsumer,
     EventProducer,
     Principal,
@@ -32,6 +33,12 @@ from holon_common import (
     make_principal_dependency,
     outbox,
     run_migrations,
+)
+from holon_common.audit import clear_durable_audit_hooks
+from holon_common.audit_store import (
+    ensure_schema as ensure_audit_schema,
+    install_durable_audit,
+    list_events_page,
 )
 
 from . import agent_chain_trigger, workflow
@@ -56,8 +63,12 @@ async def lifespan(app: FastAPI):
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
         await workflow.ensure_schema(conn)
+        await ensure_audit_schema(conn)
         await outbox.ensure_schema(conn)
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    clear_durable_audit_hooks()
+    install_durable_audit(app.state.pool)
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
     await app.state.producer.start()
@@ -121,12 +132,43 @@ async def ready() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/audit-events")
+async def list_automation_audit_events(
+    principal: Principal = Depends(current_principal),
+    category: str | None = None,
+    action: str | None = None,
+    actor: str | None = None,
+    outcome: str | None = None,
+    pageSize: int | None = None,
+    pageToken: str | None = None,
+) -> dict:
+    """Durable Automation audit (workflows, agent-chain triggers).
+
+    Service-to-service surface: scoped to the caller's JWT tenant. No
+    SpiceDB gate (Automation has no PDP); operators use SA tokens.
+    """
+    return await list_events_page(
+        app.state.pool,
+        principal.tenant_id,
+        category=category,
+        action=action,
+        actor_urn=actor,
+        outcome=outcome,
+        page_size=50 if pageSize is None else pageSize,
+        page_token=pageToken,
+    )
+
+
 @app.get("/workflows/{approval_id}")
 async def get_workflow_execution(approval_id: int, principal: Principal = Depends(current_principal)) -> dict:
     """Automation's own execution record — proof that Automation, not Knowledge,
     tracks saga orchestration state.
     """
     execution = await workflow.get_workflow_execution(app.state.pool, approval_id)
-    if execution is None:
-        raise HTTPException(status_code=404, detail=f"no workflow execution found for approval {approval_id}")
+    if execution is None or execution.get("tenant_id") != principal.tenant_id:
+        raise HolonError.not_found(
+            "WorkflowExecutionNotFound",
+            f"no workflow execution found for approval {approval_id}",
+            approval_id=approval_id,
+        )
     return execution

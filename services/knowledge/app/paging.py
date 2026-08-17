@@ -1,23 +1,14 @@
 """Keyset cursor paging for Ontology collection reads.
 
-Holon-native contract (not a Foundry wire clone):
+Query params: `pageSize`, `pageToken` (aliases `page_size`, `cursor` accepted).
 
-  GET …?page_size=50&cursor=<opaque>
+Response:
 
   {
-    "items": [ ... ],          # always ≤ page_size
-    "next_cursor": "…" | null,
-    "page_size": 50
+    "data": [ ... ],
+    "nextPageToken": "…" | null,
+    "pageSize": 50
   }
-
-Cursors are opaque, short-lived, sequential. Default sort key is the
-instance primary id (`id` on every serving-store / resolver row), with
-numeric ids ordered numerically. Callers that mix ObjectTypes (interface
-polymorphic reads) pass a custom `key_of` so keys stay unique.
-
-When `page_size` is omitted, routers pass MAX_WALK_ITEMS so small demos
-and legacy callers still get a single full page (next_cursor null).
-Explicit `page_size` is capped at MAX_PAGE_SIZE for real walks.
 """
 
 from __future__ import annotations
@@ -37,16 +28,16 @@ KeyOf = Callable[[dict], Any]
 
 
 class PagingError(ValueError):
-    """Invalid cursor or page_size — map to HTTP 400."""
+    """Invalid cursor or pageSize — map to HTTP 400."""
 
 
 def clamp_page_size(page_size: Optional[int]) -> int:
     if page_size is None:
         return DEFAULT_PAGE_SIZE
     if not isinstance(page_size, int) or isinstance(page_size, bool) or page_size < 1:
-        raise PagingError("page_size must be a positive integer")
+        raise PagingError("pageSize must be a positive integer")
     if page_size > MAX_WALK_ITEMS:
-        raise PagingError(f"page_size must be ≤ {MAX_WALK_ITEMS}")
+        raise PagingError(f"pageSize must be ≤ {MAX_WALK_ITEMS}")
     return page_size
 
 
@@ -77,15 +68,15 @@ def encode_cursor(*, after_id: Any) -> str:
 
 def decode_cursor(cursor: str) -> Any:
     if not cursor or not isinstance(cursor, str):
-        raise PagingError("cursor must be a non-empty string")
+        raise PagingError("pageToken must be a non-empty string")
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
         raw = base64.urlsafe_b64decode(padded.encode())
         payload = json.loads(raw.decode())
     except (ValueError, json.JSONDecodeError) as exc:
-        raise PagingError("invalid cursor") from exc
+        raise PagingError("invalid pageToken") from exc
     if not isinstance(payload, dict) or payload.get("v") != _CURSOR_VERSION or "after_id" not in payload:
-        raise PagingError("invalid cursor")
+        raise PagingError("invalid pageToken")
     return payload["after_id"]
 
 
@@ -113,13 +104,12 @@ def paginate_rows(
             start = len(ordered)
 
     page = ordered[start : start + size]
-    next_cursor = None
+    next_token = None
     if start + size < len(ordered) and page:
-        next_cursor = encode_cursor(after_id=key_of(page[-1]))
-    # Clients that omitted page_size used walk-max; advertise DEFAULT for the next call.
+        next_token = encode_cursor(after_id=key_of(page[-1]))
     reported = size if size <= MAX_PAGE_SIZE else DEFAULT_PAGE_SIZE
     return {
-        "items": page,
-        "next_cursor": next_cursor,
-        "page_size": reported,
+        "data": page,
+        "nextPageToken": next_token,
+        "pageSize": reported,
     }

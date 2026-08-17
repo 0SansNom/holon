@@ -27,8 +27,8 @@ function ObjectReferenceFieldInner({
 }) {
   const { data: allRows = [] } = useObjects(objectSet ? "" : objectType);
   const { data: setEval } = useEvaluateObjectSet(objectSet ?? "", !!objectSet);
-  const items = (objectSet ? setEval?.items : allRows) ?? [];
-  const selected = items.find((r) => String(r.id) === String(value)) ?? null;
+  const items = (objectSet ? setEval?.data : allRows) ?? [];
+  const selected = items.find((r: Record<string, unknown>) => String(r.id) === String(value)) ?? null;
 
   return (
     <Suggest<Record<string, unknown>>

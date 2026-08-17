@@ -17,9 +17,9 @@ with exploit details.
 | Boundary | Expectation |
 |---|---|
 | Browser → Experience / Identity | TLS at your Ingress; session cookie `HttpOnly`; CORS via explicit `HOLON_CORS_ORIGINS` |
-| Service → service | Cluster network + shared JWT (`HOLON_JWT_SECRET` / rotation map). SA/agent minting is gated by per-service `HOLON_MINTABLE_PRINCIPAL_URNS`; user minting is Identity-only (`allow_user` + `HOLON_ALLOW_USER_JWT_MINT` in production) |
-| AuthZ | SpiceDB ReBAC + OPA ABAC; decisions audited on logger `holon.audit` |
-| Secrets | `HOLON_SECRET_BACKEND` (`env` / `kubernetes` / `vault` / `aws`); prefer `secret_ref` on connectors |
+| Service → service | Cluster network + JWT (`HS256` or opt-in `RS256` via `HOLON_JWT_ALG` / key maps — `make gen-jwt-rsa`; `HOLON_JWT_REQUIRE_ASYMMETRIC` in prod when required). SA/agent minting gated by `HOLON_MINTABLE_PRINCIPAL_URNS`; user minting Identity-only (`allow_user` + `HOLON_ALLOW_USER_JWT_MINT`) |
+| AuthZ | SpiceDB ReBAC + OPA ABAC; decisions audited on logger `holon.audit` and durable `audit_event` (per-service query APIs; workspace `approve` except Automation SA JWT) |
+| Secrets | `HOLON_SECRET_BACKEND` (`env` / `kubernetes` / `vault` / `aws`); JWT key values may be `vault:…` / `env:…` refs; prefer `secret_ref` on connectors |
 | Data plane | Your Postgres, S3/Iceberg, Kafka, OpenSearch, SpiceDB datastore |
 
 When `HOLON_ENV=production` (or `prod`), every service calls
@@ -33,10 +33,14 @@ allowlist / Identity user-mint flag.
 - [ ] `HOLON_ALLOW_DEV_LOGIN=false`
 - [ ] Experience `POST /api/token` stays off when `HOLON_ALLOW_DEV_LOGIN=false`
 - [ ] `HOLON_INTELLIGENCE_ENABLED=false` until the agent package is opted in
+- [ ] `HOLON_ALLOW_JOBLIB_MODELS` unset/false; `HOLON_ALLOW_TOOL_PLUGIN_REGISTER` unset/false
+- [ ] `HOLON_JWT_ALG=RS256` + `HOLON_JWT_PRIVATE_KEYS` / `HOLON_JWT_PUBLIC_KEYS` (`make gen-jwt-rsa`); `HOLON_JWT_REQUIRE_ASYMMETRIC=true`
+- [ ] Intelligence Deployment `runtimeClassName` = gVisor (or equivalent) when Intelligence is used
 - [ ] OIDC enabled; no product demo / fixture scripts in prod
 - [ ] `HOLON_BOOTSTRAP_ADMIN_SECRET` set for empty-instance / orphan repair
 - [ ] `HOLON_BOOTSTRAP_ADMIN_RESET_SECRET` unset except during intentional break-glass
 - [ ] `HOLON_METRICS_TOKEN` set; scrape only from a trusted network / NetworkPolicy
+- [ ] Load `deploy/observability/` recording rules + alerts (or Helm `observability.prometheusRule`)
 - [ ] `HOLON_CORS_ORIGINS` = real SPA origin(s) only (no `localhost` / `127.0.0.1`)
 - [ ] `HOLON_MINTABLE_PRINCIPAL_URNS` set on every service (comma-separated full URNs and/or local-name suffixes; empty string OK if that service never mints SAs)
 - [ ] `HOLON_ALLOW_USER_JWT_MINT=true` **only** on Identity; unset/false everywhere else
@@ -60,10 +64,15 @@ defaults as a production posture.
 
 ## Known residual risks
 
-- Shared HS256 JWT secret across services (service-account minting is
-  allowlisted per service; full asymmetric / per-service keys are not yet
-  the default).
 - Example connector plugins under `services/connectivity/app/plugins/`
   are library code only — register via `POST /plugins` when you need them.
   Filiales use `/sources` / plugins. See
   [docs/ops/seed-data.md](docs/ops/seed-data.md).
+- Intelligence remains experimental: even with the flag off, do not enable
+  `HOLON_ALLOW_JOBLIB_MODELS` or `HOLON_ALLOW_TOOL_PLUGIN_REGISTER` in
+  production (posture refuses both). Prefer gVisor
+  (`runtimeClassName`) for the Intelligence Deployment; true process
+  sandbox for plugins is still out of scope.
+- No soak/chaos suite (`make smoke-load` is a light probe only). Capacity
+  validation remains an operator gate.
+- Backup/DR is documented, not automated — you own RPO/RTO.

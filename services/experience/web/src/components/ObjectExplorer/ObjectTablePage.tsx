@@ -173,10 +173,10 @@ export function ObjectTablePage() {
     if (activeList) {
       return filterRowsByListIds(allRows ?? [], activeList.instanceIds);
     }
-    if (useServerPaging) return (serverPage?.items as Row[] | undefined) ?? [];
+    if (useServerPaging) return (serverPage?.data as Row[] | undefined) ?? [];
     if (!setName) return allRows ?? [];
     if (setTypeMismatch) return [];
-    return evaluated?.items ?? [];
+    return (evaluated?.data as Row[] | undefined) ?? [];
   }, [activeList, setName, allRows, evaluated, setTypeMismatch, useServerPaging, serverPage]);
 
   // Apply saved exploration snapshot when URL exploration id changes.
@@ -1020,9 +1020,9 @@ export function ObjectTablePage() {
               minimal
               small
               icon="chevron-right"
-              disabled={!serverPage?.next_cursor}
+              disabled={!serverPage?.nextPageToken}
               onClick={() => {
-                const next = serverPage?.next_cursor;
+                const next = serverPage?.nextPageToken;
                 if (!next) return;
                 setCursorStack((stack) => {
                   const trimmed = stack.slice(0, stackIndex + 1);

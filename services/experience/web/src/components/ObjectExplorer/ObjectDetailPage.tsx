@@ -60,7 +60,7 @@ function HierarchyParentCrumb({
   const linkName = (relation.source_api_name || localName).trim() || localName;
   const parentType = urnShortName(relation.target_object_type_urn);
   const { data } = useObjectLinks(type, id, linkName, true);
-  const parent = data?.items?.[0];
+  const parent = data?.data?.[0];
   if (!parent) return null;
   const parentId = String(parent.id);
   const parentLabel = (parent.title as string | undefined) ?? (parent.name as string | undefined) ?? parentId;

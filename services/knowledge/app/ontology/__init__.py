@@ -52,7 +52,19 @@ from .interfaces import (
     object_type_names_for_interface,
     update_interface_type,
 )
-from .markings import create_marking, get_instance_markings_bulk, get_marking, list_markings, set_instance_markings
+from .markings import (
+    category_groups_satisfied,
+    create_marking,
+    create_marking_category,
+    ensure_default_category,
+    get_instance_markings_bulk,
+    get_marking,
+    get_marking_category,
+    list_marking_categories,
+    list_markings,
+    marking_authz_meta,
+    set_instance_markings,
+)
 from .value_types import (
     create_value_type,
     delete_value_type,
@@ -153,8 +165,14 @@ __all__ = [
     "effective_interface_contract",
     "object_type_names_for_interface",
     "create_marking",
+    "create_marking_category",
+    "ensure_default_category",
     "get_marking",
+    "get_marking_category",
     "list_markings",
+    "list_marking_categories",
+    "marking_authz_meta",
+    "category_groups_satisfied",
     "set_instance_markings",
     "get_instance_markings_bulk",
     "create_value_type",
