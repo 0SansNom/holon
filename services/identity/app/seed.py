@@ -1,21 +1,15 @@
-"""Identity and authorization fixture.
-
-The principal set here exercises both PDP engines independently:
-jdoe is granted by ReBAC and passes ABAC; alice is denied by ReBAC alone
-(tenant member, no workspace grant); kenji is granted by ReBAC but denied
-by ABAC (workspace viewer, non-EU country). msmith is a workspace `admin` —
-the principal who can approve high-risk Actions — while jdoe stays `editor`-only.
+"""Identity schema, tenant/workspace/project registry, and principal
+provisioning — self-serve only, no demo data seeded automatically.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 from typing import Optional
 
 import asyncpg
 
-from holon_common import Principal, build_urn
-from holon_common.authz import PermissionClient
+from holon_common import build_urn
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS tenant (
@@ -81,21 +75,14 @@ CREATE TABLE IF NOT EXISTS oidc_pending_state (
 
 def client_secret_for(local_name: str) -> str:
     """Deterministic dev-only credential — `POST /token` requires this to
-    verify credentials.
+    verify credentials when HOLON_ALLOW_DEV_LOGIN is enabled.
     """
     return f"{local_name}-dev-secret"
 
-# Principals granted direct workspace access. alice is
-# intentionally absent — a tenant member with no workspace relation.
-WORKSPACE_VIEWERS = [("user", "jdoe"), ("user", "kenji"), ("agent", "ingest-bot")]
 
-# `write` requires `editor`, a strictly smaller set than `viewer` (kenji can
-# read but not invoke Actions — proves read and write are separate grants).
-WORKSPACE_EDITORS = [("user", "jdoe"), ("service-account", "connectivity-connector")]
-
-# `approve` requires `admin`, a strictly smaller set than `editor` — jdoe is
-# deliberately absent here (separation of duties).
-WORKSPACE_ADMINS = [("user", "msmith")]
+def allow_dev_login() -> bool:
+    """When false, reject client_secrets that match the *-dev-secret pattern."""
+    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "true").lower() in {"1", "true", "yes"}
 
 
 def tenant_urn(tenant_id: str) -> str:
@@ -114,87 +101,176 @@ VALID_WORKSPACE_RELATIONS = {"viewer", "editor", "admin"}
 VALID_PROJECT_RELATIONS = {"viewer", "editor", "admin"}
 
 
-def seed_principals(tenant_id: str) -> list[Principal]:
-    return [
-        Principal(
-            urn=build_urn(tenant_id, "global", "user", "jdoe"),
-            type="user",
-            tenant_id=tenant_id,
-            display_name="Jane Doe",
-            country="FR",
-        ),
-        Principal(
-            urn=build_urn(tenant_id, "global", "user", "msmith"),
-            type="user",
-            tenant_id=tenant_id,
-            display_name="Mary Smith",
-            country="DE",
-        ),
-        Principal(
-            urn=build_urn(tenant_id, "global", "user", "kenji"),
-            type="user",
-            tenant_id=tenant_id,
-            display_name="Kenji Sato",
-            country="JP",
-        ),
-        Principal(
-            urn=build_urn(tenant_id, "global", "user", "alice"),
-            type="user",
-            tenant_id=tenant_id,
-            display_name="Alice TenantMember",
-            country="FR",
-        ),
-        Principal(
-            urn=build_urn(tenant_id, "global", "agent", "ingest-bot"),
-            type="agent",
-            tenant_id=tenant_id,
-            display_name="Ingest Bot",
-            on_behalf_of=build_urn(tenant_id, "global", "user", "jdoe"),
-            country="FR",
-        ),
-        Principal(
-            urn=build_urn(tenant_id, "global", "service-account", "connectivity-connector"),
-            type="service_account",
-            tenant_id=tenant_id,
-            display_name="Connectivity Connector",
-        ),
-    ]
-
-
-async def ensure_seeded(conn: asyncpg.Connection, tenant_id: str, workspace_id: str) -> None:
+async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(_DDL)
-    await conn.execute(
-        "INSERT INTO tenant (tenant_id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        tenant_id,
-        "Acme Corp",
+
+
+async def ensure_instance_bootstrap(
+    pool: asyncpg.Pool,
+    authz,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+) -> None:
+    """Idempotent empty-instance install + orphan recovery — not demo data.
+
+    Always ensures the env bootstrap tenant/workspace rows and the SpiceDB
+    `parent_tenant` edge. If the bootstrap workspace has no *usable*
+    `workspace.admin` (active principal row matching a SpiceDB admin
+    grant), creates/repairs the bootstrap admin principal and grants so
+    `/token` and `POST /tenants` are reachable.
+
+    Optional break-glass: `HOLON_BOOTSTRAP_ADMIN_RESET_SECRET=true` plus
+    `HOLON_BOOTSTRAP_ADMIN_SECRET` rewrites the bootstrap admin's
+    `client_secret` (then unset the reset flag).
+    """
+    admin_local = (os.environ.get("HOLON_BOOTSTRAP_ADMIN_LOCAL_NAME") or "admin").strip() or "admin"
+    admin_urn = build_urn(tenant_id, "global", "user", admin_local)
+    t_urn = tenant_urn(tenant_id)
+    w_urn = workspace_urn(tenant_id, workspace_id)
+
+    await _ensure_bootstrap_tenant_row(pool, tenant_id)
+    await _ensure_bootstrap_workspace_row(pool, tenant_id, workspace_id)
+
+    # Hierarchy edge is cheap and idempotent (OPERATION_TOUCH).
+    await authz.write_relationship(
+        resource_type="workspace",
+        resource_urn=w_urn,
+        relation="parent_tenant",
+        subject_type="tenant",
+        subject_urn=t_urn,
     )
-    await conn.execute(
-        "INSERT INTO workspace (workspace_id, tenant_id, display_name) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+
+    needs_admin = not await _has_usable_workspace_admin(pool, authz, w_urn)
+    if needs_admin:
+        secret = _resolve_bootstrap_admin_secret(admin_local)
+        await _ensure_bootstrap_admin_principal(pool, tenant_id=tenant_id, admin_urn=admin_urn, secret=secret)
+        await authz.write_relationship(
+            resource_type="tenant", resource_urn=t_urn, relation="member", subject_urn=admin_urn,
+        )
+        await authz.write_relationship(
+            resource_type="workspace", resource_urn=w_urn, relation="admin", subject_urn=admin_urn,
+        )
+    elif _truthy("HOLON_BOOTSTRAP_ADMIN_RESET_SECRET"):
+        secret = _resolve_bootstrap_admin_secret(admin_local, require_explicit=True)
+        updated = await pool.execute(
+            "UPDATE principal SET client_secret = $1, status = 'active' WHERE urn = $2",
+            secret,
+            admin_urn,
+        )
+        if updated == "UPDATE 0":
+            # Principal missing — fall through to full repair.
+            await _ensure_bootstrap_admin_principal(pool, tenant_id=tenant_id, admin_urn=admin_urn, secret=secret)
+            await authz.write_relationship(
+                resource_type="tenant", resource_urn=t_urn, relation="member", subject_urn=admin_urn,
+            )
+            await authz.write_relationship(
+                resource_type="workspace", resource_urn=w_urn, relation="admin", subject_urn=admin_urn,
+            )
+
+
+def _truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _resolve_bootstrap_admin_secret(admin_local: str, *, require_explicit: bool = False) -> str:
+    secret = (os.environ.get("HOLON_BOOTSTRAP_ADMIN_SECRET") or "").strip()
+    if secret:
+        return secret
+    if require_explicit:
+        raise RuntimeError(
+            "HOLON_BOOTSTRAP_ADMIN_RESET_SECRET requires HOLON_BOOTSTRAP_ADMIN_SECRET"
+        )
+    if allow_dev_login():
+        return client_secret_for(admin_local)
+    raise RuntimeError(
+        "empty / unrepaired Identity bootstrap requires HOLON_BOOTSTRAP_ADMIN_SECRET "
+        "(or HOLON_ALLOW_DEV_LOGIN=true for local *-dev-secret)"
+    )
+
+
+async def _ensure_bootstrap_tenant_row(pool: asyncpg.Pool, tenant_id: str) -> None:
+    existing = await pool.fetchrow("SELECT tenant_id FROM tenant WHERE tenant_id = $1", tenant_id)
+    if existing is not None:
+        return
+    await pool.execute(
+        "INSERT INTO tenant (tenant_id, display_name, status) VALUES ($1, $2, 'active')",
+        tenant_id,
+        os.environ.get("HOLON_BOOTSTRAP_TENANT_DISPLAY_NAME", tenant_id),
+    )
+
+
+async def _ensure_bootstrap_workspace_row(
+    pool: asyncpg.Pool, tenant_id: str, workspace_id: str
+) -> None:
+    existing = await get_workspace(pool, workspace_id)
+    if existing is not None:
+        if existing["tenant_id"] != tenant_id:
+            raise RuntimeError(
+                f"workspace {workspace_id!r} belongs to tenant {existing['tenant_id']!r}, "
+                f"expected bootstrap tenant {tenant_id!r}"
+            )
+        return
+    await pool.execute(
+        "INSERT INTO workspace (workspace_id, tenant_id, display_name, status) VALUES ($1, $2, $3, 'active')",
         workspace_id,
         tenant_id,
-        "Default Workspace",
+        os.environ.get("HOLON_BOOTSTRAP_WORKSPACE_DISPLAY_NAME", workspace_id),
     )
 
-    for principal in seed_principals(tenant_id):
-        local_name = principal.urn.split(":")[-1]
-        await conn.execute(
+
+def _spicedb_object_id(urn: str) -> str:
+    return urn.replace(":", "_").replace(".", "_")
+
+
+async def _has_usable_workspace_admin(pool: asyncpg.Pool, authz, workspace_urn_value: str) -> bool:
+    """True when at least one SpiceDB workspace.admin maps to an active principal."""
+    relationships = await authz.read_relationships(
+        resource_type="workspace",
+        resource_urn=workspace_urn_value,
+        relation="admin",
+    )
+    if not relationships:
+        return False
+    rows = await pool.fetch("SELECT urn, status FROM principal")
+    by_object_id = {_spicedb_object_id(r["urn"]): r for r in rows}
+    for rel in relationships:
+        subject = rel.get("subject", {}).get("object", {})
+        if subject.get("objectType") != "principal":
+            continue
+        row = by_object_id.get(subject.get("objectId", ""))
+        if row is not None and row["status"] == "active":
+            return True
+    return False
+
+
+async def _ensure_bootstrap_admin_principal(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    admin_urn: str,
+    secret: str,
+) -> None:
+    existing = await pool.fetchrow("SELECT urn, status FROM principal WHERE urn = $1", admin_urn)
+    if existing is None:
+        await pool.execute(
             """
-            INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (urn) DO UPDATE SET
-                display_name = EXCLUDED.display_name,
-                on_behalf_of = EXCLUDED.on_behalf_of,
-                country = EXCLUDED.country,
-                client_secret = EXCLUDED.client_secret
+            INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret, status)
+            VALUES ($1, 'user', $2, $3, NULL, $4, $5, 'active')
             """,
-            principal.urn,
-            principal.type,
-            principal.tenant_id,
-            principal.display_name,
-            principal.on_behalf_of,
-            principal.country,
-            client_secret_for(local_name),
+            admin_urn,
+            tenant_id,
+            os.environ.get("HOLON_BOOTSTRAP_ADMIN_DISPLAY_NAME", "Instance Admin"),
+            os.environ.get("HOLON_BOOTSTRAP_ADMIN_COUNTRY", "FR"),
+            secret,
         )
+        return
+    # Re-activate + refresh secret when repairing an orphaned/disabled bootstrap admin.
+    await pool.execute(
+        "UPDATE principal SET client_secret = $1, status = 'active' WHERE urn = $2",
+        secret,
+        admin_urn,
+    )
 
 
 async def create_project(pool: asyncpg.Pool, *, tenant_id: str, workspace_id: str, name: str) -> dict:
@@ -320,41 +396,3 @@ async def set_principal_status(pool: asyncpg.Pool, urn: str, status: str) -> Opt
     return dict(row) if row else None
 
 
-async def ensure_authz_seeded(client: PermissionClient, schema_path: str, tenant_id: str, workspace_id: str) -> None:
-    """Loads the shared SpiceDB schema and writes the tenant/workspace
-    relationships Identity owns. Knowledge separately links its own
-    ObjectType resources under the same workspace when it seeds its ontology.
-    """
-    await client.write_schema(Path(schema_path).read_text())
-
-    t_urn = tenant_urn(tenant_id)
-    w_urn = workspace_urn(tenant_id, workspace_id)
-
-    for principal in seed_principals(tenant_id):
-        await client.write_relationship(
-            resource_type="tenant", resource_urn=t_urn, relation="member", subject_urn=principal.urn
-        )
-
-    for subject_type, local_id in WORKSPACE_VIEWERS:
-        await client.write_relationship(
-            resource_type="workspace",
-            resource_urn=w_urn,
-            relation="viewer",
-            subject_urn=build_urn(tenant_id, "global", subject_type, local_id),
-        )
-
-    for subject_type, local_id in WORKSPACE_EDITORS:
-        await client.write_relationship(
-            resource_type="workspace",
-            resource_urn=w_urn,
-            relation="editor",
-            subject_urn=build_urn(tenant_id, "global", subject_type, local_id),
-        )
-
-    for subject_type, local_id in WORKSPACE_ADMINS:
-        await client.write_relationship(
-            resource_type="workspace",
-            resource_urn=w_urn,
-            relation="admin",
-            subject_urn=build_urn(tenant_id, "global", subject_type, local_id),
-        )

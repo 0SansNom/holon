@@ -25,6 +25,8 @@ from holon_common import EventActor, EventEnvelope, build_urn, outbox
 from . import markings as markings_module
 from .object_types import get_object_type, get_object_type_version, validate_ot_metadata
 from .interfaces import get_interface_type
+from .type_classes import normalize_type_classes
+from .render_hints import ALLOWED_RENDER_HINTS, normalize_render_hints
 
 
 def _action_local_name(action_name: str) -> str:
@@ -39,21 +41,14 @@ async def _actions_available_on_object_type(
     pool: asyncpg.Pool, *, tenant_id: str, object_type_name: str, implements: list[str]
 ) -> set[str]:
     """Short action names invokable on this ObjectType after publish —
-    hardcoded `ACTION_DEFINITIONS`, declarative ActionTypes targeting the
-    OT directly, and ActionTypes targeting any interface this version
-    declares in `implements` (Actions-on-interfaces).
+    declarative ActionTypes targeting the OT directly, and ActionTypes
+    targeting any interface this version declares in `implements`
+    (Actions-on-interfaces).
     """
-    from ..actions import ACTION_DEFINITIONS
     from .action_types import list_action_types
 
     implements_set = set(implements)
     names: set[str] = set()
-    for action_name, definition in ACTION_DEFINITIONS.items():
-        if definition.get("target_object_type") == object_type_name:
-            names.add(_action_local_name(action_name))
-        target_interface = definition.get("target_interface")
-        if target_interface and target_interface in implements_set:
-            names.add(_action_local_name(action_name))
 
     for action_type in await list_action_types(pool, tenant_id):
         if action_type.get("target_object_type") == object_type_name:
@@ -65,26 +60,69 @@ async def _actions_available_on_object_type(
 
 
 async def _validate_implements(
-    pool: asyncpg.Pool, *, tenant_id: str, object_type_name: str, property_mapping: dict, implements: list[str]
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    object_type_name: str,
+    property_mapping: dict,
+    implements: list[str],
+    property_types: Optional[dict[str, dict]] = None,
+    link_constraint_bindings: Optional[dict] = None,
+    interface_property_bindings: Optional[dict] = None,
+    interface_overrides: Optional[dict[str, dict]] = None,
 ) -> None:
     """Enforced at publish time (same synchronous-validation treatment
     `create_relation_type` already gives cardinality/endpoints):
     declaring conformance to an interface is a checked promise, not a
-    label. Every required property must exist on this version's own
-    `property_mapping`; every required action must be a real, registered
-    Action available on this ObjectType (hardcoded or declarative,
-    OT-targeted or interface-targeted for an interface this draft
-    implements).
+    label. Uses the *effective* interface contract (local + inherited
+    parent_interfaces). Interface-targeted Actions on ancestors count.
     """
-    object_action_names = await _actions_available_on_object_type(
-        pool, tenant_id=tenant_id, object_type_name=object_type_name, implements=implements
+    from .interfaces import (
+        effective_interface_contract,
+        expand_implements,
+        outbound_cardinality_from_relation,
+        property_type_binding_key,
+        relation_other_endpoint,
+        resolve_interface_property_path,
     )
+    from .object_types import list_object_types
+    from .relation_types import list_relation_types
+
+    expanded_implements = await expand_implements(pool, tenant_id, implements)
+    object_action_names = await _actions_available_on_object_type(
+        pool,
+        tenant_id=tenant_id,
+        object_type_name=object_type_name,
+        implements=list(expanded_implements),
+    )
+    ot_property_types = property_types or {}
+    bindings_by_interface = link_constraint_bindings or {}
+    prop_bindings_by_interface = interface_property_bindings or {}
+    relations = await list_relation_types(pool, tenant_id)
+    relations_by_name = {rel["name"]: rel for rel in relations}
+    object_types_by_name = {ot["name"]: ot for ot in await list_object_types(pool, tenant_id)}
 
     for interface_name in implements:
-        interface = await get_interface_type(pool, tenant_id, interface_name)
-        if interface is None:
-            raise ValueError(f"unknown interface: {interface_name!r}")
-        missing_properties = [p for p in interface["required_properties"] if p not in property_mapping]
+        interface = await effective_interface_contract(
+            pool, tenant_id, interface_name, overrides=interface_overrides,
+        )
+        prop_bindings = prop_bindings_by_interface.get(interface_name) or {}
+        if prop_bindings and not isinstance(prop_bindings, dict):
+            raise ValueError(
+                f"{object_type_name} cannot implement {interface_name!r}: "
+                f"interface_property_bindings[{interface_name!r}] must be an object"
+            )
+        missing_properties: list[str] = []
+        for prop_name in interface["required_properties"]:
+            try:
+                resolve_interface_property_path(
+                    property_mapping=property_mapping,
+                    property_types=ot_property_types,
+                    interface_prop=prop_name,
+                    binding_path=prop_bindings.get(prop_name),
+                )
+            except ValueError:
+                missing_properties.append(prop_name)
         if missing_properties:
             raise ValueError(
                 f"{object_type_name} cannot implement {interface_name!r}: "
@@ -96,6 +134,173 @@ async def _validate_implements(
                 f"{object_type_name} cannot implement {interface_name!r}: "
                 f"missing required action{'s' if len(missing_actions) != 1 else ''} {missing_actions}"
             )
+        for prop_name, iface_rule in (interface.get("property_types") or {}).items():
+            expected = property_type_binding_key(iface_rule)
+            if expected is None:
+                continue
+            try:
+                _, ot_rule = resolve_interface_property_path(
+                    property_mapping=property_mapping,
+                    property_types=ot_property_types,
+                    interface_prop=prop_name,
+                    binding_path=prop_bindings.get(prop_name),
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{object_type_name} cannot implement {interface_name!r}: {exc}"
+                ) from exc
+            actual = property_type_binding_key(ot_rule) if ot_rule is not None else None
+            if actual != expected:
+                kind, ref = expected
+                raise ValueError(
+                    f"{object_type_name} cannot implement {interface_name!r}: "
+                    f"property {prop_name!r} must be typed as {kind} {ref!r} "
+                    f"(got {actual!r})"
+                )
+
+        iface_bindings = bindings_by_interface.get(interface_name) or {}
+        if not isinstance(iface_bindings, dict):
+            raise ValueError(
+                f"{object_type_name} cannot implement {interface_name!r}: "
+                f"link_constraint_bindings[{interface_name!r}] must be an object"
+            )
+        for constraint in interface.get("link_constraints") or []:
+            api_name = constraint["api_name"]
+            relation_name = iface_bindings.get(api_name)
+            if not relation_name:
+                if constraint.get("required"):
+                    raise ValueError(
+                        f"{object_type_name} cannot implement {interface_name!r}: "
+                        f"missing required link binding for {api_name!r}"
+                    )
+                continue
+            relation = relations_by_name.get(relation_name)
+            if relation is None:
+                raise ValueError(
+                    f"{object_type_name} cannot implement {interface_name!r}: "
+                    f"link {api_name!r} binds unknown RelationType {relation_name!r}"
+                )
+            outbound = outbound_cardinality_from_relation(relation, object_type_name)
+            if outbound is None:
+                raise ValueError(
+                    f"{object_type_name} cannot implement {interface_name!r}: "
+                    f"RelationType {relation_name!r} does not touch this ObjectType"
+                )
+            if outbound != constraint["cardinality"]:
+                raise ValueError(
+                    f"{object_type_name} cannot implement {interface_name!r}: "
+                    f"link {api_name!r} requires cardinality {constraint['cardinality']!r}, "
+                    f"RelationType {relation_name!r} is outbound {outbound!r}"
+                )
+            other = relation_other_endpoint(relation, object_type_name)
+            if constraint["target_kind"] == "object_type":
+                if other != constraint["target"]:
+                    raise ValueError(
+                        f"{object_type_name} cannot implement {interface_name!r}: "
+                        f"link {api_name!r} requires target ObjectType {constraint['target']!r}, "
+                        f"got {other!r}"
+                    )
+            else:
+                other_ot = object_types_by_name.get(other or "")
+                other_implements = await expand_implements(
+                    pool, tenant_id, (other_ot or {}).get("implements") or [],
+                )
+                if constraint["target"] not in other_implements:
+                    raise ValueError(
+                        f"{object_type_name} cannot implement {interface_name!r}: "
+                        f"link {api_name!r} requires target interface {constraint['target']!r}, "
+                        f"but {other!r} does not implement it"
+                    )
+
+
+async def assert_interface_tighten_compatible(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    interface_name: str,
+    previous_properties: list[str],
+    previous_actions: list[str],
+    new_properties: list[str],
+    new_actions: list[str],
+    previous_property_types: Optional[dict] = None,
+    new_property_types: Optional[dict] = None,
+    previous_link_constraints: Optional[list] = None,
+    new_link_constraints: Optional[list] = None,
+    previous_parent_interfaces: Optional[list] = None,
+    new_parent_interfaces: Optional[list] = None,
+) -> None:
+    """Refuse edits that would break published implementers of this
+    interface or of any child that extends it (effective contract).
+    """
+    from .interfaces import (
+        ancestor_interface_names,
+        link_constraints_tighten,
+        property_types_tighten,
+    )
+    from .object_types import list_object_types
+
+    added_properties = set(new_properties) - set(previous_properties)
+    added_actions = set(new_actions) - set(previous_actions)
+    types_tighten = property_types_tighten(
+        previous_property_types or {}, new_property_types or {}
+    )
+    links_tighten = link_constraints_tighten(
+        previous_link_constraints or [], new_link_constraints or []
+    )
+    prev_parents = list(previous_parent_interfaces or [])
+    next_parents = list(new_parent_interfaces or [])
+    parents_tighten = set(next_parents) - set(prev_parents)
+    if (
+        not added_properties
+        and not added_actions
+        and not types_tighten
+        and not links_tighten
+        and not parents_tighten
+    ):
+        return
+
+    proposed = {
+        "parent_interfaces": next_parents,
+        "required_properties": new_properties,
+        "required_actions": new_actions,
+        "property_types": new_property_types or {},
+        "link_constraints": new_link_constraints or [],
+    }
+    overrides = {interface_name: proposed}
+
+    failures: list[str] = []
+    for object_type in await list_object_types(pool, tenant_id):
+        implements = object_type.get("implements") or []
+        affected = False
+        for impl in implements:
+            if impl == interface_name:
+                affected = True
+                break
+            if interface_name in await ancestor_interface_names(pool, tenant_id, impl):
+                affected = True
+                break
+        if not affected:
+            continue
+        try:
+            await _validate_implements(
+                pool,
+                tenant_id=tenant_id,
+                object_type_name=object_type["name"],
+                property_mapping=object_type.get("property_mapping") or {},
+                implements=implements,
+                property_types=object_type.get("property_types") or {},
+                link_constraint_bindings=object_type.get("link_constraint_bindings") or {},
+                interface_property_bindings=object_type.get("interface_property_bindings") or {},
+                interface_overrides=overrides,
+            )
+        except ValueError as exc:
+            failures.append(str(exc))
+
+    if failures:
+        raise ValueError(
+            f"cannot tighten interface {interface_name!r}: "
+            f"{len(failures)} implementer(s) would break — " + "; ".join(failures)
+        )
 
 
 _ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max", "collect_list", "collect_set"}
@@ -117,6 +322,13 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type_name: st
         source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
         target_name = relation["target_object_type_urn"].rsplit(":", 1)[-1]
         local_name = relation["name"].split(".", 1)[-1]
+        forward = (relation.get("source_api_name") or "").strip() or local_name
+        reverse = (relation.get("target_api_name") or "").strip() or relation.get("target_property")
+        if source_name == object_type_name and forward == link_name:
+            return relation
+        if target_name == object_type_name and reverse == link_name:
+            return relation
+        # Legacy: still accept bare local name / target_property when API names diverge.
         if source_name == object_type_name and local_name == link_name:
             return relation
         if target_name == object_type_name and relation.get("target_property") == link_name:
@@ -125,14 +337,9 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type_name: st
 
 
 def _link_aggregate_path(rule: dict) -> list[str]:
-    """Foundry-style multi-hop path (1–3). `path` wins; legacy single
-    `relation` is treated as a one-hop path.
-    """
+    """Foundry-style multi-hop path (1–3 link names)."""
     path = rule.get("path")
-    if path is not None:
-        return path if isinstance(path, list) else []
-    relation = rule.get("relation")
-    return [relation] if isinstance(relation, str) and relation else []
+    return path if isinstance(path, list) else []
 
 
 async def _validate_derived_properties(
@@ -143,7 +350,7 @@ async def _validate_derived_properties(
     plain string must name a real, currently-*active* Function plugin —
     the original shape, unchanged. A `{"kind": "link_aggregate", ...}`
     dict is a Foundry-style reducer over a RelationType path (`path` of
-    1–3 link names, or legacy single `relation`): each hop must resolve
+    1–3 link names): each hop must resolve
     from the type reached so far, `aggregate` must be a known aggregate,
     and — unless `aggregate` is `count`, which needs no value to read —
     `property` must be a real mapped property on the *final* related
@@ -228,8 +435,8 @@ async def _validate_derived_properties(
             or not all(isinstance(hop, str) and hop for hop in path)
         ):
             raise ValueError(
-                f"derived property {property_name!r}: link_aggregate requires 'path' (1–"
-                f"{_MAX_LINK_AGGREGATE_HOPS} link names) or a single 'relation'"
+                f"derived property {property_name!r}: link_aggregate requires 'path' "
+                f"(1–{_MAX_LINK_AGGREGATE_HOPS} link names)"
             )
         if relation_types is None:
             relation_types = await list_relation_types(pool, tenant_id)
@@ -262,26 +469,13 @@ async def _validate_derived_properties(
 
 
 _ALLOWED_FORMAT_KINDS = {"currency", "badge", "numeric", "datetime", "principal", "resource-link"}
-# The same small, closed vocabulary Blueprint's own `Intent` type uses
-# (`Tag`/`Callout` `intent` prop) — a `badge` rule's colors map values
-# directly onto it so the frontend never needs its own color table.
 _ALLOWED_BADGE_COLORS = {"primary", "success", "warning", "danger", "none"}
-
-# `numeric` rule fields map directly onto JS `Intl.NumberFormat` options
-# (see PropertyFormat.tsx) — kept name-for-name so the frontend can pass
-# the rule straight through with no translation layer. `style` covers
-# Foundry's currency/unit/percent/decimal categories in one kind, rather
-# than four separate ones — the only thing that actually changes between
-# them is this one option.
 _ALLOWED_NUMERIC_STYLES = {"decimal", "currency", "percent", "unit"}
 _ALLOWED_NUMERIC_NOTATIONS = {"standard", "compact", "scientific", "engineering"}
 _NUMERIC_INT_FIELDS = (
     "minimumFractionDigits", "maximumFractionDigits",
     "minimumSignificantDigits", "maximumSignificantDigits", "minimumIntegerDigits",
 )
-
-# Foundry's 6 documented date/time formats: date-only, long/short
-# datetime, ISO 8601, relative ("8 minutes ago"), time-only.
 _ALLOWED_DATETIME_STYLES = {"date", "datetime-long", "datetime-short", "iso8601", "relative", "time"}
 
 _ALLOWED_RESOURCE_LINK_TYPES = {"object-type", "application"}
@@ -404,18 +598,42 @@ def _validate_conditional_formats(
 
 
 _ALLOWED_PROPERTY_TYPE_KINDS = {"value_type", "shared_property_type", "struct", "array"}
-_ALLOWED_RENDER_HINTS = frozenset({"searchable", "sortable", "selectable", "identifier"})
-_ALLOWED_TYPE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_ALLOWED_RENDER_HINTS = ALLOWED_RENDER_HINTS
 
 
-def _validate_property_control_metadata(property_name: str, rule: dict, *, nested: bool) -> None:
+def _validate_struct_field_metadata(property_name: str, rule: dict, *, allow_column: bool = True) -> None:
+    """Foundry-style per-field metadata allowed on struct leaves only."""
+    if "description" in rule and not isinstance(rule["description"], str):
+        raise ValueError(f"property_types entry for {property_name!r}: description must be a string")
+    if "main_field" in rule and not isinstance(rule["main_field"], bool):
+        raise ValueError(f"property_types entry for {property_name!r}: main_field must be a boolean")
+    if "column" in rule:
+        if not allow_column:
+            raise ValueError(
+                f"property_types entry for {property_name!r}: per-field column mapping is only "
+                f"allowed on top-level struct fields (not array-of-struct element fields)"
+            )
+        col = rule["column"]
+        if not isinstance(col, str) or not col.strip():
+            raise ValueError(f"property_types entry for {property_name!r}: column must be a non-empty string")
+        rule["column"] = col.strip()
+
+
+def _validate_property_control_metadata(
+    property_name: str, rule: dict, *, nested: bool, allow_field_column: bool = True
+) -> None:
     """Top-level-only Foundry-style property control metadata."""
-    if nested and any(k in rule for k in ("editable", "required", "visibility", "render_hints", "type_classes")):
+    if nested and any(
+        k in rule
+        for k in ("editable", "required", "visibility", "render_hints", "type_classes", "lifecycle_status")
+    ):
         raise ValueError(
             f"property_types entry for {property_name!r}: control metadata "
-            f"(editable/required/visibility/render_hints/type_classes) only applies to a top-level property"
+            f"(editable/required/visibility/render_hints/type_classes/lifecycle_status) "
+            f"only applies to a top-level property"
         )
     if nested:
+        _validate_struct_field_metadata(property_name, rule, allow_column=allow_field_column)
         return
     for flag in ("editable", "required"):
         if flag in rule and not isinstance(rule[flag], bool):
@@ -425,26 +643,25 @@ def _validate_property_control_metadata(property_name: str, rule: dict, *, neste
             f"property_types entry for {property_name!r}: visibility must be "
             f"'prominent', 'normal', or 'hidden'"
         )
-    if "render_hints" in rule:
-        hints = rule["render_hints"]
-        if not isinstance(hints, list) or not all(isinstance(h, str) for h in hints):
-            raise ValueError(f"property_types entry for {property_name!r}: render_hints must be a list of strings")
-        unknown = set(hints) - _ALLOWED_RENDER_HINTS
-        if unknown:
+    if "lifecycle_status" in rule:
+        status = rule["lifecycle_status"]
+        from .lifecycle import PROPERTY_LIFECYCLE_STATUSES
+
+        if status not in PROPERTY_LIFECYCLE_STATUSES:
             raise ValueError(
-                f"property_types entry for {property_name!r}: unknown render_hints {sorted(unknown)} "
-                f"(expected subset of {sorted(_ALLOWED_RENDER_HINTS)})"
+                f"property_types entry for {property_name!r}: lifecycle_status must be "
+                f"one of {sorted(PROPERTY_LIFECYCLE_STATUSES)}"
             )
+    if "render_hints" in rule:
+        try:
+            rule["render_hints"] = normalize_render_hints(rule.get("render_hints"))
+        except ValueError as exc:
+            raise ValueError(f"property_types entry for {property_name!r}: {exc}") from exc
     if "type_classes" in rule:
-        classes = rule["type_classes"]
-        if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
-            raise ValueError(f"property_types entry for {property_name!r}: type_classes must be a list of strings")
-        for cls in classes:
-            if not _ALLOWED_TYPE_CLASS_RE.match(cls):
-                raise ValueError(
-                    f"property_types entry for {property_name!r}: invalid type class {cls!r} "
-                    f"(expected lowercase identifier, e.g. 'priority')"
-                )
+        try:
+            rule["type_classes"] = normalize_type_classes(rule.get("type_classes"))
+        except ValueError as exc:
+            raise ValueError(f"property_types entry for {property_name!r}: {exc}") from exc
 
 
 async def _validate_property_types(
@@ -477,10 +694,19 @@ async def _validate_property_types(
 
     known_properties = set(property_mapping) | set(derived_properties)
 
-    async def _validate_leaf(property_name: str, rule: dict, *, in_struct: bool = False, in_array: bool = False) -> None:
+    async def _validate_leaf(
+        property_name: str,
+        rule: dict,
+        *,
+        in_struct: bool = False,
+        in_array: bool = False,
+        allow_field_column: bool = True,
+    ) -> None:
         nested = in_struct or in_array
         kind = rule.get("kind")
-        _validate_property_control_metadata(property_name, rule, nested=nested)
+        _validate_property_control_metadata(
+            property_name, rule, nested=nested, allow_field_column=allow_field_column and in_struct and not in_array
+        )
         # Metadata-only entry (visibility / editable / required / hints without a typed kind).
         if kind is None:
             if nested:
@@ -495,8 +721,22 @@ async def _validate_property_types(
             return
         if kind == "shared_property_type":
             shared_property_type_name = rule.get("shared_property_type")
-            if await shared_property_types_module.get_shared_property_type(pool, tenant_id, shared_property_type_name) is None:
+            spt = await shared_property_types_module.get_shared_property_type(pool, tenant_id, shared_property_type_name)
+            if spt is None:
                 raise ValueError(f"property_types entry for {property_name!r} names unknown shared_property_type {shared_property_type_name!r}")
+            # Nesting is one level deep everywhere else in this function
+            # (struct/array can't contain another struct) — a struct-typed
+            # SPT referenced as a leaf inside a local struct would smuggle
+            # that same nesting in by reference, and deleting the SPT later
+            # has no way to preserve a struct shape at a leaf position
+            # (`shared_property_types._detach_spt_from_rule` only ever
+            # rewrites a leaf to a scalar value_type).
+            if in_struct and isinstance(spt.get("struct_properties"), dict) and spt["struct_properties"]:
+                raise ValueError(
+                    f"property_types entry for {property_name!r}: shared_property_type "
+                    f"{shared_property_type_name!r} is struct-typed, which can't be nested inside "
+                    f"another struct (struct-in-struct is forbidden even by reference)"
+                )
             return
         if kind == "struct":
             # A bare top-level struct is fine; a struct as an array's
@@ -510,8 +750,16 @@ async def _validate_property_types(
             nested_properties = rule.get("properties")
             if not isinstance(nested_properties, dict) or not nested_properties:
                 raise ValueError(f"property_types entry for {property_name!r}: 'struct' requires a non-empty 'properties' dict")
+            # Per-field dataset columns only on top-level structs (Foundry Column mapping).
+            field_columns_ok = not in_array
             for nested_name, nested_rule in nested_properties.items():
-                await _validate_leaf(f"{property_name}.{nested_name}", nested_rule, in_struct=True, in_array=in_array)
+                await _validate_leaf(
+                    f"{property_name}.{nested_name}",
+                    nested_rule,
+                    in_struct=True,
+                    in_array=in_array,
+                    allow_field_column=field_columns_ok,
+                )
             return
         if kind == "array":
             if nested:
@@ -519,7 +767,11 @@ async def _validate_property_types(
             element_rule = rule.get("element")
             if not isinstance(element_rule, dict):
                 raise ValueError(f"property_types entry for {property_name!r}: 'array' requires an 'element' type rule")
-            await _validate_leaf(f"{property_name}[]", element_rule, in_array=True)
+            if "unique_elements" in rule and not isinstance(rule.get("unique_elements"), bool):
+                raise ValueError(
+                    f"property_types entry for {property_name!r}: unique_elements must be a boolean"
+                )
+            await _validate_leaf(f"{property_name}[]", element_rule, in_array=True, allow_field_column=False)
 
     for property_name, rule in property_types.items():
         if property_name not in known_properties:
@@ -557,12 +809,17 @@ async def propose_object_type_version(
     property_formats: Optional[dict[str, dict]] = None,
     conditional_formats: Optional[dict[str, list]] = None,
     property_types: Optional[dict[str, dict]] = None,
+    link_constraint_bindings: Optional[dict] = None,
+    interface_property_bindings: Optional[dict] = None,
     primary_key: Optional[str] = None,
     title_key: Optional[str] = None,
     plural_display_name: Optional[str] = None,
     lifecycle_status: Optional[str] = None,
     visibility: Optional[str] = None,
     icon: Optional[str] = None,
+    deprecation_reason: Optional[str] = None,
+    deprecation_deadline=None,
+    replacement_urn: Optional[str] = None,
 ) -> dict:
     """Creates a `draft` version — never touches the live `object_type`
     row (everything else in this build keeps reading the current
@@ -601,19 +858,43 @@ async def propose_object_type_version(
     new_property_types = (
         property_types if property_types is not None else (current.get("property_types") or {})
     )
+    new_link_bindings = (
+        link_constraint_bindings
+        if link_constraint_bindings is not None
+        else (current.get("link_constraint_bindings") or {})
+    )
+    new_iface_prop_bindings = (
+        interface_property_bindings
+        if interface_property_bindings is not None
+        else (current.get("interface_property_bindings") or {})
+    )
     new_primary_key = primary_key if primary_key is not None else (current.get("primary_key") or "id")
     new_title_key = title_key if title_key is not None else current.get("title_key")
     new_plural = plural_display_name if plural_display_name is not None else (current.get("plural_display_name") or "")
     new_lifecycle = lifecycle_status if lifecycle_status is not None else (current.get("lifecycle_status") or "experimental")
     new_visibility = visibility if visibility is not None else (current.get("visibility") or "normal")
     new_icon = icon if icon is not None else current.get("icon")
+    # Deprecation fields: explicit override when provided; else carry forward
+    # from live (normalize clears them when status ≠ deprecated).
+    new_dep_reason = (
+        deprecation_reason if deprecation_reason is not None else current.get("deprecation_reason")
+    )
+    new_dep_deadline = (
+        deprecation_deadline if deprecation_deadline is not None else current.get("deprecation_deadline")
+    )
+    new_replacement = (
+        replacement_urn if replacement_urn is not None else current.get("replacement_urn")
+    )
 
-    validate_ot_metadata(
+    dep = validate_ot_metadata(
         property_mapping=new_mapping,
         primary_key=new_primary_key,
         title_key=new_title_key,
         lifecycle_status=new_lifecycle,
         visibility=new_visibility,
+        deprecation_reason=new_dep_reason,
+        deprecation_deadline=new_dep_deadline,
+        replacement_urn=new_replacement,
     )
 
     await pool.execute(
@@ -621,15 +902,20 @@ async def propose_object_type_version(
         INSERT INTO object_type_version
             (object_type_urn, tenant_id, version, property_mapping, description, implements, derived_properties,
              project_urn, markings, property_formats, conditional_formats, property_types,
-             primary_key, title_key, plural_display_name, lifecycle_status, visibility, icon, status)
+             link_constraint_bindings, interface_property_bindings,
+             primary_key, title_key, plural_display_name, lifecycle_status, visibility, icon,
+             deprecation_reason, deprecation_deadline, replacement_urn, status)
         VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
-                $13, $14, $15, $16, $17, $18, 'draft')
+                $13::jsonb, $14::jsonb,
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, 'draft')
         """,
         object_type_urn, current["tenant_id"], next_version,
         json.dumps(new_mapping), new_description, json.dumps(new_implements), json.dumps(new_derived_properties),
         new_project_urn, json.dumps(new_markings), json.dumps(new_property_formats),
         json.dumps(new_conditional_formats), json.dumps(new_property_types),
-        new_primary_key, new_title_key, new_plural, new_lifecycle, new_visibility, new_icon,
+        json.dumps(new_link_bindings), json.dumps(new_iface_prop_bindings),
+        new_primary_key, new_title_key, new_plural, dep["lifecycle_status"], new_visibility, new_icon,
+        dep["deprecation_reason"], dep["deprecation_deadline"], dep["replacement_urn"],
     )
     return await get_object_type_version(pool, object_type_urn, next_version)
 
@@ -647,6 +933,8 @@ async def _run_publish_validations(
     property_formats: dict,
     conditional_formats: dict,
     property_types: dict,
+    link_constraint_bindings: Optional[dict] = None,
+    interface_property_bindings: Optional[dict] = None,
     identity_url: Optional[str] = None,
     identity_token: Optional[str] = None,
 ) -> None:
@@ -667,13 +955,16 @@ async def _run_publish_validations(
         title_key=title_key,
         lifecycle_status=lifecycle_status,
         visibility=visibility,
+        deprecation_reason=draft.get("deprecation_reason"),
+        deprecation_deadline=draft.get("deprecation_deadline"),
+        replacement_urn=draft.get("replacement_urn"),
     )
-    if current and (current.get("lifecycle_status") or "experimental") == "active":
+    if current and (current.get("lifecycle_status") or "experimental") in ("active", "promoted"):
         live_pk = current.get("primary_key") or "id"
         if primary_key != live_pk:
             raise ValueError(
                 f"cannot change primary_key from {live_pk!r} to {primary_key!r} while "
-                f"lifecycle_status is active — deprecate or keep the existing key"
+                f"lifecycle_status is active or promoted — deprecate or keep the existing key"
             )
     if implements:
         await _validate_implements(
@@ -682,6 +973,13 @@ async def _run_publish_validations(
             object_type_name=object_type_name,
             property_mapping=draft["property_mapping"],
             implements=implements,
+            property_types=property_types,
+            link_constraint_bindings=link_constraint_bindings or draft.get("link_constraint_bindings") or {},
+            interface_property_bindings=(
+                interface_property_bindings
+                or draft.get("interface_property_bindings")
+                or {}
+            ),
         )
     if derived_properties:
         await _validate_derived_properties(
@@ -764,21 +1062,43 @@ async def _write_publish(
         "UPDATE object_type_version SET status = 'published', published_at = now() WHERE object_type_urn = $1 AND version = $2",
         object_type_urn, version,
     )
+    lifecycle = draft.get("lifecycle_status") or "experimental"
+    if lifecycle in ("experimental", "deprecated", "example") and isinstance(property_types, dict):
+        cascaded_props: dict = {}
+        for key, rule in property_types.items():
+            if isinstance(rule, dict):
+                cascaded_props[key] = {**rule, "lifecycle_status": lifecycle}
+            else:
+                cascaded_props[key] = rule
+        property_types = cascaded_props
+
     await conn.execute(
         """
         UPDATE object_type SET version = $1, property_mapping = $2::jsonb, description = $3,
             implements = $4::jsonb, derived_properties = $5::jsonb, project_urn = $6, markings = $7::jsonb,
             property_formats = $8::jsonb, conditional_formats = $9::jsonb, property_types = $10::jsonb,
-            primary_key = $11, title_key = $12, plural_display_name = $13,
-            lifecycle_status = $14, visibility = $15, icon = $16
-        WHERE urn = $17
+            link_constraint_bindings = $11::jsonb, interface_property_bindings = $12::jsonb,
+            primary_key = $13, title_key = $14, plural_display_name = $15,
+            lifecycle_status = $16, visibility = $17, icon = $18,
+            deprecation_reason = $19, deprecation_deadline = $20, replacement_urn = $21
+        WHERE urn = $22
         """,
         version, json.dumps(draft["property_mapping"]), draft["description"],
         json.dumps(implements), json.dumps(derived_properties), project_urn, json.dumps(markings),
         json.dumps(property_formats), json.dumps(conditional_formats), json.dumps(property_types),
+        json.dumps(draft.get("link_constraint_bindings") or {}),
+        json.dumps(draft.get("interface_property_bindings") or {}),
         draft.get("primary_key") or "id", draft.get("title_key"), draft.get("plural_display_name") or "",
         draft.get("lifecycle_status") or "experimental", draft.get("visibility") or "normal", draft.get("icon"),
+        draft.get("deprecation_reason"), draft.get("deprecation_deadline"), draft.get("replacement_urn"),
         object_type_urn,
+    )
+    from .relation_types import cascade_lifecycle_from_object_type
+
+    await cascade_lifecycle_from_object_type(
+        conn,
+        object_type_urn=object_type_urn,
+        lifecycle_status=draft.get("lifecycle_status") or "experimental",
     )
     event_id = uuid.uuid4().hex
     event = EventEnvelope(
@@ -843,6 +1163,8 @@ async def publish_object_type_version(
     property_formats = draft.get("property_formats") or {}
     conditional_formats = draft.get("conditional_formats") or {}
     property_types = draft.get("property_types") or {}
+    link_constraint_bindings = draft.get("link_constraint_bindings") or {}
+    interface_property_bindings = draft.get("interface_property_bindings") or {}
 
     await _run_publish_validations(
         pool,
@@ -856,6 +1178,8 @@ async def publish_object_type_version(
         property_formats=property_formats,
         conditional_formats=conditional_formats,
         property_types=property_types,
+        link_constraint_bindings=link_constraint_bindings,
+        interface_property_bindings=interface_property_bindings,
         identity_url=identity_url,
         identity_token=identity_token,
     )

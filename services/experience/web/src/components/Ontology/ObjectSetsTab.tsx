@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { FormGroup, HTMLSelect, InputGroup, Tag, Button, Callout } from "@blueprintjs/core";
+import { Checkbox, FormGroup, HTMLSelect, InputGroup, Tag, Button, Callout } from "@blueprintjs/core";
 import {
   useObjectSets,
   useCreateObjectSet,
@@ -14,106 +14,19 @@ import { RegistryDialog } from "../common/RegistryDialog";
 import { useAsyncAction } from "../../hooks/useAsyncAction";
 import { usePaletteIntentStore } from "../../store/paletteIntent";
 import { objectSetBrowsePath, urnShortName } from "../ObjectExplorer/objectExplorerUtils";
+import { isEphemeralTestName } from "./ephemeralResources";
 import { OntologyTabHeader, RegistryCard } from "./OntologyTabLayout";
+import { PredicateFilterRows } from "./PredicateFilterRows";
+import {
+  buildPredicateDefinition,
+  expandFilterPropertyKeys,
+  predicateValueToInput,
+  type PredicateFormRow,
+} from "./objectSetPredicates";
+import { REGISTRY_LIFECYCLE_STATUSES } from "./lifecycleUtils";
 
-const OPS = ["eq", "neq", "in", "gt", "gte", "lt", "lte", "contains"] as const;
-const LIFECYCLES = ["experimental", "active", "deprecated"] as const;
+const LIFECYCLES = REGISTRY_LIFECYCLE_STATUSES;
 const VISIBILITIES = ["prominent", "normal", "hidden"] as const;
-
-type Predicate = { property: string; op: string; value: unknown };
-
-function parseValue(op: string, raw: string): unknown {
-  if (op === "in") {
-    return raw
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean)
-      .map((v) => {
-        const n = Number(v);
-        return Number.isFinite(n) && v !== "" ? n : v;
-      });
-  }
-  const n = Number(raw);
-  if (raw !== "" && Number.isFinite(n) && /^-?\d+(\.\d+)?$/.test(raw.trim())) return n;
-  return raw;
-}
-
-function valueToInput(op: string, value: unknown): string {
-  if (op === "in" && Array.isArray(value)) return value.map(String).join(", ");
-  if (value == null) return "";
-  return String(value);
-}
-
-function PredicateRows({
-  predicates,
-  propertyKeys,
-  onChange,
-}: {
-  predicates: Array<{ property: string; op: string; value: string }>;
-  propertyKeys: string[];
-  onChange: (next: Array<{ property: string; op: string; value: string }>) => void;
-}) {
-  return (
-    <div className="hl-flex-col hl-gap-sm">
-      {predicates.map((pred, index) => (
-        <div key={index} className="hl-predicate-row">
-          <HTMLSelect
-            value={pred.property}
-            onChange={(e) => {
-              const next = [...predicates];
-              next[index] = { ...pred, property: e.target.value };
-              onChange(next);
-            }}
-          >
-            <option value="">Property…</option>
-            {propertyKeys.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </HTMLSelect>
-          <HTMLSelect
-            value={pred.op}
-            onChange={(e) => {
-              const next = [...predicates];
-              next[index] = { ...pred, op: e.target.value };
-              onChange(next);
-            }}
-          >
-            {OPS.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </HTMLSelect>
-          <InputGroup
-            value={pred.value}
-            placeholder={pred.op === "in" ? "a, b, c" : "value"}
-            onChange={(e) => {
-              const next = [...predicates];
-              next[index] = { ...pred, value: e.target.value };
-              onChange(next);
-            }}
-          />
-          <Button
-            minimal
-            icon="cross"
-            disabled={predicates.length <= 1}
-            onClick={() => onChange(predicates.filter((_, i) => i !== index))}
-          />
-        </div>
-      ))}
-      <Button
-        small
-        minimal
-        icon="plus"
-        onClick={() => onChange([...predicates, { property: propertyKeys[0] ?? "", op: "eq", value: "" }])}
-      >
-        Add predicate
-      </Button>
-    </div>
-  );
-}
 
 function EvaluatePanel({ name, objectType }: { name: string; objectType: string }) {
   const { data, isFetching, error, refetch } = useEvaluateObjectSet(name, true);
@@ -133,7 +46,7 @@ function EvaluatePanel({ name, objectType }: { name: string; objectType: string 
       {data && (
         <p className="hl-text-muted-sm">
           {data.count} object{data.count === 1 ? "" : "s"} of type {data.object_type}
-          {data.items.slice(0, 5).map((item) => (
+          {data.data.slice(0, 5).map((item) => (
             <Link
               key={String(item.id)}
               to="/objects/$type/$id"
@@ -153,7 +66,10 @@ function EvaluatePanel({ name, objectType }: { name: string; objectType: string 
   );
 }
 
-function toFormPredicates(definition: ObjectSet["definition"] | undefined, fallbackProperty: string) {
+function toFormPredicates(
+  definition: ObjectSet["definition"] | undefined,
+  fallbackProperty: string,
+): PredicateFormRow[] {
   const preds = definition?.all ?? [];
   if (preds.length === 0) {
     return [{ property: fallbackProperty, op: "eq", value: "" }];
@@ -161,15 +77,12 @@ function toFormPredicates(definition: ObjectSet["definition"] | undefined, fallb
   return preds.map((p) => ({
     property: p.property,
     op: p.op,
-    value: valueToInput(p.op, p.value),
+    value: predicateValueToInput(p.op, p.value),
   }));
 }
 
-function buildDefinition(formPreds: Array<{ property: string; op: string; value: string }>): { all: Predicate[] } {
-  const all = formPreds
-    .filter((p) => p.property)
-    .map((p) => ({ property: p.property, op: p.op, value: parseValue(p.op, p.value) }));
-  return { all };
+function buildDefinition(formPreds: PredicateFormRow[]) {
+  return buildPredicateDefinition(formPreds, { requireValue: false });
 }
 
 export function ObjectSetsTab() {
@@ -198,12 +111,23 @@ export function ObjectSetsTab() {
   const [editVisibility, setEditVisibility] = useState("normal");
   const [editPredicates, setEditPredicates] = useState<Array<{ property: string; op: string; value: string }>>([]);
   const [evaluating, setEvaluating] = useState<string | null>(null);
+  const [showEphemeral, setShowEphemeral] = useState(false);
+
+  const ephemeralCount = useMemo(
+    () => (data ?? []).filter((os) => isEphemeralTestName(os.name)).length,
+    [data],
+  );
+  const visibleSets = useMemo(
+    () =>
+      showEphemeral ? (data ?? []) : (data ?? []).filter((os) => !isEphemeralTestName(os.name)),
+    [data, showEphemeral],
+  );
 
   const selectedOt = (objectTypes ?? []).find((ot) => ot.name === objectType);
-  const propertyKeys = Object.keys(selectedOt?.property_mapping ?? {});
+  const propertyKeys = expandFilterPropertyKeys(selectedOt?.property_mapping, selectedOt?.property_types);
   const editingOtName = editing ? urnShortName(editing.object_type_urn) : "";
   const editingOt = (objectTypes ?? []).find((ot) => ot.name === editingOtName);
-  const editPropertyKeys = Object.keys(editingOt?.property_mapping ?? {});
+  const editPropertyKeys = expandFilterPropertyKeys(editingOt?.property_mapping, editingOt?.property_types);
 
   useEffect(() => {
     if (intent === "create-object-set") {
@@ -252,7 +176,7 @@ export function ObjectSetsTab() {
     setEditVisibility(os.visibility ?? "normal");
     const otName = urnShortName(os.object_type_urn);
     const ot = (objectTypes ?? []).find((o) => o.name === otName);
-    const keys = Object.keys(ot?.property_mapping ?? {});
+    const keys = expandFilterPropertyKeys(ot?.property_mapping, ot?.property_types);
     setEditPredicates(toFormPredicates(os.definition, keys[0] ?? ""));
   }
 
@@ -294,10 +218,20 @@ export function ObjectSetsTab() {
         }
         createLabel="New object set"
         onCreate={() => setCreating(true)}
+        trailing={
+          ephemeralCount > 0 ? (
+            <Checkbox
+              checked={showEphemeral}
+              label={`Show test leftovers (${ephemeralCount})`}
+              onChange={(e) => setShowEphemeral(e.currentTarget.checked)}
+              style={{ marginBottom: 0 }}
+            />
+          ) : undefined
+        }
       />
 
       <CardGrid>
-        {(data ?? []).map((os) => {
+        {visibleSets.map((os) => {
           const typeName = urnShortName(os.object_type_urn);
           return (
             <RegistryCard key={os.urn} name={os.display_name || os.name} onEdit={() => openEdit(os)}>
@@ -338,9 +272,9 @@ export function ObjectSetsTab() {
             </RegistryCard>
           );
         })}
-        {(data ?? []).length === 0 && (
+        {visibleSets.length === 0 && (
           <EmptyState actionLabel="New object set" onAction={() => setCreating(true)}>
-            No object sets yet.
+            {(data ?? []).length === 0 ? "No object sets yet." : "No durable object sets — show test leftovers to browse pytest sets."}
           </EmptyState>
         )}
       </CardGrid>
@@ -372,7 +306,7 @@ export function ObjectSetsTab() {
               const next = e.target.value;
               setObjectType(next);
               const ot = (objectTypes ?? []).find((o) => o.name === next);
-              const keys = Object.keys(ot?.property_mapping ?? {});
+              const keys = expandFilterPropertyKeys(ot?.property_mapping, ot?.property_types);
               setPredicates([{ property: keys[0] ?? "", op: "eq", value: "" }]);
             }}
           >
@@ -385,7 +319,7 @@ export function ObjectSetsTab() {
           </HTMLSelect>
         </FormGroup>
         <FormGroup label="Predicates (AND)" helperText="All predicates must match. Empty list = all instances of the type.">
-          <PredicateRows predicates={predicates} propertyKeys={propertyKeys} onChange={setPredicates} />
+          <PredicateFilterRows predicates={predicates} propertyKeys={propertyKeys} onChange={setPredicates} />
         </FormGroup>
         <FormGroup label="Lifecycle">
           <HTMLSelect fill value={lifecycleStatus} onChange={(e) => setLifecycleStatus(e.target.value)}>
@@ -423,7 +357,7 @@ export function ObjectSetsTab() {
           <InputGroup value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
         </FormGroup>
         <FormGroup label="Predicates (AND)">
-          <PredicateRows predicates={editPredicates} propertyKeys={editPropertyKeys} onChange={setEditPredicates} />
+          <PredicateFilterRows predicates={editPredicates} propertyKeys={editPropertyKeys} onChange={setEditPredicates} />
         </FormGroup>
         <FormGroup label="Lifecycle">
           <HTMLSelect fill value={editLifecycle} onChange={(e) => setEditLifecycle(e.target.value)}>

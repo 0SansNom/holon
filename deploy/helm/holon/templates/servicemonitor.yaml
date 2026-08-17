@@ -1,0 +1,40 @@
+{{- if .Values.observability.serviceMonitor.enabled }}
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: holon-{{ $name }}
+  labels:
+    app.kubernetes.io/name: holon
+    app.kubernetes.io/component: {{ $name }}
+    platform: holon
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ $name }}
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace | quote }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ $.Values.observability.serviceMonitor.interval | default "30s" | quote }}
+      scheme: http
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ $.Values.existingSecret | quote }}
+          key: HOLON_METRICS_TOKEN
+      relabelings:
+        - action: replace
+          targetLabel: job
+          replacement: holon
+        - action: replace
+          targetLabel: platform
+          replacement: holon
+        - action: replace
+          sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+          targetLabel: holon_component
+{{- end }}
+{{- end }}

@@ -65,6 +65,43 @@ export interface SyncRun {
   finished_at: string;
 }
 
+export interface TransformStep {
+  step_name: string;
+  input_dataset: string;
+  function_name: string;
+  output_dataset: string;
+  /** Column → Value Type name (Foundry logical type cast). */
+  value_type_casts?: Record<string, string>;
+}
+
+export interface PipelineDefinition {
+  name: string;
+  tenant_id: string;
+  steps: TransformStep[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PipelineStepResult {
+  step_name: string;
+  dataset_urn: string;
+  dataset_version_urn: string;
+  snapshot_id: number;
+  row_count: number;
+  location: string;
+}
+
+export interface PipelineRun {
+  id: number;
+  tenant_id: string;
+  pipeline_name: string;
+  status: "succeeded" | "failed" | string;
+  started_at: string;
+  finished_at: string | null;
+  step_results: PipelineStepResult[];
+  error: string | null;
+}
+
 export const connectivityApi = {
   listSources: () => api.get<GenericSource[]>(`${CONNECTIVITY_URL}/sources`),
   registerSource: (body: RegisterSourceRequest) => api.post<GenericSource>(`${CONNECTIVITY_URL}/sources`, body),
@@ -76,4 +113,12 @@ export const connectivityApi = {
   listConnections: () => api.get<GenericConnection[]>(`${CONNECTIVITY_URL}/connections`),
   registerConnection: (body: RegisterConnectionRequest) => api.post<GenericConnection>(`${CONNECTIVITY_URL}/connections`, body),
   deleteConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/connections/${name}`),
+
+  listPipelines: () => api.get<PipelineDefinition[]>(`${CONNECTIVITY_URL}/pipelines`),
+  getPipeline: (name: string) => api.get<PipelineDefinition>(`${CONNECTIVITY_URL}/pipelines/${name}`),
+  createPipeline: (name: string, body: { steps: TransformStep[] }) =>
+    api.post<PipelineDefinition>(`${CONNECTIVITY_URL}/pipelines/${name}`, body),
+  deletePipeline: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/pipelines/${name}`),
+  runPipeline: (name: string) => api.post<PipelineRun>(`${CONNECTIVITY_URL}/pipelines/${name}/run`),
+  listPipelineRuns: (name: string) => api.get<PipelineRun[]>(`${CONNECTIVITY_URL}/pipelines/${name}/runs`),
 };

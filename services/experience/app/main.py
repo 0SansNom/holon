@@ -14,16 +14,18 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from holon_common import (
+    HolonError,
     CircuitBreaker,
     CircuitBreakerOpenError,
     InvalidURNError,
     Principal,
     active_jwt,
+    assert_production_posture,
     build_urn,
     configure_json_logging,
     create_pool,
@@ -35,6 +37,13 @@ from holon_common import (
     make_principal_dependency,
     parse_urn,
     retry_with_backoff,
+    run_migrations,
+)
+from holon_common.audit import clear_durable_audit_hooks, emit_audit
+from holon_common.audit_store import (
+    ensure_schema as ensure_audit_schema,
+    install_durable_audit,
+    list_events_page,
 )
 from holon_common.authz import PermissionClient
 
@@ -51,7 +60,7 @@ TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
-OTLP_ENDPOINT = os.environ["HOLON_OTLP_ENDPOINT"]
+OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 
 SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
 SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
@@ -60,14 +69,15 @@ SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 
 WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 
-# the single seeded agent identity every `agentApp` session runs
-# under (same URN Identity's seed data and Intelligence's own
-# `AGENT_URN` already use) — a human principal never holds this
-# identity's credentials directly, so Experience mints a short-lived
-# token for it on the caller's behalf, same trust level every other
-# `HOLON_JWT_SECRET`-holding service already extends itself (Knowledge's
-# `_identity_validation_token`, Connectivity's `_function_invocation_token`).
 AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
+
+
+def _allow_dev_login() -> bool:
+    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "true").lower() in {"1", "true", "yes"}
+
+
+def _intelligence_enabled() -> bool:
+    return os.environ.get("HOLON_INTELLIGENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 
 def _agent_app_session_token(on_behalf_of_urn: str) -> str:
@@ -85,15 +95,12 @@ _TIMEOUT_SECONDS = 5.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Bulkhead: one long-lived client with a capped connection
-    # pool, not a throwaway `httpx.AsyncClient()` per proxied request.
+    assert_production_posture(service_name=SERVICE_NAME)
     app.state.client = httpx.AsyncClient(
         timeout=_TIMEOUT_SECONDS, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
     )
     app.state.breaker = CircuitBreaker(name="experience-proxy", failure_threshold=5, cooldown_seconds=30.0)
 
-    # Experience database (application_builder.py).
-    # Application definitions are owned by Experience.
     app.state.pool = await create_pool(DB_URL)
     async with app.state.pool.acquire() as conn:
         await application_builder.ensure_schema(conn)
@@ -101,11 +108,12 @@ async def lifespan(app: FastAPI):
         await resource_tags.ensure_schema(conn)
         await project_pins.ensure_schema(conn)
         await resource_collections.ensure_schema(conn)
+        await ensure_audit_schema(conn)
+    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
-    # Applications used to have zero ReBAC enforcement (any authenticated
-    # principal could read/write any application) — same hardening
-    # `object_type` already has. `write_schema` is idempotent, safe to call
-    # on every startup regardless of which service wrote it last.
+    clear_durable_audit_hooks()
+    install_durable_audit(app.state.pool)
+
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
     async def _seed_application_authz() -> None:
@@ -231,21 +239,45 @@ async def config() -> dict:
         "workspace_id": WORKSPACE_ID,
         "default_user_urn": f"hl:{TENANT_ID}:global:user:jdoe",
         "customer_object_type_urn": f"hl:{TENANT_ID}:{WORKSPACE_ID}:object-type:Customer",
+        "allow_dev_login": _allow_dev_login(),
+        "intelligence_enabled": _intelligence_enabled(),
     }
+
+
+@app.get("/api/audit-events")
+async def list_experience_audit_events(
+    principal: Principal = Depends(current_principal),
+    category: Optional[str] = None,
+    action: Optional[str] = None,
+    actor: Optional[str] = None,
+    outcome: Optional[str] = None,
+    pageSize: Optional[int] = None,
+    pageToken: Optional[str] = None,
+) -> dict:
+    """Durable Experience audit (applications, collections, UI plugins)."""
+    await _authorize_workspace(principal, "approve")
+    return await list_events_page(
+        app.state.pool,
+        principal.tenant_id,
+        category=category,
+        action=action,
+        actor_urn=actor,
+        outcome=outcome,
+        page_size=50 if pageSize is None else pageSize,
+        page_token=pageToken,
+    )
 
 
 @app.post("/api/token")
 async def mint_token(request: TokenRequest, principal: Principal = Depends(current_principal)) -> Response:
-    """Identity's `/token` has required a `client_secret` since increment
-    #13 (closing the "mint a token for any URN, no check at all" gap) —
-    this legacy proxy derives one server-side using the same
-    deterministic dev-only convention every test file already computes
-    independently (`seed.client_secret_for`: `f"{local_name}-dev-secret"`).
-    It may only refresh the already-authenticated caller's own identity;
-    accepting an arbitrary URN here would be an impersonation endpoint.
+    """Dev-only token mint helper — derives `*-dev-secret` server-side.
+    Disabled when `HOLON_ALLOW_DEV_LOGIN` is false. Prefer Identity
+    `/login` (cookie session) or OIDC.
     """
+    if not _allow_dev_login():
+        raise HolonError.forbidden('PrincipalDisabled', "demo token proxy disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",)
     if request.principal_urn != principal.urn:
-        raise HTTPException(status_code=403, detail="cannot mint a token for another principal")
+        raise HolonError.forbidden('ForbiddenMint', "cannot mint a token for another principal")
     local_name = request.principal_urn.rsplit(":", 1)[-1]
     client_secret = f"{local_name}-dev-secret"
     return await _proxy(
@@ -255,19 +287,27 @@ async def mint_token(request: TokenRequest, principal: Principal = Depends(curre
 
 @app.get("/api/customers")
 async def list_customers(request: Request) -> Response:
-    return await _proxy("GET", f"{KNOWLEDGE_URL}/objects/Customer", authorization=request.headers.get("authorization"))
+    return await _proxy(
+        "GET",
+        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/Customer",
+        authorization=request.headers.get("authorization"),
+    )
 
 
 @app.get("/api/lineage/{urn:path}")
 async def get_lineage(urn: str, request: Request) -> Response:
-    return await _proxy("GET", f"{KNOWLEDGE_URL}/lineage/{urn}", authorization=request.headers.get("authorization"))
+    return await _proxy(
+        "GET",
+        f"{KNOWLEDGE_URL}/api/holon/lineage/{urn}",
+        authorization=request.headers.get("authorization"),
+    )
 
 
 @app.get("/api/customers/{customer_id}/orders")
 async def get_customer_orders(customer_id: int, request: Request) -> Response:
     return await _proxy(
         "GET",
-        f"{KNOWLEDGE_URL}/objects/Customer/{customer_id}/orders",
+        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/Customer/{customer_id}/orders",
         authorization=request.headers.get("authorization"),
     )
 
@@ -276,7 +316,7 @@ async def get_customer_orders(customer_id: int, request: Request) -> Response:
 async def put_customer_on_credit_hold(customer_id: int, body: CreditHoldRequest, request: Request) -> Response:
     return await _proxy(
         "POST",
-        f"{KNOWLEDGE_URL}/objects/Customer/{customer_id}/actions/putOnCreditHold",
+        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/Customer/{customer_id}/actions/putOnCreditHold",
         authorization=request.headers.get("authorization"),
         json=body.model_dump(),
     )
@@ -286,8 +326,8 @@ class ApplicationDefinitionRequest(BaseModel):
     definition: dict[str, Any]
 
 
-def _application_not_found(name: str) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no application named {name!r}")
+def _application_not_found(name: str) -> HolonError:
+    return HolonError.not_found("ApplicationNotFound", f"no application named {name!r}", name=name)
 
 
 async def _authorize_resource(principal: Principal, resource_type: str, urn: str, permission: str) -> None:
@@ -295,7 +335,7 @@ async def _authorize_resource(principal: Principal, resource_type: str, urn: str
         principal, resource_type=resource_type, resource_urn=urn, permission=permission,
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 async def _authorize_application(principal: Principal, urn: str, permission: str) -> None:
@@ -347,10 +387,10 @@ def _resource_authz_type(urn: str) -> str:
     try:
         parsed = parse_urn(urn)
     except InvalidURNError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('SourceValidationFailed', str(exc)) from exc
     resource_type = _RESOURCE_AUTHZ_TYPE.get(parsed.type)
     if resource_type is None:
-        raise HTTPException(status_code=400, detail=f"tagging isn't supported for resource type {parsed.type!r}")
+        raise HolonError.invalid_argument('UnsupportedResourceType', f"tagging isn't supported for resource type {parsed.type!r}")
     return resource_type
 
 
@@ -367,7 +407,7 @@ async def _filter_readable_resource_urns(principal: Principal, resource_urns: li
     for resource_urn in resource_urns:
         try:
             resource_type = _resource_authz_type(resource_urn)
-        except HTTPException:
+        except HolonError:
             continue
         decision = await app.state.authz.authorize(
             principal, resource_type=resource_type, resource_urn=resource_urn, permission="read",
@@ -406,7 +446,7 @@ async def create_or_update_application(
             principal, resource_type="workspace", resource_urn=WORKSPACE_URN, permission="write",
         )
         if not decision.allowed:
-            raise HTTPException(status_code=403, detail=decision.reason)
+            raise HolonError.forbidden("PermissionDenied", decision.reason)
 
     authorization = http_request.headers.get("authorization", "")
     try:
@@ -422,13 +462,24 @@ async def create_or_update_application(
             authorization=authorization,
         )
     except application_builder.InvalidApplicationDefinition as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ExperienceValidationFailed', str(exc)) from exc
 
     if existing is None:
         await app.state.authz.write_relationship(
             resource_type="application", resource_urn=urn, relation="parent_workspace",
             subject_type="workspace", subject_urn=WORKSPACE_URN,
         )
+    emit_audit(
+        category="access",
+        action="experience.application.saved",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="application",
+        resource_urn=urn,
+        extra={"created": existing is None, "name": name},
+    )
     return result
 
 
@@ -575,8 +626,10 @@ async def _authorize_workspace(principal: Principal, permission: str) -> None:
     await _authorize_resource(principal, "workspace", WORKSPACE_URN, permission)
 
 
-def _collection_not_found(collection_id: int) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no collection with id {collection_id}")
+def _collection_not_found(collection_id: int) -> HolonError:
+    return HolonError.not_found(
+        "CollectionNotFound", f"no collection with id {collection_id}", collection_id=collection_id
+    )
 
 
 class CreateCollectionRequest(BaseModel):
@@ -588,7 +641,7 @@ class CreateCollectionRequest(BaseModel):
 async def create_collection(body: CreateCollectionRequest, principal: Principal = Depends(current_principal)) -> dict:
     await _authorize_workspace(principal, "write")
     if await resource_collections.get_collection_by_name(app.state.pool, tenant_id=principal.tenant_id, name=body.name):
-        raise HTTPException(status_code=409, detail=f"a collection named {body.name!r} already exists")
+        raise HolonError.conflict('CollectionAlreadyExists', f"a collection named {body.name!r} already exists")
     return await resource_collections.create_collection(
         app.state.pool, tenant_id=principal.tenant_id, name=body.name, description=body.description,
         created_by_urn=principal.urn,
@@ -680,7 +733,7 @@ async def promote_application(
     await _get_application_or_404(name, principal, permission="write")
     authorization = http_request.headers.get("authorization", "")
     try:
-        return await application_builder.promote(
+        result = await application_builder.promote(
             app.state.pool,
             app.state.client,
             tenant_id=principal.tenant_id,
@@ -690,7 +743,19 @@ async def promote_application(
             authorization=authorization,
         )
     except application_builder.InvalidApplicationDefinition as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ExperienceValidationFailed', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="experience.application.promoted",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="application",
+        resource_urn=application_builder.application_urn(principal.tenant_id, WORKSPACE_ID, name),
+        extra={"name": name},
+    )
+    return result
 
 
 async def _get_application_or_404(name: str, principal: Principal, *, permission: str = "read") -> dict:
@@ -707,19 +772,42 @@ async def _get_application_or_404(name: str, principal: Principal, *, permission
     return application
 
 
+def _upstream_detail(body: Any) -> str:
+    if isinstance(body, dict) and "detail" in body:
+        return str(body["detail"])
+    return str(body)
+
+
 @app.get("/api/applications/{name}/data")
 async def application_list_data(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
-) -> Response:
+) -> Any:
     """The 'object app' surface's list view: reads through Knowledge's
-    permission-gated `/objects/{type}` endpoint using the caller's token.
+    permission-gated `/objects/{type}` (or `/object-sets/{name}/objects`
+    when the surface declares an Object Set filter) using the caller's token.
     """
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no objectApp surface")
+    authorization = http_request.headers.get("authorization")
+    object_set = application_builder.resolve_object_app_object_set(application)
+    if object_set:
+        status_code, body = await _get_json(
+            f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objectSets/{object_set}/objects", authorization=authorization
+        )
+        if status_code != 200:
+            raise HolonError.from_http(status_code, _upstream_detail(body), error_name="UpstreamError")
+        if not isinstance(body, dict):
+            raise HolonError.from_http(502, "unexpected object-set evaluate response", error_name='UpstreamBadResponse')
+        if body.get("object_type") != object_type:
+            raise HolonError.invalid_argument('ObjectSetEvaluateFailed', (
+                    f"object set {object_set!r} targets {body.get('object_type')!r}, "
+                    f"not application ObjectType {object_type!r}"),
+            )
+        return body.get("data", body.get("items", []))
     return await _proxy(
-        "GET", f"{KNOWLEDGE_URL}/objects/{object_type}", authorization=http_request.headers.get("authorization")
+        "GET", f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{object_type}", authorization=authorization
     )
 
 
@@ -730,10 +818,10 @@ async def application_detail_data(
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no objectApp surface")
     return await _proxy(
         "GET",
-        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}",
+        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{object_type}/{instance_id}",
         authorization=http_request.headers.get("authorization"),
     )
 
@@ -748,41 +836,29 @@ async def application_invoke_action(
 ) -> Response:
     """An application can only invoke an Action it explicitly declared in `actionRefs`.
 
-    Knowledge's own two invocation shapes disagree on what belongs in the
-    URL: the two hardcoded Customer routes (`routers/actions.py`) are
-    keyed by local name, but the generic route
-    (`routers/objects/generic.py`) — every declarative Action Type,
-    which is the common case for a self-serve ObjectType — is keyed by
-    the full dotted name it's actually registered under. `parameters`
-    presence is the same is-this-declarative discriminator
-    `libs/holon_osdk/schema.py` and `ObjectDetailPage.tsx` already use
-    for the identical decision; this proxy needs to make it too, or
-    every declarative Action invoked through an Object App 404s as
-    "unknown Action Type" (confirmed: `nullifyId`, a real declarative
-    Action Type with zero parameters, hit exactly this against a
-    self-serve ObjectType before this fix).
+    Every Action Type is declarative, so the generic
+    `/objects/{object_type}/{id}/actions/{full_name}` route (keyed by the
+    full dotted name) is the only shape to proxy to.
     """
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no objectApp surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no objectApp surface")
     if not application_builder.is_action_declared(application, object_type, action_name):
-        raise HTTPException(
-            status_code=403, detail=f"application {name!r} did not declare {object_type}.{action_name}"
+        raise HolonError.forbidden(
+            "ActionNotInApplication",
+            f"application {name!r} did not declare {object_type}.{action_name}",
+            application=name,
+            object_type=object_type,
+            action_name=action_name,
         )
 
     authorization = http_request.headers.get("authorization")
-    actions_status, actions = await _get_json(f"{KNOWLEDGE_URL}/actions", authorization=authorization)
     full_name = f"{object_type}.{action_name}"
-    is_declarative = actions_status == 200 and any(
-        a.get("name") == full_name and "parameters" in a for a in actions
-    )
-    upstream_action_name = full_name if is_declarative else action_name
-
     body = await http_request.json()
     return await _proxy(
         "POST",
-        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{upstream_action_name}",
+        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{object_type}/{instance_id}/actions/{full_name}",
         authorization=authorization,
         json=body,
     )
@@ -793,27 +869,64 @@ async def application_dashboard(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
     """The **dashboard** surface — a page of read-only widgets,
-    each bound to an ObjectType.
+    each bound to an ObjectType and optionally narrowed by an Object Set.
     """
     application = await _get_application_or_404(name, principal)
     authorization = http_request.headers.get("authorization")
     widgets_out = []
     for widget in application_builder.get_dashboard_widgets(application):
-        status_code, body = await _get_json(
-            f"{KNOWLEDGE_URL}/objects/{widget['objectType']}", authorization=authorization
-        )
-        if status_code != 200:
-            # `body` is whatever `_get_json` got back from upstream — usually
-            # already a flat `{"detail": "..."}`, but proxying it verbatim as
-            # `detail=body` would nest it (`{"detail": {"detail": "..."}}`)
-            # instead of matching every other error response's flat shape.
-            detail = body["detail"] if isinstance(body, dict) and "detail" in body else str(body)
-            raise HTTPException(status_code=status_code, detail=detail)
-        rows = body if isinstance(body, list) else []
+        object_set = widget.get("objectSet")
+        if object_set:
+            status_code, body = await _get_json(
+                f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objectSets/{object_set}/objects", authorization=authorization
+            )
+            if status_code != 200:
+                raise HolonError.from_http(status_code, _upstream_detail(body), error_name="UpstreamError")
+            if not isinstance(body, dict):
+                raise HolonError.from_http(502, "unexpected object-set evaluate response", error_name='UpstreamBadResponse')
+            declared_type = widget.get("objectType")
+            if declared_type and body.get("object_type") != declared_type:
+                raise HolonError.invalid_argument('ObjectSetEvaluateFailed', (
+                        f"object set {object_set!r} targets {body.get('object_type')!r}, "
+                        f"not widget ObjectType {declared_type!r}"),
+                )
+            rows = body.get("data", []) if isinstance(body.get("data"), list) else (
+                body.get("items", []) if isinstance(body.get("items"), list) else []
+            )
+        else:
+            status_code, body = await _get_json(
+                f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{widget['objectType']}", authorization=authorization
+            )
+            if status_code != 200:
+                # `body` is whatever `_get_json` got back from upstream — usually
+                # already a flat `{"detail": "..."}`, but proxying it verbatim as
+                # `detail=body` would nest it (`{"detail": {"detail": "..."}}`)
+                # instead of matching every other error response's flat shape.
+                raise HolonError.from_http(status_code, _upstream_detail(body), error_name="UpstreamError")
+            if isinstance(body, dict):
+                rows = body.get("data") if isinstance(body.get("data"), list) else (
+                    body.get("items") if isinstance(body.get("items"), list) else []
+                )
+            else:
+                rows = body if isinstance(body, list) else []
         if widget["component"] == "kpi":
-            widgets_out.append({"label": widget.get("label"), "component": "kpi", "value": len(rows)})
+            widgets_out.append(
+                {
+                    "label": widget.get("label"),
+                    "component": "kpi",
+                    "value": len(rows),
+                    "objectSet": object_set,
+                }
+            )
         elif widget["component"] == "table":
-            widgets_out.append({"label": widget.get("label"), "component": "table", "rows": rows})
+            widgets_out.append(
+                {
+                    "label": widget.get("label"),
+                    "component": "table",
+                    "rows": rows,
+                    "objectSet": object_set,
+                }
+            )
         else:
             plugin_registration = await ui_component_registry.get_component_registration_by_name(
                 app.state.pool, widget["component"]
@@ -823,6 +936,7 @@ async def application_dashboard(
                     "label": widget.get("label"),
                     "component": widget["component"],
                     "rows": rows,
+                    "objectSet": object_set,
                     "iframeUrl": plugin_registration["manifest"]["iframe_url"] if plugin_registration else None,
                 }
             )
@@ -847,16 +961,19 @@ async def application_analytics_execute(
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_analytics_object_type(application)
     if object_type is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no analytics surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no analytics surface")
 
     body = await http_request.json()
     if body.get("object_type") != object_type:
-        raise HTTPException(
-            status_code=403,
-            detail=f"application {name!r}'s analytics surface is scoped to {object_type!r}, not {body.get('object_type')!r}",
+        raise HolonError.forbidden(
+            "AnalyticsObjectTypeMismatch",
+            f"application {name!r}'s analytics surface is scoped to {object_type!r}, not {body.get('object_type')!r}",
+            application=name,
+            expected_object_type=object_type,
+            got_object_type=body.get("object_type"),
         )
     return await _proxy(
-        "POST", f"{KNOWLEDGE_URL}/execute", authorization=http_request.headers.get("authorization"), json=body
+        "POST", f"{KNOWLEDGE_URL}/api/holon/execute", authorization=http_request.headers.get("authorization"), json=body
     )
 
 
@@ -872,9 +989,9 @@ async def application_analytics_replay(
     """
     application = await _get_application_or_404(name, principal)
     if application_builder.resolve_analytics_object_type(application) is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no analytics surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no analytics surface")
     return await _proxy(
-        "POST", f"{KNOWLEDGE_URL}/execute/{plan_hash}/replay", authorization=http_request.headers.get("authorization")
+        "POST", f"{KNOWLEDGE_URL}/api/holon/execute/{plan_hash}/replay", authorization=http_request.headers.get("authorization")
     )
 
 
@@ -885,7 +1002,7 @@ async def get_application_form(name: str, principal: Principal = Depends(current
     application = await _get_application_or_404(name, principal)
     form = application_builder.get_form_surface(application)
     if form is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no form surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no form surface")
     return {"action": form["action"], "fields": form["fields"]}
 
 
@@ -898,18 +1015,18 @@ async def submit_application_form(
     application = await _get_application_or_404(name, principal)
     form = application_builder.get_form_surface(application)
     if form is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no form surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no form surface")
 
     submitted = await http_request.json()
     try:
         application_builder.validate_form_submission(form, submitted)
     except application_builder.FormValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ExperienceValidationFailed', str(exc)) from exc
 
     object_type, local_action_name = form["action"].split(".", 1)
     return await _proxy(
         "POST",
-        f"{KNOWLEDGE_URL}/objects/{object_type}/{instance_id}/actions/{local_action_name}",
+        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{object_type}/{instance_id}/actions/{local_action_name}",
         authorization=http_request.headers.get("authorization"),
         json=submitted,
     )
@@ -930,7 +1047,7 @@ async def create_application_agent_session(name: str, principal: Principal = Dep
     application = await _get_application_or_404(name, principal)
     agent_app = application_builder.resolve_agent_app_config(application)
     if agent_app is None:
-        raise HTTPException(status_code=400, detail=f"application {name!r} declares no agentApp surface")
+        raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no agentApp surface")
 
     token = _agent_app_session_token(principal.urn)
     status_code, body = await _post_json(
@@ -967,7 +1084,7 @@ async def run_application_agent_session_turn(
     await _get_application_or_404(name, principal)
     owner_urn = await application_builder.get_agent_app_session_owner(app.state.pool, session_urn)
     if owner_urn is None or owner_urn != principal.urn:
-        raise HTTPException(status_code=404, detail=f"no agent session {session_urn!r} found for this application")
+        raise HolonError.not_found('AgentSessionNotFound', f"no agent session {session_urn!r} found for this application")
 
     token = _agent_app_session_token(principal.urn)
     body = await http_request.json()
@@ -995,11 +1112,15 @@ async def register_ui_component_plugin(
     try:
         return await ui_component_registry.register_ui_component_plugin(app.state.pool, entry_point=body.entry_point)
     except ui_component_registry.PluginConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('PluginConflict', str(exc)) from exc
 
 
-def _ui_component_plugin_not_found(name: str) -> HTTPException:
-    return HTTPException(status_code=404, detail=f"no UI component plugin registered as {name!r}")
+def _ui_component_plugin_not_found(name: str) -> HolonError:
+    return HolonError.not_found(
+        "UiComponentPluginNotFound",
+        f"no UI component plugin registered as {name!r}",
+        name=name,
+    )
 
 
 @app.get("/ui-component-plugins/{name}")

@@ -1,7 +1,10 @@
-pytest==9.0.3
+# CI uses Python 3.11; keep a floor that still installs on 3.9 host toolchains.
+pytest>=8.3,<10
 pyjwt==2.13.0
 fastapi>=0.110
 pydantic>=2,<3
 aiokafka>=0.10
 asyncpg>=0.29
 prometheus-client>=0.20
+cryptography>=42
+httpx>=0.27

@@ -15,7 +15,7 @@ live stack, not mocked: masking is verified to actually strip
 confidential fields for an unauthorized principal, not just labeled as
 enforced; event-sourcing convergence is polled for and confirmed, not
 assumed; the no-code connector and self-serve ObjectType creation are
-exercised end to end. 332 integration tests, no unit-test theater.
+exercised end to end.
 
 It is **not** production-ready as-is. Scope is **OSS self-host** (see
 [ADR 026](docs/adr/026-oss-self-host-scope.md)): we ship branchable
@@ -26,24 +26,38 @@ multi-customer hosting is not.
 Known gaps, in the order they'd actually bite for a self-hosting
 enterprise:
 
-- **Runtime still bootstraps a single tenant** (`HOLON_TENANT_ID`) for
-  demo fixtures (connectors / seeded ObjectTypes). Multi-org APIs
-  (`POST /tenants|/workspaces|/principals`), JWT tenant binding, and
-  `require_urn_tenant_match` on Knowledge ObjectType paths are in; filiale
-  tenants must provision their own sources/ontology (bootstrap Iceberg
-  demos stay on the bootstrap tenant).
-- **SSO / secrets** — OIDC client + pluggable `SecretProvider` + JWT
-  `kid` rotation land in-tree; running Vault/IdP for the customer is not.
-  Prefer connector `secret_ref` over plaintext headers.
-- **No load testing at real scale.** Everything here has only ever run
-  on a 2-CPU/4GB local VM; two real missing-timeout bugs (S3, Qdrant)
-  were found there, under trivial load, not synthetic production
-  traffic.
-- **Operator pack** — see `docs/ops/`, `SECURITY.md`, Helm under
-  `deploy/helm/holon/`, and `.github/workflows/publish.yml` for OCI+SBOM.
-  Customer ArgoCD/Flux remains theirs.
-Services expose `/metrics` (Prometheus text) and OTLP traces; point
-your own observability stack at them (see `docs/ops/deploy.md`).
+- **Empty instance only** — Identity bootstraps one admin + tenant/workspace
+  from env (`HOLON_TENANT_ID` / `HOLON_WORKSPACE_ID`, default workspace
+  `main`); no bundled demo. Ontology, connectors, and extra principals
+  are created through APIs (or CI fixtures — see
+  [docs/ops/seed-data.md](docs/ops/seed-data.md)).
+- **SSO / secrets / JWT ops** — OIDC + `SecretProvider` + JWT `kid`
+  rotation and optional RS256 (`make gen-jwt-rsa`,
+  `HOLON_JWT_REQUIRE_ASYMMETRIC`) are in-tree; Vault/IdP wiring and
+  key custody are yours. Prefer connector `secret_ref`.
+- **Intelligence is experimental** — leave
+  `HOLON_INTELLIGENCE_ENABLED=false` in prod (posture-enforced). Joblib
+  model upload and tool-plugin register are refused in production;
+  tool-plugin `entry_point`s are prefix-allowlisted. Prefer
+  `HOLON_LLM_PROVIDER=fake` locally; set
+  `services.intelligence.runtimeClassName` (gVisor) in Helm.
+- **Capacity & HA are yours.** CI is compose HTTP pytest;
+  `make smoke-load` is a light probe only — no soak/chaos suite.
+  Enable `HOLON_SERVING_STORE_REQUIRE_MATERIALIZED` in prod (posture +
+  Helm overlay). Backup/DR tooling and HA data-plane are **your** SI.
+- **Operator pack** — runbooks in `docs/ops/` (deploy, backup-restore,
+  seed-data, observability), [`SECURITY.md`](SECURITY.md), Helm under
+  `deploy/helm/holon/`, Prometheus artefacts under `deploy/observability/`,
+  API overview in [`docs/api/overview.md`](docs/api/overview.md),
+  API error contract in [`docs/api/errors.md`](docs/api/errors.md),
+  `.github/workflows/publish.yml` for OCI+SBOM.
+
+Services expose `/metrics` (Prometheus text) and optional OTLP traces
+(`HOLON_OTLP_ENDPOINT`; unset = tracing off). SLO recording rules, alerts,
+and a Grafana dashboard live under `deploy/observability/` (optional Helm
+`ServiceMonitor` / `PrometheusRule`) — see
+[`docs/ops/observability.md`](docs/ops/observability.md). Point your own
+observability stack at them.
 
 ## What's here
 
@@ -72,6 +86,22 @@ cp .env.example .env   # fill in real values — never commit .env
 docker compose up -d --build   # or `make up`
 ```
 
+After a **fresh** volume set, Identity creates tenant `acme`, workspace
+`main`, and bootstrap admin `hl:acme:global:user:admin`. With
+`HOLON_ALLOW_DEV_LOGIN=true` (compose default), sign in as that URN with
+secret `admin-dev-secret` (UI at `http://localhost:8004`, or Vite below).
+In production set `HOLON_BOOTSTRAP_ADMIN_SECRET` and
+`HOLON_ALLOW_DEV_LOGIN=false` — see [docs/ops/seed-data.md](docs/ops/seed-data.md).
+
+The platform starts **without** demo ObjectTypes or connectors. Create
+them via the APIs, or for local/CI only:
+
+```bash
+make provision-test-fixtures   # principals / plugins / ObjectTypes via HTTP
+make seed                      # raw rows into external source_erp
+# then POST /sync (CI does this; see .github/workflows/tests.yml)
+```
+
 The frontend is served by `experience` at `http://localhost:8004`. For
 frontend-only iteration against the real backend (faster reload):
 
@@ -81,21 +111,31 @@ npm install
 npm run dev   # http://localhost:5173, CORS to the services above
 ```
 
-`intelligence` needs `ANTHROPIC_API_KEY` (and `VOYAGE_API_KEY` if
-`HOLON_EMBEDDING_PROVIDER=voyage`) in `.env` — real, funded keys, added by
-you directly.
+### Intelligence (optional)
+
+- Default local: leave `HOLON_INTELLIGENCE_ENABLED` unset/true and set
+  `HOLON_LLM_PROVIDER=fake` for no API spend (compose CI does this).
+- Real models: put funded `ANTHROPIC_API_KEY` (and `VOYAGE_API_KEY` if
+  `HOLON_EMBEDDING_PROVIDER=voyage`) in `.env`, set
+  `HOLON_LLM_PROVIDER=anthropic`.
+- Spend caps: `HOLON_INTELLIGENCE_RPM`,
+  `HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA` (see `.env.example`).
 
 ## Tests
 
+Layout: [`tests/README.md`](tests/README.md) — `tests/unit/` (no stack) and
+`tests/integration/{service}/` (compose HTTP).
+
 ```bash
 pip install -r tests/requirements.txt
-python3 -m pytest -q tests -m "not llm"   # excludes tests that make real, metered LLM calls
-python3 -m pytest -q tests -m llm         # only those, against a stack with real API keys configured
+make test-unit                            # fast; no compose
+python3 -m pytest -q -m "not llm" tests   # full suite; needs stack
+python3 -m pytest -q -m llm tests         # needs real keys + stack
 ```
 
-Black-box: every test talks to the running stack over HTTP, no service
-internals imported (except `test_module_boundaries.py`, a static
-`ast`-based check that needs no running stack at all).
+PR CI runs unit first (no stack), then compose e2e with
+`HOLON_LLM_PROVIDER=fake`, excluding metered LLM tests. Nightly metered
+agent runs live in `.github/workflows/llm-nightly.yml`.
 
 ## License
 

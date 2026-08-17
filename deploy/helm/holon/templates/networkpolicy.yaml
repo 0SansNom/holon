@@ -1,0 +1,120 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: holon-default
+  labels:
+    app.kubernetes.io/name: holon
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: holon
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Intra-namespace service mesh / pod-to-pod
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: holon
+    # Ingress controller (broad; tighten to your controller labels)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Prometheus scrape of /metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.metricsNamespace | default "monitoring" | quote }}
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-namespace (service-to-service)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: holon
+    # Data-plane CIDRs (Postgres, Kafka, S3, SpiceDB, …). Empty = open
+    # non-RFC1918 egress so a fresh overlay still boots; lock down in
+    # values-production with real CIDRs.
+    {{- $cidrs := .Values.networkPolicy.dataPlaneCidrs | default list }}
+    {{- if $cidrs }}
+    {{- range $cidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+    {{- end }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+    {{- end }}
+---
+# Intelligence needs HTTPS egress to LLM / embedding providers
+# (Anthropic, Voyage). Vanilla NetworkPolicy has no FQDN match — use
+# CIDRs when known, otherwise public HTTPS (non-RFC1918 :443).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: holon-intelligence-llm-egress
+  labels:
+    app.kubernetes.io/name: holon
+    app.kubernetes.io/component: intelligence
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: holon
+      app.kubernetes.io/component: intelligence
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: holon
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- $llmCidrs := .Values.networkPolicy.intelligence.llmEgressCidrs | default list }}
+    {{- if $llmCidrs }}
+    {{- range $llmCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- else if .Values.networkPolicy.intelligence.allowPublicHttps | default true }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}

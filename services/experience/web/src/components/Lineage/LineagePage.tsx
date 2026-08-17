@@ -1,8 +1,8 @@
 import { useMemo, useState, type CSSProperties } from "react";
-import { useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import ReactFlow, { Background, Controls, MarkerType, type Edge, type Node } from "reactflow";
 import "reactflow/dist/style.css";
-import { Icon, type IconName } from "@blueprintjs/core";
+import { Button, Icon, type IconName } from "@blueprintjs/core";
 import { useLineage } from "../../api/hooks";
 import { DetailPage, PageSection } from "../common/PageLayout";
 import type { LineageEdge } from "../../api/knowledge";
@@ -150,14 +150,17 @@ export function LineagePage() {
   }, [edges, decodedUrn]);
 
   const rootKind = urnKind(decodedUrn);
-  const backTarget = rootKind === "object-type" ? shortName(decodedUrn) : null;
-  const breadcrumbs = backTarget
+  const objectTypeName = rootKind === "object-type" ? shortName(decodedUrn) : null;
+  const fromCatalog = rootKind === "dataset-version" || rootKind === "dataset";
+  const breadcrumbs = objectTypeName
     ? [
         { label: "Objects", to: "/objects" as const },
-        { label: backTarget, to: "/objects/$type" as const, params: { type: backTarget } },
+        { label: objectTypeName, to: "/objects/$type" as const, params: { type: objectTypeName } },
         { label: "Lineage" },
       ]
-    : [{ label: "Lineage" }];
+    : fromCatalog
+      ? [{ label: "Catalog", to: "/catalog" as const }, { label: "Lineage" }]
+      : [{ label: "Lineage" }];
 
   return (
     <DetailPage breadcrumbs={breadcrumbs} title="Lineage">
@@ -190,6 +193,15 @@ export function LineagePage() {
               <Stat value={flowEdges.length} label={flowEdges.length === 1 ? "edge" : "edges"} />
               {propertyCount > 0 && <Stat value={propertyCount} label="properties mapped" />}
             </div>
+            {objectTypeName && (
+              <div className="hl-mt-sm">
+                <Link to="/ontology/object-types/$name" params={{ name: objectTypeName }}>
+                  <Button small icon="cog" fill>
+                    Configure object type
+                  </Button>
+                </Link>
+              </div>
+            )}
           </PageSection>
 
           <PageSection title="Legend">
@@ -219,6 +231,15 @@ export function LineagePage() {
                 <div className="hl-mono" style={{ fontSize: 11.5, color: "var(--hl-text)", wordBreak: "break-all" }}>
                   {selection.urn}
                 </div>
+                {urnKind(selection.urn) === "object-type" && (
+                  <div className="hl-mt-sm">
+                    <Link to="/ontology/object-types/$name" params={{ name: shortName(selection.urn) }}>
+                      <Button small icon="cog" fill>
+                        Configure object type
+                      </Button>
+                    </Link>
+                  </div>
+                )}
               </div>
             )}
 

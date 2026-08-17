@@ -1,10 +1,4 @@
-"""Instance timeline — a leaf module, no dependency on either dispatch
-path (`hardcoded.py`/`declarative.py`), same convention `approval.py`
-already follows. Purely reads `action_invocation`/`action_approval`,
-both already written from the single shared `_apply_now`/`approve_action`
-code path in `__init__.py` — nothing new is captured here, this just
-exposes history that already exists.
-"""
+"""Instance timeline read model."""
 
 from __future__ import annotations
 
@@ -21,11 +15,6 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
         tenant_id, instance_urn,
     )
 
-    # `revert_declarative_action` also refuses an Action with a
-    # `writeback_dataset` (the external write can't be undone) — folded
-    # in here too, not just enforced at revert time, so the "Undo" button
-    # never appears somewhere it's guaranteed to 400. One `ontology`
-    # lookup per distinct action name touched, not per row.
     from .. import ontology
 
     writeback_action_names: set[str] = set()
@@ -51,13 +40,6 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
             "reason": row["reason"],
             "at": row["at"],
             "id": row["id"],
-            # `has_edits` is what actually blocks reverting an *earlier*
-            # invocation (`revert_declarative_action`'s own "a later edit
-            # exists" check doesn't care whether that later edit is
-            # itself revertible) — `revertible` is the narrower "the Undo
-            # button belongs on this exact entry" condition. Conflating
-            # them would let the frontend show Undo on an entry that
-            # can't actually block anything, or hide it from one that can.
             "has_edits": row["has_edits"],
             "revertible": row["has_edits"] and row["action_name"] not in writeback_action_names,
             "reverted": row["reverted_at"] is not None,

@@ -109,12 +109,7 @@ export function buildEditableDerived(
       return { ...base, kind: "function", functionName: value };
     }
     if (value.kind === "link_aggregate") {
-      const path =
-        value.path && value.path.length > 0
-          ? [...value.path]
-          : value.relation
-            ? [value.relation]
-            : [""];
+      const path = value.path && value.path.length > 0 ? [...value.path] : [""];
       return {
         ...base,
         kind: "link_aggregate",
@@ -164,7 +159,6 @@ export function serializeDerivedProperties(
       path,
       aggregate: prop.aggregate,
     };
-    if (path.length === 1) rule.relation = path[0];
     if (prop.aggregate !== "count" && prop.relatedProperty.trim()) {
       rule.property = prop.relatedProperty.trim();
     }

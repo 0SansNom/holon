@@ -1,0 +1,24 @@
+# Snippet for Prometheus `scrape_configs`. Adjust targets / kubernetes_sd.
+# Auth: set HOLON_METRICS_TOKEN in your secret store and reference it below.
+#
+# Compose example (static):
+#   - localhost:8001 … :8006
+# Kubernetes: prefer ServiceMonitor (Helm observability.serviceMonitor) or
+# kubernetes_sd_configs with role: endpoints.
+
+- job_name: holon
+  metrics_path: /metrics
+  scrape_interval: 30s
+  authorization:
+    type: Bearer
+    credentials: <HOLON_METRICS_TOKEN>
+  static_configs:
+    - targets:
+        - identity:8001
+        - connectivity:8002
+        - knowledge:8003
+        - experience:8004
+        - automation:8005
+        - intelligence:8006
+      labels:
+        platform: holon

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import secrets as secrets_mod
 import sys
 import time
 from typing import Any, Awaitable, Callable, Optional, Tuple, Type
@@ -103,11 +104,28 @@ def instrument_cors(app: FastAPI) -> None:
 def instrument_metrics(app: FastAPI, *, service_name: str) -> None:
     """Adds request count/latency instrumentation to every route and
     mounts `GET /metrics` in Prometheus text format.
+
+    When `HOLON_METRICS_TOKEN` is set, scrapers must send
+    `Authorization: Bearer <token>`. Leave unset only on trusted networks
+    (local compose); production Helm must set it.
     """
     app.add_middleware(_MetricsMiddleware, service_name=service_name)
+    metrics_token = (os.environ.get("HOLON_METRICS_TOKEN") or "").strip() or None
+    if metrics_token is None:
+        logger.warning(
+            "%s: HOLON_METRICS_TOKEN unset — /metrics is unauthenticated (dev only)",
+            service_name,
+        )
 
     @app.get("/metrics")
-    async def metrics() -> Response:
+    async def metrics(request: Request) -> Response:
+        if metrics_token is not None:
+            auth = request.headers.get("authorization") or ""
+            expected = f"Bearer {metrics_token}"
+            if not secrets_mod.compare_digest(auth, expected):
+                from .errors import HolonError
+
+                raise HolonError.unauthorized("MetricsUnauthorized", "metrics unauthorized")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -198,7 +216,16 @@ def instrument_tracing(app: FastAPI, *, service_name: str, otlp_endpoint: str) -
     `holon_common`'s package `__init__`, and host-side test tooling that
     only needs `EventConsumer`/`create_pool` (e.g. `tests/test_dlq.py`)
     has no reason to also require the OpenTelemetry SDK installed.
+
+    Empty / unset `otlp_endpoint` disables tracing (no exporter, no
+    connection-refused spam). Compose defaults to off; point
+    `HOLON_OTLP_ENDPOINT` at a real collector in prod.
     """
+    endpoint = (otlp_endpoint or "").strip()
+    if not endpoint:
+        logger.info("%s: HOLON_OTLP_ENDPOINT unset — tracing disabled", service_name)
+        return
+
     from opentelemetry import trace
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
@@ -209,7 +236,7 @@ def instrument_tracing(app: FastAPI, *, service_name: str, otlp_endpoint: str) -
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-    exporter = OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
+    exporter = OTLPSpanExporter(endpoint=f"{endpoint.rstrip('/')}/v1/traces")
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
 

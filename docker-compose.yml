@@ -2,20 +2,32 @@ name: holon
 
 x-app-env: &app-env
   HOLON_TENANT_ID: acme
-  HOLON_WORKSPACE_ID: demo
+  HOLON_WORKSPACE_ID: main
+  HOLON_ENV: ${HOLON_ENV:-}
   HOLON_JWT_SECRET: ${HOLON_JWT_SECRET}
   HOLON_JWT_SECRETS: ${HOLON_JWT_SECRETS:-}
   HOLON_JWT_ACTIVE_KID: ${HOLON_JWT_ACTIVE_KID:-}
+  HOLON_JWT_ALG: ${HOLON_JWT_ALG:-}
+  HOLON_JWT_PRIVATE_KEYS: ${HOLON_JWT_PRIVATE_KEYS:-}
+  HOLON_JWT_PRIVATE_KEY: ${HOLON_JWT_PRIVATE_KEY:-}
+  HOLON_JWT_PUBLIC_KEYS: ${HOLON_JWT_PUBLIC_KEYS:-}
+  HOLON_JWT_PUBLIC_KEY: ${HOLON_JWT_PUBLIC_KEY:-}
+  HOLON_JWT_REQUIRE_ASYMMETRIC: ${HOLON_JWT_REQUIRE_ASYMMETRIC:-}
   HOLON_SECRET_BACKEND: ${HOLON_SECRET_BACKEND:-env}
   HOLON_KAFKA_BOOTSTRAP: redpanda:9092
   HOLON_SPICEDB_URL: http://spicedb:8443
   HOLON_SPICEDB_PRESHARED_KEY: ${HOLON_SPICEDB_PRESHARED_KEY}
   HOLON_SPICEDB_SCHEMA_PATH: /app/spicedb-schema.zed
   HOLON_OPA_URL: http://opa:8181
-  # Point at your collector when you have one; without a listener the
-  # OTLP exporter soft-fails (logged, non-blocking) — no bundled Jaeger.
-  HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-http://127.0.0.1:4318}
-  # OIDC (identity reads these; empty issuer keeps demo secret login only).
+  # Leave unset (or empty) to disable tracing. Do NOT default to
+  # 127.0.0.1 inside containers — that address is the container itself,
+  # so every service would spam connection-refused forever.
+  HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-}
+  HOLON_ALLOW_DEV_LOGIN: ${HOLON_ALLOW_DEV_LOGIN:-true}
+  HOLON_INTELLIGENCE_ENABLED: ${HOLON_INTELLIGENCE_ENABLED:-true}
+  HOLON_LLM_PROVIDER: ${HOLON_LLM_PROVIDER:-anthropic}
+  HOLON_METRICS_TOKEN: ${HOLON_METRICS_TOKEN:-}
+  # OIDC (identity reads these; empty issuer keeps local secret login only).
   HOLON_OIDC_ISSUER: ${HOLON_OIDC_ISSUER:-}
   HOLON_OIDC_CLIENT_ID: ${HOLON_OIDC_CLIENT_ID:-}
   HOLON_OIDC_CLIENT_SECRET: ${HOLON_OIDC_CLIENT_SECRET:-}
@@ -41,7 +53,12 @@ services:
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
       - pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U holon" ]
+      # -d postgres explicit: pg_isready defaults the target database to
+      # the connecting user ("holon"), which doesn't exist — harmless to
+      # the readiness check itself (still resolves to accepting/rejecting)
+      # but spams the log with "FATAL: database holon does not exist"
+      # every interval, forever.
+      test: [ "CMD-SHELL", "pg_isready -U holon -d postgres" ]
       interval: 5s
       timeout: 5s
       retries: 15
@@ -213,6 +230,8 @@ services:
     image: opensearchproject/opensearch:2.17.0
     restart: unless-stopped
     environment:
+      # Compose-only: single-node + security plugin off. Prod = HA +
+      # security plugin (or equivalent) — docs/ops/deploy.md, SECURITY.md.
       - discovery.type=single-node
       - plugins.security.disabled=true
       - bootstrap.memory_lock=false
@@ -255,6 +274,10 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_identity
+      # Identity is the only service allowed to mint user JWTs in production.
+      HOLON_ALLOW_USER_JWT_MINT: "true"
+      # Explicit empty allowlist — Identity does not mint SA/agent tokens.
+      HOLON_MINTABLE_PRINCIPAL_URNS: ""
     volumes:
       - ./libs:/app/libs
       - ./services/identity/app:/app/app
@@ -281,7 +304,9 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_connectivity
+      HOLON_MINTABLE_PRINCIPAL_URNS: connectivity-pipeline-runner
       HOLON_SOURCE_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/source_erp
+      HOLON_ENABLE_INVENTORY_STREAM: ${HOLON_ENABLE_INVENTORY_STREAM:-false}
       HOLON_MONGO_URL: mongodb://mongodb:27017
       HOLON_REVIEWS_API_URL: http://reviews-api:8000/reviews.json
       HOLON_EXCHANGE_RATE_FEED_URL: http://reviews-api:8000/exchange_rates.json
@@ -321,6 +346,7 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_knowledge
+      HOLON_MINTABLE_PRINCIPAL_URNS: knowledge-project-validator,knowledge-model-caller
       HOLON_IDENTITY_URL: http://identity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
       HOLON_OPENSEARCH_URL: http://opensearch:9200
@@ -361,6 +387,7 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_automation
+      HOLON_MINTABLE_PRINCIPAL_URNS: automation-workflow-engine,ingest-bot
       HOLON_CONNECTIVITY_URL: http://connectivity:8000
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
@@ -389,6 +416,7 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_intelligence
+      HOLON_MINTABLE_PRINCIPAL_URNS: intelligence-indexer,ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
       HOLON_QDRANT_URL: http://qdrant:6333
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -475,6 +503,7 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_experience
+      HOLON_MINTABLE_PRINCIPAL_URNS: ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
       HOLON_IDENTITY_URL: http://identity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000

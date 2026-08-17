@@ -71,10 +71,34 @@ class KubernetesSecretProvider:
 
 
 class VaultSecretProvider:
-    """HashiCorp Vault KV v2. Uses VAULT_ADDR + VAULT_TOKEN (or
-    VAULT_ROLE_ID/VAULT_SECRET_ID for AppRole) from the environment —
-    the deployer injects those; we do not run Vault.
+    """HashiCorp Vault KV v2. Auth via ``VAULT_TOKEN`` or AppRole
+    (``VAULT_ROLE_ID`` + ``VAULT_SECRET_ID``). The deployer injects those;
+    Holon does not run Vault.
     """
+
+    def _token(self, addr: str) -> str:
+        token = os.environ.get("VAULT_TOKEN")
+        if token:
+            return token
+        role_id = os.environ.get("VAULT_ROLE_ID")
+        secret_id = os.environ.get("VAULT_SECRET_ID")
+        if not role_id or not secret_id:
+            raise RuntimeError(
+                "Vault auth requires VAULT_TOKEN or VAULT_ROLE_ID+VAULT_SECRET_ID"
+            )
+        import httpx
+
+        login_url = f"{addr.rstrip('/')}/v1/auth/approle/login"
+        response = httpx.post(
+            login_url,
+            json={"role_id": role_id, "secret_id": secret_id},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        client_token = response.json().get("auth", {}).get("client_token")
+        if not client_token:
+            raise RuntimeError("Vault AppRole login returned no client_token")
+        return str(client_token)
 
     def get(self, ref: str) -> str:
         body = ref.removeprefix("vault:")
@@ -86,9 +110,7 @@ class VaultSecretProvider:
             raise RuntimeError("VAULT_ADDR required for vault: secret refs")
         import httpx
 
-        token = os.environ.get("VAULT_TOKEN")
-        if not token:
-            raise RuntimeError("VAULT_TOKEN required for vault: secret refs")
+        token = self._token(addr)
         # KV v2: secret/data/<path>
         url = f"{addr.rstrip('/')}/v1/{path}"
         if "/data/" not in path:

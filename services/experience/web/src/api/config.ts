@@ -5,7 +5,7 @@ export const EXPERIENCE_URL = import.meta.env.VITE_EXPERIENCE_URL ?? "http://loc
 export const INTELLIGENCE_URL = import.meta.env.VITE_INTELLIGENCE_URL ?? "http://localhost:8006";
 
 export const TENANT_ID = import.meta.env.VITE_TENANT_ID ?? "acme";
-export const WORKSPACE_ID = import.meta.env.VITE_WORKSPACE_ID ?? "demo";
+export const WORKSPACE_ID = import.meta.env.VITE_WORKSPACE_ID ?? "main";
 
 export function validateConfig(): { isDevFallback: boolean; missingVars: string[] } {
   const missingVars: string[] = [];

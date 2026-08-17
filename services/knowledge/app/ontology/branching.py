@@ -186,6 +186,8 @@ async def review_branch(
         property_formats = draft.get("property_formats") or {}
         conditional_formats = draft.get("conditional_formats") or {}
         property_types = draft.get("property_types") or {}
+        link_constraint_bindings = draft.get("link_constraint_bindings") or {}
+        interface_property_bindings = draft.get("interface_property_bindings") or {}
 
         # Run validations outside the transaction — some make HTTP calls
         # (`_validate_project_scope` via httpx) and holding a DB connection
@@ -202,6 +204,8 @@ async def review_branch(
             property_formats=property_formats,
             conditional_formats=conditional_formats,
             property_types=property_types,
+            link_constraint_bindings=link_constraint_bindings,
+            interface_property_bindings=interface_property_bindings,
             identity_url=identity_url,
             identity_token=identity_token,
         )

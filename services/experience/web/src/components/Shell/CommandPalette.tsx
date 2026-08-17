@@ -31,6 +31,7 @@ const ACTIONS: Array<{ id: string; label: string; icon: IconName; intent: Palett
     to: "/ontology",
   },
   { id: "action-object-set", label: "New Object Set", icon: "add", intent: "create-object-set", to: "/ontology" },
+  { id: "action-pipeline", label: "New Pipeline", icon: "add", intent: "create-pipeline", to: "/pipelines" },
   { id: "action-project", label: "New Project", icon: "add", intent: "create-project", to: "/admin" },
   { id: "action-connect-source", label: "Connect a source", icon: "add", intent: "connect-source", to: "/sources" },
   { id: "action-connection", label: "New connection", icon: "add", intent: "create-connection", to: "/sources" },

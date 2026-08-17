@@ -13,16 +13,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel
 from pyiceberg.exceptions import NoSuchTableError
 
-from holon_common import Principal, build_urn, issue_token
+from holon_common import EventActor, EventEnvelope, HolonError, Principal, build_urn, issue_token
 
 from .. import actions, catalog, glossary, ontology, ontology_health, query_log, resolver
 from .. import core
+from .objects.paging_deps import page_response, paging_query
+from ..paging import interface_instance_key
 
 router = APIRouter()
 logger = logging.getLogger("knowledge.ontology_admin")
@@ -66,10 +69,73 @@ async def preview_dataset(name: str, principal: Principal = Depends(core.current
     try:
         rows = await asyncio.to_thread(resolver.fetch_generic, name, **core.ICEBERG_CONFIG)
     except NoSuchTableError:
-        raise HTTPException(status_code=404, detail=f"dataset {name!r} has never been synced")
+        raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced")
     if not rows:
         return {"columns": []}
     return {"columns": [{"name": key, "sample": value} for key, value in rows[0].items()]}
+
+
+class GenerateJoinDatasetRequest(BaseModel):
+    name: str
+    source_column: str
+    target_column: str
+
+
+@router.post("/catalog/join-datasets", status_code=201)
+async def generate_join_dataset(
+    request: GenerateJoinDatasetRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Foundry-style "Generate join table" — empty 2-column Iceberg bridge.
+
+    Publishes a `connectivity.sync.completed` event, same as every other
+    dataset sync — cataloguing happens in Knowledge's own bus consumer
+    (`catalog.consume_events`), not via a direct Postgres write, so the
+    projection stays reconstructible from the bus alone (no connector
+    actually ran this sync, so `connector_urn` names this feature itself
+    as the producing "connector"). Requires workspace `approve`.
+    """
+    from .. import join_datasets
+
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        result = await asyncio.to_thread(
+            join_datasets.create_empty_join_table,
+            request.name,
+            source_column=request.source_column,
+            target_column=request.target_column,
+            **core.ICEBERG_CONFIG,
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+    payload = join_datasets.catalog_payload(
+        tenant_id=principal.tenant_id, workspace_id=workspace_id, result=result
+    )
+    connector_urn = build_urn(principal.tenant_id, workspace_id, "connector", "join-dataset-generator")
+    event_id = uuid.uuid4().hex
+    await core.producer.publish(
+        EventEnvelope(
+            event_id=event_id,
+            event_type="connectivity.sync.completed",
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            aggregate_type="Connector",
+            aggregate_id=connector_urn,
+            correlation_id=event_id,
+            partition_key=f"{principal.tenant_id}/{payload['dataset_urn']}",
+            producer="knowledge-platform@0.1.0",
+            actor=EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of),
+            payload={**payload, "connector_urn": connector_urn, "source_dataset_version_urn": None},
+        )
+    )
+    return {
+        **payload,
+        "source_column": result.source_column,
+        "target_column": result.target_column,
+        "iceberg_namespace": result.namespace,
+        "iceberg_table": result.table,
+    }
 
 
 @router.get("/ontology")
@@ -87,7 +153,7 @@ async def get_ontology_health_check(principal: Principal = Depends(core.current_
     """Structural anti-pattern detection (`ontology_health.py`) — registered
     *before* `/ontology/{name}` below, or that path-param route would
     swallow the literal `health-check` segment as an ObjectType name (the
-    same route-ordering discipline `routers/objects/seeded.py`'s module
+    same route-ordering discipline `routers/objects/object_reads.py`'s module
     docstring already documents for its own literal-vs-templated routes).
     Same auth-only tier as `/ontology` — aggregated metadata and null-rate
     percentages only, never raw instance values.
@@ -103,10 +169,10 @@ async def get_ontology_definition(name: str, principal: Principal = Depends(core
     `/catalog/datasets`, not by the PDP (row/column security has
     nothing to enforce on a definition with no rows).
     """
-    object_type_urn = core.OBJECT_TYPE_URNS.get(name) or ontology.object_type_urn(principal.tenant_id, workspace_id, name)
+    object_type_urn = ontology.object_type_urn(principal.tenant_id, workspace_id, name)
     object_type = await ontology.get_object_type(core.pool, object_type_urn)
     if object_type is None:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     return object_type
 
 
@@ -126,7 +192,19 @@ async def _authorize_ontology_governance(principal: Principal, workspace_id: str
         permission="approve",
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_marking_administer(
+    principal: Principal, workspace_id: str, marking_name: str
+) -> None:
+    """Grant/revoke clearance: marking `administer` **or** workspace
+    `approve` (bootstrap / ontology admins who did not create the marking).
+    """
+    marking_urn = build_urn(principal.tenant_id, "global", "marking", marking_name)
+    if await core.authz.check_rebac(principal.urn, "marking", marking_urn, "administer"):
+        return
+    await _authorize_ontology_governance(principal, workspace_id)
 
 
 async def _authorize_ontology_write(principal: Principal, workspace_id: str) -> None:
@@ -143,7 +221,116 @@ async def _authorize_ontology_write(principal: Principal, workspace_id: str) -> 
         permission="write",
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_shared_property_type(principal: Principal, urn: str, permission: str) -> None:
+    """Per-URN ReBAC for Shared Property Types (parent_workspace cascade)."""
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="shared_property_type",
+        resource_urn=urn,
+        permission=permission,
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_relation_type(principal: Principal, urn: str, permission: str) -> None:
+    """Per-URN ReBAC for RelationTypes / Foundry Link Types."""
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="relation_type",
+        resource_urn=urn,
+        permission=permission,
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_value_type(principal: Principal, urn: str, permission: str) -> None:
+    """Per-URN ReBAC for Value Types (parent_workspace + optional project)."""
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="value_type",
+        resource_urn=urn,
+        permission=permission,
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _seed_shared_property_type_authz(
+    *, tenant_id: str, workspace_id: str, urn: str, api_name: str
+) -> None:
+    """Write parent_workspace; compensate by deleting the SPT row on failure."""
+    try:
+        await core.authz.write_relationship(
+            resource_type="shared_property_type",
+            resource_urn=urn,
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=ontology.workspace_urn(tenant_id, workspace_id),
+        )
+    except Exception as exc:
+        logger.exception("SpiceDB parent_workspace write failed for SPT %s — compensating PG delete", urn)
+        try:
+            await ontology.delete_shared_property_type(core.pool, tenant_id=tenant_id, api_name=api_name)
+        except Exception:
+            logger.exception(
+                "compensating SPT delete also failed for %s — row may exist in PG without ReBAC parent",
+                urn,
+            )
+        raise HolonError.unavailable('Unavailable', f"failed to seed shared_property_type authz relationship: {exc}",) from exc
+
+
+async def _seed_relation_type_authz(*, tenant_id: str, workspace_id: str, urn: str, name: str) -> None:
+    try:
+        await core.authz.write_relationship(
+            resource_type="relation_type",
+            resource_urn=urn,
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=ontology.workspace_urn(tenant_id, workspace_id),
+        )
+    except Exception as exc:
+        logger.exception("SpiceDB parent_workspace write failed for RelationType %s — compensating PG delete", urn)
+        try:
+            # Bypass active-status guard for compensating delete.
+            await core.pool.execute("DELETE FROM relation_type WHERE urn = $1", urn)
+        except Exception:
+            logger.exception(
+                "compensating RelationType delete also failed for %s — row may exist in PG without ReBAC parent",
+                urn,
+            )
+        raise HolonError.unavailable('Unavailable', f"failed to seed relation_type authz relationship: {exc}",) from exc
+
+
+async def _seed_value_type_authz(*, tenant_id: str, workspace_id: str, urn: str, name: str) -> None:
+    try:
+        await core.authz.write_relationship(
+            resource_type="value_type",
+            resource_urn=urn,
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=ontology.workspace_urn(tenant_id, workspace_id),
+        )
+    except Exception as exc:
+        logger.exception("SpiceDB parent_workspace write failed for ValueType %s — compensating PG delete", urn)
+        try:
+            await ontology.delete_value_type(core.pool, tenant_id=tenant_id, name=name)
+        except Exception:
+            logger.exception(
+                "compensating ValueType delete also failed for %s — row may exist in PG without ReBAC parent",
+                urn,
+            )
+        raise HolonError.unavailable('Unavailable', f"failed to seed value_type authz relationship: {exc}",) from exc
+
+
+async def _link_relation_type_to_project(relation_urn: str, project_urn: Optional[str]) -> None:
+    await _link_resource_to_project(
+        resource_type="relation_type", resource_urn=relation_urn, project_urn=project_urn
+    )
 
 
 _ALLOWED_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
@@ -169,8 +356,8 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
     Dataset (see `connectivity`'s `/sources`) becomes a real, browsable
     ObjectType — same governance tier as publishing a version
     (`_authorize_ontology_governance`, admin-only `approve`) since this
-    takes effect immediately, no draft/publish step, the same way the six
-    boot-seeded types are immediately live.
+    takes effect immediately, no draft/publish step, the same way demo
+    ObjectTypes created via `POST /object-types` are immediately live.
 
     Creation itself is existence + mapping only; branching, interfaces,
     markings, and the rest of the lifecycle attach afterward via
@@ -179,12 +366,10 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if not request.property_mapping:
-        raise HTTPException(status_code=400, detail="property_mapping must name at least one property")
+        raise HolonError.invalid_argument('InvalidPropertyMapping', "property_mapping must name at least one property")
     bad_values = set(request.column_classification.values()) - _ALLOWED_CLASSIFICATIONS
     if bad_values:
-        raise HTTPException(
-            status_code=400,
-            detail=f"unknown classification value(s) {sorted(bad_values)} (expected one of {sorted(_ALLOWED_CLASSIFICATIONS)})",
+        raise HolonError.invalid_argument('InvalidClassification', f"unknown classification value(s) {sorted(bad_values)} (expected one of {sorted(_ALLOWED_CLASSIFICATIONS)})",
         )
     try:
         object_type = await ontology.create_object_type(
@@ -204,14 +389,13 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
             icon=request.icon,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409 if "already exists" in str(exc) else 400, detail=str(exc)) from exc
+        raise HolonError.from_http(
+            409 if "already exists" in str(exc) else 400,
+            str(exc),
+            error_name="ObjectTypeAlreadyExists" if "already exists" in str(exc) else "ObjectTypeValidationFailed",
+        ) from exc
 
-    # Without this, `_authorize_object_type` denies everyone, including
-    # the creator — `object_type.read/write/approve` all reduce to
-    # `parent_workspace->...`, the same relationship `authz_seed.py`
-    # writes for the six boot-seeded types at startup. PG and SpiceDB
-    # are not in one transaction: on authz failure, compensate by
-    # deleting the Postgres row so we never leave an unreadable orphan.
+    # Write parent_workspace relationship in SpiceDB; delete Postgres row on failure to avoid orphans.
     try:
         await core.authz.write_relationship(
             resource_type="object_type",
@@ -229,10 +413,7 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
                 "compensating delete also failed for %s — ObjectType may exist in PG without ReBAC parent",
                 object_type["urn"],
             )
-        raise HTTPException(
-            status_code=503,
-            detail=f"failed to seed object_type authz relationship: {exc}",
-        ) from exc
+        raise HolonError.unavailable('Unavailable', f"failed to seed object_type authz relationship: {exc}",) from exc
     return object_type
 
 
@@ -246,12 +427,17 @@ class ProposeObjectTypeVersionRequest(BaseModel):
     property_formats: Optional[dict[str, dict]] = None
     conditional_formats: Optional[dict[str, list]] = None
     property_types: Optional[dict[str, dict]] = None
+    link_constraint_bindings: Optional[dict[str, dict[str, str]]] = None
+    interface_property_bindings: Optional[dict[str, dict[str, str]]] = None
     primary_key: Optional[str] = None
     title_key: Optional[str] = None
     plural_display_name: Optional[str] = None
     lifecycle_status: Optional[str] = None
     visibility: Optional[str] = None
     icon: Optional[str] = None
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
 
 
 @router.post("/ontology/{name}/versions", status_code=201)
@@ -268,7 +454,7 @@ async def propose_object_type_version(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     try:
         return await ontology.propose_object_type_version(
             core.pool,
@@ -282,15 +468,20 @@ async def propose_object_type_version(
             property_formats=request.property_formats,
             conditional_formats=request.conditional_formats,
             property_types=request.property_types,
+            link_constraint_bindings=request.link_constraint_bindings,
+            interface_property_bindings=request.interface_property_bindings,
             primary_key=request.primary_key,
             title_key=request.title_key,
             plural_display_name=request.plural_display_name,
             lifecycle_status=request.lifecycle_status,
             visibility=request.visibility,
             icon=request.icon,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ObjectTypeValidationFailed', str(exc)) from exc
 
 
 class ValueTypeRequest(BaseModel):
@@ -299,21 +490,30 @@ class ValueTypeRequest(BaseModel):
     format_regex: Optional[str] = None
     constraints: Optional[list[dict]] = None
     description: str = ""
+    api_name: Optional[str] = None
+    display_name: str = ""
+    example_value: Optional[str] = None
+    lifecycle_status: str = "experimental"
+    format_regex_match: str = "full"
+    project_urn: Optional[str] = None
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
 
 
 @router.post("/value-types", status_code=201)
 async def create_value_type(request: ValueTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
     """Registering a Value Type is ontology governance, same tier as
     registering an Interface or a Marking — the workspace's own
-    `approve` permission. A separate registry from `property_formats`
-    (display-only) — this one is real data typing, referenced by
-    `property_types` (below) and by declarative Action parameters.
+    `approve` permission. Seeds SpiceDB `parent_workspace` (and optional
+    `parent_project` for Foundry-style project import).
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_value_type(core.pool, principal.tenant_id, request.name) is not None:
-        raise HTTPException(status_code=409, detail=f"value type already exists: {request.name}")
+        raise HolonError.conflict('ValueTypeAlreadyExists', f"value type already exists: {request.name}")
+    project_urn = await _validate_optional_project_urn(request.project_urn)
     try:
-        return await ontology.create_value_type(
+        created = await ontology.create_value_type(
             core.pool,
             tenant_id=principal.tenant_id,
             name=request.name,
@@ -321,59 +521,239 @@ async def create_value_type(request: ValueTypeRequest, principal: Principal = De
             format_regex=request.format_regex,
             constraints=request.constraints,
             description=request.description,
+            api_name=request.api_name,
+            display_name=request.display_name,
+            example_value=request.example_value,
+            lifecycle_status=request.lifecycle_status,
+            format_regex_match=request.format_regex_match,
+            project_urn=project_urn,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ValueTypeValidationFailed', str(exc)) from exc
+    await _seed_value_type_authz(
+        tenant_id=principal.tenant_id,
+        workspace_id=workspace_id,
+        urn=created["urn"],
+        name=created["name"],
+    )
+    try:
+        await _link_value_type_to_project(created["urn"], created.get("project_urn"))
+    except Exception as exc:
+        raise HolonError.unavailable('Unavailable', f"Value Type created but SpiceDB parent_project reconcile failed: {exc}",) from exc
+    return created
 
 
 @router.get("/value-types")
-async def list_value_types(principal: Principal = Depends(core.current_principal)) -> list[dict]:
-    return await ontology.list_value_types(core.pool, principal.tenant_id)
+async def list_value_types(
+    principal: Principal = Depends(core.current_principal),
+    include_deprecated: bool = True,
+) -> list[dict]:
+    return await ontology.list_value_types(
+        core.pool, principal.tenant_id, include_deprecated=include_deprecated
+    )
+
+
+@router.get("/type-classes")
+async def list_known_type_classes(principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    """Catalog of Foundry-shaped type classes Holon understands (UI suggestions)."""
+    from ..ontology.type_classes import KNOWN_TYPE_CLASSES
+
+    return [
+        {"id": key, "kind": key.split(":", 1)[0], "name": key.split(":", 1)[1], **meta}
+        for key, meta in sorted(KNOWN_TYPE_CLASSES.items())
+    ]
+
+
+class ValidateValueTypeCastsRequest(BaseModel):
+    """Pipeline Builder logical-type cast: map output columns → Value Type names."""
+
+    casts: dict[str, str]
+    rows: list[dict]
+
+
+@router.post("/value-types/validate-casts")
+async def validate_value_type_casts(
+    request: ValidateValueTypeCastsRequest, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    """Validate row values against named Value Types (Connectivity pipeline casts).
+
+    Authenticated-only like `/functions/{name}/invoke` — no workspace gate;
+    cast rules reference registry Value Types, not workspace-scoped data.
+    """
+    if not request.casts:
+        raise HolonError.invalid_argument('InvalidCasts', "casts must be a non-empty column → value_type map")
+    errors: list[dict] = []
+    for index, row in enumerate(request.rows):
+        if not isinstance(row, dict):
+            errors.append({"row_index": index, "column": "*", "detail": "row must be an object"})
+            continue
+        errors.extend(
+            await ontology.validate_value_type_casts(
+                core.pool,
+                principal.tenant_id,
+                casts=request.casts,
+                row=row,
+                row_index=index,
+            )
+        )
+    return {"ok": not errors, "error_count": len(errors), "errors": errors[:50]}
 
 
 @router.get("/value-types/{name}")
 async def get_value_type(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
     value_type = await ontology.get_value_type(core.pool, principal.tenant_id, name)
     if value_type is None:
-        raise HTTPException(status_code=404, detail=f"unknown value type: {name}")
+        raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")
+    await _authorize_value_type(principal, value_type["urn"], "read")
     return value_type
+
+
+@router.get("/value-types/{name}/revisions")
+async def get_value_type_revisions(name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    value_type = await ontology.get_value_type(core.pool, principal.tenant_id, name)
+    if value_type is None:
+        raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")
+    await _authorize_value_type(principal, value_type["urn"], "read")
+    return await ontology.list_value_type_revisions(core.pool, principal.tenant_id, name)
+
+
+@router.get("/value-types/{name}/permissions")
+async def get_value_type_permissions(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Foundry Permissions tab — effective ReBAC on the Value Type URN."""
+    value_type = await ontology.get_value_type(core.pool, principal.tenant_id, name)
+    if value_type is None:
+        raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")
+    urn = value_type["urn"]
+    await _authorize_value_type(principal, urn, "read")
+    parent_workspace_urn = ontology.workspace_urn(principal.tenant_id, workspace_id)
+    tiers = ("read", "write", "approve")
+    decisions = await asyncio.gather(
+        *(
+            core.authz.authorize(principal, resource_type="value_type", resource_urn=urn, permission=permission)
+            for permission in tiers
+        )
+    )
+    permissions = {permission: decision.allowed for permission, decision in zip(tiers, decisions)}
+    return {
+        "name": name,
+        "urn": urn,
+        "parent_workspace_urn": parent_workspace_urn,
+        "project_urn": value_type.get("project_urn"),
+        "permissions": permissions,
+    }
 
 
 class UpdateValueTypeRequest(BaseModel):
     format_regex: Optional[str] = None
     constraints: Optional[list[dict]] = None
     description: Optional[str] = None
+    api_name: Optional[str] = None
+    display_name: Optional[str] = None
+    example_value: Optional[str] = None
+    clear_example_value: bool = False
+    lifecycle_status: Optional[str] = None
+    format_regex_match: Optional[str] = None
+    project_urn: Optional[str] = None
+    clear_project_urn: bool = False
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
 
 
 @router.put("/value-types/{name}")
 async def update_value_type(
     name: str, request: UpdateValueTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
-    """Editing a Value Type is the same governance tier as registering
-    one. `base_type`/`name` aren't accepted here — see
-    `ontology/value_types.py`'s `update_value_type` docstring.
+    """Per-URN write (SpiceDB) after create seeded parent_workspace.
+    Changing constraints/format_regex/format_regex_match bumps `version`.
     """
-    await _authorize_ontology_governance(principal, workspace_id)
-    if await ontology.get_value_type(core.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown value type: {name}")
+    current = await ontology.get_value_type(core.pool, principal.tenant_id, name)
+    if current is None:
+        raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")
+    await _authorize_value_type(principal, current["urn"], "write")
+    project_urn = None
+    if not request.clear_project_urn and request.project_urn is not None:
+        project_urn = await _validate_optional_project_urn(request.project_urn)
     try:
-        return await ontology.update_value_type(
+        updated = await ontology.update_value_type(
             core.pool,
             tenant_id=principal.tenant_id,
             name=name,
             format_regex=request.format_regex,
             constraints=request.constraints,
             description=request.description,
+            api_name=request.api_name,
+            display_name=request.display_name,
+            example_value=request.example_value,
+            clear_example_value=request.clear_example_value,
+            lifecycle_status=request.lifecycle_status,
+            format_regex_match=request.format_regex_match,
+            project_urn=project_urn,
+            clear_project_urn=request.clear_project_urn,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ValueTypeValidationFailed', str(exc)) from exc
+    if request.clear_project_urn or request.project_urn is not None:
+        try:
+            await _link_value_type_to_project(updated["urn"], updated.get("project_urn"))
+        except Exception as exc:
+            raise HolonError.unavailable('Unavailable', f"Value Type updated but SpiceDB parent_project reconcile failed: {exc}",) from exc
+    return updated
+
+
+class DeprecateValueTypeRequest(BaseModel):
+    deprecation_reason: str
+    deprecation_deadline: str
+    replacement_urn: Optional[str] = None
+
+
+@router.post("/value-types/{name}/deprecate")
+async def deprecate_value_type(
+    name: str,
+    request: DeprecateValueTypeRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Foundry-style deprecate — prefer over delete when consumers exist."""
+    current = await ontology.get_value_type(core.pool, principal.tenant_id, name)
+    if current is None:
+        raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")
+    await _authorize_value_type(principal, current["urn"], "approve")
+    try:
+        return await ontology.deprecate_value_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=name,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument('ValueTypeValidationFailed', str(exc)) from exc
 
 
 class SharedPropertyTypeRequest(BaseModel):
     api_name: str
     display_name: str
-    value_type: str
+    value_type: Optional[str] = None
+    struct_properties: Optional[dict[str, dict]] = None
     description: str = ""
+    visibility: str = "normal"
+    render_hints: Optional[list[str]] = None
+    type_classes: Optional[list[str]] = None
+    property_format: Optional[dict] = None
+    aliases: Optional[list[str]] = None
+    project_urn: Optional[str] = None
 
 
 @router.post("/shared-property-types", status_code=201)
@@ -381,25 +761,42 @@ async def create_shared_property_type(
     request: SharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
     """Registering a Shared Property Type is ontology governance, same
-    tier as registering a Value Type. Distinct registry from
-    `value_type`: this is the canonical *property* (api_name +
-    display_name + description), not just the underlying data shape —
-    see `shared_property_types.py`'s module docstring.
+    tier as registering a Value Type. Seeds SpiceDB `parent_workspace`
+    (and optional `parent_project`) so later mutate checks are per-URN.
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_shared_property_type(core.pool, principal.tenant_id, request.api_name) is not None:
-        raise HTTPException(status_code=409, detail=f"shared property type already exists: {request.api_name}")
+        raise HolonError.conflict('SharedPropertyTypeAlreadyExists', f"shared property type already exists: {request.api_name}")
+    project_urn = await _validate_optional_project_urn(request.project_urn)
     try:
-        return await ontology.create_shared_property_type(
+        created = await ontology.create_shared_property_type(
             core.pool,
             tenant_id=principal.tenant_id,
             api_name=request.api_name,
             display_name=request.display_name,
             value_type=request.value_type,
+            struct_properties=request.struct_properties,
             description=request.description,
+            visibility=request.visibility,
+            render_hints=request.render_hints,
+            type_classes=request.type_classes,
+            property_format=request.property_format,
+            aliases=request.aliases,
+            project_urn=project_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('SharedPropertyValidationFailed', str(exc)) from exc
+    await _seed_shared_property_type_authz(
+        tenant_id=principal.tenant_id,
+        workspace_id=workspace_id,
+        urn=created["urn"],
+        api_name=created["api_name"],
+    )
+    try:
+        await _link_shared_property_type_to_project(created["urn"], created.get("project_urn"))
+    except Exception as exc:
+        raise HolonError.unavailable('Unavailable', f"SPT created but SpiceDB parent_project reconcile failed: {exc}",) from exc
+    return created
 
 
 @router.get("/shared-property-types")
@@ -411,36 +808,137 @@ async def list_shared_property_types(principal: Principal = Depends(core.current
 async def get_shared_property_type(api_name: str, principal: Principal = Depends(core.current_principal)) -> dict:
     shared_property_type = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
     if shared_property_type is None:
-        raise HTTPException(status_code=404, detail=f"unknown shared property type: {api_name}")
+        raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
+    await _authorize_shared_property_type(principal, shared_property_type["urn"], "read")
     return shared_property_type
+
+
+@router.get("/shared-property-types/{api_name}/usage")
+async def get_shared_property_type_usage(api_name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    """Foundry Usage tab — ObjectTypes that reference this SPT."""
+    shared_property_type = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
+    if shared_property_type is None:
+        raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
+    await _authorize_shared_property_type(principal, shared_property_type["urn"], "read")
+    try:
+        return await ontology.list_shared_property_type_usage(core.pool, principal.tenant_id, api_name)
+    except ValueError as exc:
+        raise HolonError.not_found('SharedPropertyTypeNotFound', str(exc)) from exc
+
+
+@router.get("/shared-property-types/{api_name}/permissions")
+async def get_shared_property_type_permissions(
+    api_name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Foundry Permissions tab — effective ReBAC on the SPT URN."""
+    shared_property_type = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
+    if shared_property_type is None:
+        raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
+    urn = shared_property_type["urn"]
+    await _authorize_shared_property_type(principal, urn, "read")
+    parent_workspace_urn = ontology.workspace_urn(principal.tenant_id, workspace_id)
+    tiers = ("read", "write", "approve")
+    decisions = await asyncio.gather(
+        *(
+            core.authz.authorize(
+                principal, resource_type="shared_property_type", resource_urn=urn, permission=permission
+            )
+            for permission in tiers
+        )
+    )
+    permissions = {permission: decision.allowed for permission, decision in zip(tiers, decisions)}
+    return {
+        "api_name": api_name,
+        "urn": urn,
+        "parent_workspace_urn": parent_workspace_urn,
+        "project_urn": shared_property_type.get("project_urn"),
+        "permissions": permissions,
+    }
 
 
 class UpdateSharedPropertyTypeRequest(BaseModel):
     display_name: Optional[str] = None
     description: Optional[str] = None
+    visibility: Optional[str] = None
+    render_hints: Optional[list[str]] = None
+    type_classes: Optional[list[str]] = None
+    property_format: Optional[dict] = None
+    clear_property_format: bool = False
+    aliases: Optional[list[str]] = None
+    project_urn: Optional[str] = None
+    clear_project_urn: bool = False
 
 
 @router.put("/shared-property-types/{api_name}")
 async def update_shared_property_type(
     api_name: str, request: UpdateSharedPropertyTypeRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
-    """`value_type`/`api_name` aren't accepted here — see
-    `ontology/shared_property_types.py`'s `update_shared_property_type`
-    docstring.
-    """
-    await _authorize_ontology_governance(principal, workspace_id)
-    if await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown shared property type: {api_name}")
+    """Metadata-only update — authorized against the SPT URN (`write`)."""
+    current = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
+    if current is None:
+        raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
+    await _authorize_shared_property_type(principal, current["urn"], "write")
+    project_urn = None
+    if not request.clear_project_urn and request.project_urn is not None:
+        project_urn = await _validate_optional_project_urn(request.project_urn)
     try:
-        return await ontology.update_shared_property_type(
+        updated = await ontology.update_shared_property_type(
             core.pool,
             tenant_id=principal.tenant_id,
             api_name=api_name,
             display_name=request.display_name,
             description=request.description,
+            visibility=request.visibility,
+            render_hints=request.render_hints,
+            type_classes=request.type_classes,
+            property_format=request.property_format,
+            clear_property_format=request.clear_property_format,
+            aliases=request.aliases,
+            project_urn=project_urn,
+            clear_project_urn=request.clear_project_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('SharedPropertyValidationFailed', str(exc)) from exc
+    if request.clear_project_urn or request.project_urn is not None:
+        try:
+            await _link_shared_property_type_to_project(updated["urn"], updated.get("project_urn"))
+        except Exception as exc:
+            raise HolonError.unavailable('Unavailable', f"SPT updated but SpiceDB parent_project reconcile failed: {exc}",) from exc
+    return updated
+
+
+@router.delete("/shared-property-types/{api_name}")
+async def delete_shared_property_type(
+    api_name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    """Foundry parity: auto-detach then remove. Requires SPT `approve`."""
+    current = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
+    if current is None:
+        raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
+    await _authorize_shared_property_type(principal, current["urn"], "approve")
+    try:
+        result = await ontology.delete_shared_property_type(core.pool, tenant_id=principal.tenant_id, api_name=api_name)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail.startswith("unknown") else 400
+        raise HolonError.from_http(status, detail, error_name='SharedPropertyValidationFailed') from exc
+    try:
+        await core.authz.delete_relationship(
+            resource_type="shared_property_type",
+            resource_urn=current["urn"],
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
+        )
+    except Exception:
+        logger.exception("SpiceDB parent_workspace cleanup failed for deleted SPT %s", current["urn"])
+    try:
+        await _link_shared_property_type_to_project(current["urn"], None)
+    except Exception:
+        logger.exception("SpiceDB parent_project cleanup failed for deleted SPT %s", current["urn"])
+    return result
 
 
 class ActionTypeRequest(BaseModel):
@@ -461,6 +959,12 @@ class ActionTypeRequest(BaseModel):
     # Configure/Sections: purely a display grouping for the invocation
     # form, structurally validated in `ontology.create_action_type`.
     sections: list[dict] = []
+    type_classes: Optional[list[str]] = None
+    lifecycle_status: str = "experimental"
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
+    notify_webhook: Optional[str] = None
 
 
 @router.post("/action-types", status_code=201)
@@ -476,7 +980,7 @@ async def create_action_type(request: ActionTypeRequest, principal: Principal = 
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_action_type(core.pool, principal.tenant_id, request.name) is not None:
-        raise HTTPException(status_code=409, detail=f"action type already exists: {request.name}")
+        raise HolonError.conflict('ActionTypeAlreadyExists', f"action type already exists: {request.name}")
     try:
         return await ontology.create_action_type(
             core.pool,
@@ -494,9 +998,15 @@ async def create_action_type(request: ActionTypeRequest, principal: Principal = 
             writeback_dataset=request.writeback_dataset,
             edit_function=request.edit_function,
             sections=request.sections,
+            type_classes=request.type_classes,
+            lifecycle_status=request.lifecycle_status,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
+            notify_webhook=request.notify_webhook,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ActionTypeValidationFailed', str(exc)) from exc
 
 
 @router.get("/action-types")
@@ -508,8 +1018,85 @@ async def list_action_types(principal: Principal = Depends(core.current_principa
 async def get_action_type(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
     action_type = await ontology.get_action_type(core.pool, principal.tenant_id, name)
     if action_type is None:
-        raise HTTPException(status_code=404, detail=f"unknown action type: {name}")
+        raise HolonError.not_found('ActionTypeNotFound', f"unknown action type: {name}")
     return action_type
+
+
+@router.get("/action-types/{name}/observability")
+async def get_action_type_observability(
+    name: str,
+    days: int = Query(default=30, ge=1, le=90),
+    principal: Principal = Depends(core.current_principal),
+) -> dict:
+    """Foundry-shaped Action Observability: invocation + approval counts from Holon tables.
+
+    Prometheus counters (`holon_action_events_total`) stay for ops scrapers; this endpoint
+    is what Ontology Manager can chart without a metrics backend.
+    """
+    action_type = await ontology.get_action_type(core.pool, principal.tenant_id, name)
+    if action_type is None:
+        raise HolonError.not_found('ActionTypeNotFound', f"unknown action type: {name}")
+
+    inv = await core.pool.fetchrow(
+        """
+        SELECT
+          COUNT(*)::int AS invocations,
+          COUNT(*) FILTER (WHERE reverted_at IS NOT NULL)::int AS reverted,
+          COUNT(*) FILTER (WHERE edits IS NOT NULL)::int AS with_edits
+        FROM action_invocation
+        WHERE tenant_id = $1
+          AND action_name = $2
+          AND invoked_at >= now() - ($3::int * interval '1 day')
+        """,
+        principal.tenant_id,
+        name,
+        days,
+    )
+    approvals = await core.pool.fetchrow(
+        """
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+          COUNT(*) FILTER (WHERE status = 'approved')::int AS approved,
+          COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+          COUNT(*) FILTER (WHERE status = 'expired')::int AS expired
+        FROM action_approval
+        WHERE tenant_id = $1
+          AND action_name = $2
+          AND requested_at >= now() - ($3::int * interval '1 day')
+        """,
+        principal.tenant_id,
+        name,
+        days,
+    )
+    by_day = await core.pool.fetch(
+        """
+        SELECT to_char(date_trunc('day', invoked_at), 'YYYY-MM-DD') AS day,
+               COUNT(*)::int AS invocations
+        FROM action_invocation
+        WHERE tenant_id = $1
+          AND action_name = $2
+          AND invoked_at >= now() - ($3::int * interval '1 day')
+        GROUP BY 1
+        ORDER BY 1
+        """,
+        principal.tenant_id,
+        name,
+        days,
+    )
+    return {
+        "action_name": name,
+        "days": days,
+        "invocations": inv["invocations"] if inv else 0,
+        "reverted": inv["reverted"] if inv else 0,
+        "with_edits": inv["with_edits"] if inv else 0,
+        "approvals": {
+            "pending": approvals["pending"] if approvals else 0,
+            "approved": approvals["approved"] if approvals else 0,
+            "rejected": approvals["rejected"] if approvals else 0,
+            "expired": approvals["expired"] if approvals else 0,
+        },
+        "by_day": [{"day": r["day"], "invocations": r["invocations"]} for r in by_day],
+    }
 
 
 @router.put("/action-types/{name}")
@@ -524,7 +1111,7 @@ async def update_action_type(
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_action_type(core.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown action type: {name}")
+        raise HolonError.not_found('ActionTypeNotFound', f"unknown action type: {name}")
     try:
         return await ontology.create_action_type(
             core.pool,
@@ -542,9 +1129,15 @@ async def update_action_type(
             writeback_dataset=request.writeback_dataset,
             edit_function=request.edit_function,
             sections=request.sections,
+            type_classes=request.type_classes,
+            lifecycle_status=request.lifecycle_status,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
+            notify_webhook=request.notify_webhook,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ActionTypeValidationFailed', str(exc)) from exc
 
 
 class InterfaceTypeRequest(BaseModel):
@@ -552,6 +1145,13 @@ class InterfaceTypeRequest(BaseModel):
     required_properties: list[str] = []
     required_actions: list[str] = []
     description: str = ""
+    lifecycle_status: str = "experimental"
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
+    property_types: Optional[dict[str, dict]] = None
+    link_constraints: Optional[list[dict]] = None
+    parent_interfaces: Optional[list[str]] = None
 
 
 @router.post("/interfaces", status_code=201)
@@ -563,15 +1163,25 @@ async def create_interface_type(request: InterfaceTypeRequest, principal: Princi
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_interface_type(core.pool, principal.tenant_id, request.name) is not None:
-        raise HTTPException(status_code=409, detail=f"interface already exists: {request.name}")
-    return await ontology.create_interface_type(
-        core.pool,
-        tenant_id=principal.tenant_id,
-        name=request.name,
-        required_properties=request.required_properties,
-        required_actions=request.required_actions,
-        description=request.description,
-    )
+        raise HolonError.conflict('InterfaceAlreadyExists', f"interface already exists: {request.name}")
+    try:
+        return await ontology.create_interface_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=request.name,
+            required_properties=request.required_properties,
+            required_actions=request.required_actions,
+            description=request.description,
+            lifecycle_status=request.lifecycle_status,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
+            property_types=request.property_types,
+            link_constraints=request.link_constraints,
+            parent_interfaces=request.parent_interfaces,
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument('InterfaceValidationFailed', str(exc)) from exc
 
 
 @router.get("/interfaces")
@@ -586,7 +1196,7 @@ async def list_interface_types(principal: Principal = Depends(core.current_princ
 async def get_interface_type(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
     interface = await ontology.get_interface_type(core.pool, principal.tenant_id, name)
     if interface is None:
-        raise HTTPException(status_code=404, detail=f"unknown interface: {name}")
+        raise HolonError.not_found('InterfaceNotFound', f"unknown interface: {name}")
     return interface
 
 
@@ -594,6 +1204,13 @@ class UpdateInterfaceTypeRequest(BaseModel):
     required_properties: Optional[list[str]] = None
     required_actions: Optional[list[str]] = None
     description: Optional[str] = None
+    lifecycle_status: Optional[str] = None
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
+    property_types: Optional[dict[str, dict]] = None
+    link_constraints: Optional[list[dict]] = None
+    parent_interfaces: Optional[list[str]] = None
 
 
 @router.put("/interfaces/{name}")
@@ -605,7 +1222,7 @@ async def update_interface_type(
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_interface_type(core.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown interface: {name}")
+        raise HolonError.not_found('InterfaceNotFound', f"unknown interface: {name}")
     try:
         return await ontology.update_interface_type(
             core.pool,
@@ -614,102 +1231,222 @@ async def update_interface_type(
             required_properties=request.required_properties,
             required_actions=request.required_actions,
             description=request.description,
+            lifecycle_status=request.lifecycle_status,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
+            property_types=request.property_types,
+            link_constraints=request.link_constraints,
+            parent_interfaces=request.parent_interfaces,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('InterfaceValidationFailed', str(exc)) from exc
+
+
+@router.delete("/interfaces/{name}")
+async def delete_interface_type(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Hard-delete. Blocked while active, while children extend it, or
+    while any published ObjectType still implements it (directly or via
+    a child interface).
+    """
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        deleted = await ontology.delete_interface_type(
+            core.pool, tenant_id=principal.tenant_id, name=name,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail.startswith("unknown") else 400
+        raise HolonError.from_http(status, detail, error_name='InterfaceValidationFailed') from exc
+    return deleted
 
 
 @router.get("/interfaces/{name}/objects")
-async def list_interface_objects(name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def list_interface_objects(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+    page: tuple[int, Optional[str]] = Depends(paging_query),
+) -> dict:
     """Polymorphic read: every instance of every ObjectType whose
     currently *published* `implements` names this interface, tagged with
-    which ObjectType it came from. Reuses `_resolve_many` — the same read
-    choke point (serving-store-first, masking applied, live scan fallback)
-    every other list endpoint already goes through — once per conforming
-    ObjectType, rather than a new read path of its own.
+    which ObjectType it came from. Walks all catalogued ObjectTypes
+    (seeded + self-serve) via `_type_handle` and reuses `_resolve_many`
+    (serving-store-first, masking, live fallback). OT the principal cannot
+    read are omitted, same "skip, don't 403 the whole list" posture as
+    graph traversal.
     """
+    page_size, cursor = page
     if await ontology.get_interface_type(core.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown interface: {name}")
+        raise HolonError.not_found('InterfaceNotFound', f"unknown interface: {name}")
     results: list[dict] = []
-    for object_type_name, fetch_fn in core.FETCH_FNS.items():
-        object_type = await ontology.get_object_type(core.pool, core.OBJECT_TYPE_URNS[object_type_name])
-        implements = (object_type.get("implements") or []) if object_type else []
-        if name not in implements:
+    for object_type in await ontology.list_object_types(core.pool, principal.tenant_id):
+        implements = object_type.get("implements") or []
+        expanded = await ontology.expand_implements(core.pool, principal.tenant_id, implements)
+        if name not in expanded:
             continue
-        rows = await core._resolve_many(object_type_name, principal.tenant_id, fetch_fn, principal=principal)
+        object_type_name = object_type["name"]
+        handle = await core._type_handle(object_type_name, principal.tenant_id, workspace_id)
+        if handle is None:
+            continue
+        if not await core._is_authorized_read(principal, handle["urn"]):
+            continue
+        rows = await core._resolve_many(
+            object_type_name, principal.tenant_id, handle["fetch_fn"], principal=principal,
+        )
         for row in rows:
             row["_objectType"] = object_type_name
         results.extend(rows)
-    return results
+    return page_response(results, page_size=page_size, cursor=cursor, key_of=interface_instance_key)
+
+
+class MarkingCategoryRequest(BaseModel):
+    name: str
+    description: str = ""
+    category_type: str = "CONJUNCTIVE"
+    marking_type: str = "MANDATORY"
 
 
 class MarkingRequest(BaseModel):
     name: str
     description: str = ""
+    category_id: Optional[str] = None
+
+
+@router.post("/marking-categories", status_code=201)
+async def create_marking_category(
+    request: MarkingCategoryRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_ontology_governance(principal, workspace_id)
+    if await ontology.get_marking_category(core.pool, principal.tenant_id, request.name) is not None:
+        raise HolonError.conflict(
+            "MarkingCategoryAlreadyExists", f"marking category already exists: {request.name}"
+        )
+    try:
+        return await ontology.create_marking_category(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=request.name,
+            description=request.description,
+            category_type=request.category_type,
+            marking_type=request.marking_type,
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument("MarkingCategoryValidationFailed", str(exc)) from exc
+
+
+@router.get("/marking-categories")
+async def list_marking_categories(principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    return await ontology.list_marking_categories(core.pool, principal.tenant_id)
+
+
+@router.get("/marking-categories/{category_ref}")
+async def get_marking_category(
+    category_ref: str, principal: Principal = Depends(core.current_principal)
+) -> dict:
+    category = await ontology.get_marking_category(core.pool, principal.tenant_id, category_ref)
+    if category is None:
+        raise HolonError.not_found("MarkingCategoryNotFound", f"unknown marking category: {category_ref}")
+    return category
 
 
 @router.post("/markings", status_code=201)
-async def create_marking(request: MarkingRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)) -> dict:
-    """Registering a Marking is ontology governance, same tier as
-    registering an Interface — the workspace's own `approve` permission.
-    A marking is a *label registry entry*, not a grant: creating "PII"
-    here doesn't give anyone clearance to it, `.../principals/.../grant`
-    below does — same two-step shape Identity's own Project access
-    already uses (create, then grant per-principal).
+async def create_marking(
+    request: MarkingRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Register a Marking (label registry entry). Creator becomes SpiceDB
+    `admin` on the marking; clearance grants are separate.
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_marking(core.pool, principal.tenant_id, request.name) is not None:
-        raise HTTPException(status_code=409, detail=f"marking already exists: {request.name}")
-    return await ontology.create_marking(
-        core.pool, tenant_id=principal.tenant_id, name=request.name, description=request.description
+        raise HolonError.conflict("MarkingAlreadyExists", f"marking already exists: {request.name}")
+    try:
+        marking = await ontology.create_marking(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            name=request.name,
+            description=request.description,
+            category_id=request.category_id,
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument("MarkingValidationFailed", str(exc)) from exc
+    marking_urn = build_urn(principal.tenant_id, "global", "marking", marking["name"])
+    await core.authz.write_relationship(
+        resource_type="marking",
+        resource_urn=marking_urn,
+        relation="admin",
+        subject_urn=principal.urn,
     )
-
-
-@router.get("/markings")
-async def list_markings(principal: Principal = Depends(core.current_principal)) -> list[dict]:
-    return await ontology.list_markings(core.pool, principal.tenant_id)
-
-
-@router.get("/markings/{name}")
-async def get_marking(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
-    marking = await ontology.get_marking(core.pool, principal.tenant_id, name)
-    if marking is None:
-        raise HTTPException(status_code=404, detail=f"unknown marking: {name}")
     return marking
 
 
-@router.post("/markings/{name}/principals/{principal_urn:path}/access/grant")
+@router.get("/markings")
+async def list_markings(
+    principal: Principal = Depends(core.current_principal),
+    category_id: Optional[str] = Query(None),
+) -> list[dict]:
+    return await ontology.list_markings(core.pool, principal.tenant_id, category_id=category_id)
+
+
+@router.get("/markings/{marking_ref}")
+async def get_marking(marking_ref: str, principal: Principal = Depends(core.current_principal)) -> dict:
+    marking = await ontology.get_marking(core.pool, principal.tenant_id, marking_ref)
+    if marking is None:
+        raise HolonError.not_found("MarkingNotFound", f"unknown marking: {marking_ref}")
+    return marking
+
+
+@router.post("/markings/{marking_ref}/principals/{principal_urn:path}/access/grant")
 async def grant_marking_access(
-    name: str, principal_urn: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+    marking_ref: str,
+    principal_urn: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    """Grants `hold` on `marking:{name}` — the SpiceDB-level clearance
-    `_authorize_markings` checks at read time. Governance-gated the same
-    as creating the marking itself: only a workspace admin decides who
-    holds a clearance label, same tier Identity's own project-access
-    grant uses one level up the hierarchy.
+    """Grants `holder` on `marking:{name}` — clearance `_authorize_markings`
+    checks at read time. Allowed for marking admins or workspace approve.
     """
-    await _authorize_ontology_governance(principal, workspace_id)
-    if await ontology.get_marking(core.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown marking: {name}")
-    marking_urn = build_urn(principal.tenant_id, "global", "marking", name)
+    marking = await ontology.get_marking(core.pool, principal.tenant_id, marking_ref)
+    if marking is None:
+        raise HolonError.not_found("MarkingNotFound", f"unknown marking: {marking_ref}")
+    await _authorize_marking_administer(principal, workspace_id, marking["name"])
+    marking_urn = build_urn(principal.tenant_id, "global", "marking", marking["name"])
     await core.authz.write_relationship(
-        resource_type="marking", resource_urn=marking_urn, relation="holder", subject_urn=principal_urn,
+        resource_type="marking",
+        resource_urn=marking_urn,
+        relation="holder",
+        subject_urn=principal_urn,
     )
-    return {"status": "granted", "principalUrn": principal_urn, "marking": name}
+    return {"status": "granted", "principalUrn": principal_urn, "marking": marking["name"]}
 
 
-@router.post("/markings/{name}/principals/{principal_urn:path}/access/revoke")
+@router.post("/markings/{marking_ref}/principals/{principal_urn:path}/access/revoke")
 async def revoke_marking_access(
-    name: str, principal_urn: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+    marking_ref: str,
+    principal_urn: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    await _authorize_ontology_governance(principal, workspace_id)
-    if await ontology.get_marking(core.pool, principal.tenant_id, name) is None:
-        raise HTTPException(status_code=404, detail=f"unknown marking: {name}")
-    marking_urn = build_urn(principal.tenant_id, "global", "marking", name)
+    marking = await ontology.get_marking(core.pool, principal.tenant_id, marking_ref)
+    if marking is None:
+        raise HolonError.not_found("MarkingNotFound", f"unknown marking: {marking_ref}")
+    await _authorize_marking_administer(principal, workspace_id, marking["name"])
+    marking_urn = build_urn(principal.tenant_id, "global", "marking", marking["name"])
     await core.authz.delete_relationship(
-        resource_type="marking", resource_urn=marking_urn, relation="holder", subject_urn=principal_urn,
+        resource_type="marking",
+        resource_urn=marking_urn,
+        relation="holder",
+        subject_urn=principal_urn,
     )
-    return {"status": "revoked", "principalUrn": principal_urn, "marking": name}
+    return {"status": "revoked", "principalUrn": principal_urn, "marking": marking["name"]}
 
 
 class SetInstanceMarkingsRequest(BaseModel):
@@ -731,7 +1468,7 @@ async def set_instance_markings(
     try:
         object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {object_type}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {object_type}")
     await core._authorize_object_type(principal, object_type_urn, "write")
     try:
         markings = await ontology.set_instance_markings(
@@ -742,7 +1479,7 @@ async def set_instance_markings(
             markings=request.markings,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('MarkingValidationFailed', str(exc)) from exc
     return {"objectType": object_type, "instanceId": instance_id, "markings": markings}
 
 
@@ -753,38 +1490,29 @@ async def list_object_type_versions(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     return await ontology.list_object_type_versions(core.pool, object_type_urn)
 
 
-async def _link_object_type_to_project(object_type_urn: str, project_urn: Optional[str]) -> None:
-    """After a publish (direct or via branch-review merge) sets a
-    `project_urn`, reconciles the SpiceDB `parent_project` relationship
-    that actually makes `object_type`'s `read/write/approve = ... +
-    parent_project->...` union take effect.
+async def _link_resource_to_project(
+    *, resource_type: str, resource_urn: str, project_urn: Optional[str]
+) -> None:
+    """Reconcile SpiceDB `parent_project` for a single-valued Postgres
+    `project_urn` (ObjectType publish path and Shared Property Type CRUD).
 
-    SpiceDB relationships are additive (`OPERATION_TOUCH`), so re-publishing an
-    ObjectType under a different project — or unscoping it back to `None` —
-    would leave stale `parent_project` edges in place, silently granting former
-    project members standing access. Because `object_type.project_urn` is single-valued
-    in Postgres, its SpiceDB relationship is kept single-valued.
-
-    Order is write-new-then-delete-old (when scoping) so a mid-flight
-    failure never removes the previous edge before the new one exists.
-    On failure, best-effort restore of the pre-call edge set, then
-    re-raise — PG publish has already committed; the caller surfaces 503
-    so the client knows authz may be temporarily inconsistent rather
-    than silently succeeding with a wrong ReBAC graph.
+    SpiceDB relationships are additive (`OPERATION_TOUCH`), so changing
+    or clearing project scope would leave stale edges unless we delete
+    the previous subjects. Order is write-new-then-delete-old.
     """
     existing = await core.authz.read_relationships(
-        resource_type="object_type", resource_urn=object_type_urn, relation="parent_project"
+        resource_type=resource_type, resource_urn=resource_urn, relation="parent_project"
     )
     existing_urns = [relationship["subject"]["object"]["objectId"] for relationship in existing]
 
     async def _write(subject_urn: str) -> None:
         await core.authz.write_relationship(
-            resource_type="object_type",
-            resource_urn=object_type_urn,
+            resource_type=resource_type,
+            resource_urn=resource_urn,
             relation="parent_project",
             subject_type="project",
             subject_urn=subject_urn,
@@ -792,8 +1520,8 @@ async def _link_object_type_to_project(object_type_urn: str, project_urn: Option
 
     async def _delete(subject_urn: str) -> None:
         await core.authz.delete_relationship(
-            resource_type="object_type",
-            resource_urn=object_type_urn,
+            resource_type=resource_type,
+            resource_urn=resource_urn,
             relation="parent_project",
             subject_type="project",
             subject_urn=subject_urn,
@@ -802,7 +1530,7 @@ async def _link_object_type_to_project(object_type_urn: str, project_urn: Option
     async def _restore_snapshot() -> None:
         try:
             current = await core.authz.read_relationships(
-                resource_type="object_type", resource_urn=object_type_urn, relation="parent_project"
+                resource_type=resource_type, resource_urn=resource_urn, relation="parent_project"
             )
             current_urns = {relationship["subject"]["object"]["objectId"] for relationship in current}
             for urn in existing_urns:
@@ -812,7 +1540,7 @@ async def _link_object_type_to_project(object_type_urn: str, project_urn: Option
                 await _delete(project_urn)
         except Exception:
             logger.exception(
-                "failed to restore parent_project snapshot for %s after link error", object_type_urn
+                "failed to restore parent_project snapshot for %s after link error", resource_urn
             )
 
     try:
@@ -826,9 +1554,49 @@ async def _link_object_type_to_project(object_type_urn: str, project_urn: Option
             for old_urn in existing_urns:
                 await _delete(old_urn)
     except Exception:
-        logger.exception("SpiceDB parent_project reconcile failed for %s — attempting restore", object_type_urn)
+        logger.exception("SpiceDB parent_project reconcile failed for %s — attempting restore", resource_urn)
         await _restore_snapshot()
         raise
+
+
+async def _link_object_type_to_project(object_type_urn: str, project_urn: Optional[str]) -> None:
+    """ObjectType publish/merge → SpiceDB parent_project reconcile."""
+    await _link_resource_to_project(
+        resource_type="object_type", resource_urn=object_type_urn, project_urn=project_urn
+    )
+
+
+async def _link_shared_property_type_to_project(spt_urn: str, project_urn: Optional[str]) -> None:
+    """SPT create/update → SpiceDB parent_project reconcile."""
+    await _link_resource_to_project(
+        resource_type="shared_property_type", resource_urn=spt_urn, project_urn=project_urn
+    )
+
+
+async def _link_value_type_to_project(value_type_resource_urn: str, project_urn: Optional[str]) -> None:
+    """Value Type create/update → SpiceDB parent_project (project import)."""
+    await _link_resource_to_project(
+        resource_type="value_type", resource_urn=value_type_resource_urn, project_urn=project_urn
+    )
+
+
+async def _validate_optional_project_urn(project_urn: Optional[str]) -> Optional[str]:
+    if project_urn is None:
+        return None
+    cleaned = project_urn.strip() if isinstance(project_urn, str) else ""
+    if not cleaned:
+        return None
+    from ..ontology.publishing import _validate_project_scope
+
+    try:
+        await _validate_project_scope(
+            identity_url=IDENTITY_URL,
+            project_urn=cleaned,
+            identity_token=_identity_validation_token(),
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument("InvalidProjectScope", str(exc)) from exc
+    return cleaned
 
 
 @router.post("/ontology/{name}/versions/{version}/publish")
@@ -843,7 +1611,7 @@ async def publish_object_type_version(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     try:
         result = await ontology.publish_object_type_version(
             core.pool,
@@ -853,18 +1621,45 @@ async def publish_object_type_version(
             identity_token=_identity_validation_token(),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ObjectTypeValidationFailed', str(exc)) from exc
     try:
         await _link_object_type_to_project(object_type_urn, result.get("project_urn"))
     except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
+        raise HolonError.unavailable('Unavailable', (
                 f"ObjectType version {version} published in Postgres, but SpiceDB "
                 f"parent_project reconcile failed: {exc}"
-            ),
-        ) from exc
+            ),) from exc
     return result
+
+
+@router.post("/ontology/{name}/reindex-search")
+async def reindex_object_type_search_route(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Rebuild OpenSearch documents for one ObjectType from the serving store."""
+    from .. import catalog
+
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
+    except KeyError:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from None
+    opensearch_url = os.environ["HOLON_OPENSEARCH_URL"]
+    opensearch_password = os.environ["HOLON_OPENSEARCH_PASSWORD"]
+    try:
+        return await catalog.reindex_object_type_search(
+            core.pool,
+            object_type_name=name,
+            object_type_urn=object_type_urn,
+            tenant_id=principal.tenant_id,
+            opensearch_url=opensearch_url,
+            opensearch_password=opensearch_password,
+            allowed_countries=core.allowed_countries,
+        )
+    except ValueError as exc:
+        raise HolonError.invalid_argument('ObjectTypeValidationFailed', str(exc)) from exc
 
 
 class CreateBranchRequest(BaseModel):
@@ -907,7 +1702,7 @@ async def create_branch(name: str, request: CreateBranchRequest, principal: Prin
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     try:
         return await ontology.create_branch(
             core.pool,
@@ -925,7 +1720,7 @@ async def create_branch(name: str, request: CreateBranchRequest, principal: Prin
             property_types=request.property_types,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('BranchValidationFailed', str(exc)) from exc
 
 
 @router.get("/ontology/{name}/branches")
@@ -935,7 +1730,7 @@ async def list_branches(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     return await ontology.list_branches(core.pool, object_type_urn)
 
 
@@ -946,10 +1741,10 @@ async def get_branch(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     branch = await ontology.get_branch(core.pool, object_type_urn, branch_name)
     if branch is None:
-        raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
+        raise HolonError.not_found('BranchNotFound', f"unknown branch: {branch_name}")
     return branch
 
 
@@ -964,7 +1759,7 @@ async def update_branch_draft(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     try:
         return await ontology.update_branch_draft(
             core.pool,
@@ -981,7 +1776,7 @@ async def update_branch_draft(
             property_types=request.property_types,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('BranchValidationFailed', str(exc)) from exc
 
 
 @router.post("/ontology/{name}/branches/{branch_name}/review")
@@ -998,7 +1793,7 @@ async def review_branch(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     try:
         result = await ontology.review_branch(
             core.pool,
@@ -1011,19 +1806,16 @@ async def review_branch(
             identity_token=_identity_validation_token(),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('BranchValidationFailed', str(exc)) from exc
     if request.decision == "approved":
         object_type = await ontology.get_object_type(core.pool, object_type_urn)
         try:
             await _link_object_type_to_project(object_type_urn, object_type.get("project_urn") if object_type else None)
         except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=(
+            raise HolonError.unavailable('Unavailable', (
                     f"branch {branch_name!r} merged in Postgres, but SpiceDB "
                     f"parent_project reconcile failed: {exc}"
-                ),
-            ) from exc
+                ),) from exc
     return result
 
 
@@ -1034,18 +1826,16 @@ async def list_branch_reviews(
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {name}")
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
     branch = await ontology.get_branch(core.pool, object_type_urn, branch_name)
     if branch is None:
-        raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
+        raise HolonError.not_found('BranchNotFound', f"unknown branch: {branch_name}")
     return await ontology.list_branch_reviews(core.pool, branch["id"])
 
 
 def _validate_resource_type(resource_type: str) -> None:
     if resource_type not in ontology.ALLOWED_RESOURCE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"unknown resource_type: {resource_type!r} (expected one of {sorted(ontology.ALLOWED_RESOURCE_TYPES)})",
+        raise HolonError.invalid_argument('InvalidResourceType', f"unknown resource_type: {resource_type!r} (expected one of {sorted(ontology.ALLOWED_RESOURCE_TYPES)})",
         )
 
 
@@ -1083,7 +1873,7 @@ async def create_resource_branch(
             proposed_definition=request.proposed_definition,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('BranchValidationFailed', str(exc)) from exc
 
 
 @router.get("/ontology-resources/{resource_type}/{resource_name}/branches")
@@ -1105,7 +1895,7 @@ async def get_resource_branch(
         core.pool, resource_type=resource_type, resource_name=resource_name, branch_name=branch_name, tenant_id=principal.tenant_id
     )
     if branch is None:
-        raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
+        raise HolonError.not_found('BranchNotFound', f"unknown branch: {branch_name}")
     return branch
 
 
@@ -1129,7 +1919,7 @@ async def update_resource_branch_draft(
             proposed_definition=request.proposed_definition,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('BranchValidationFailed', str(exc)) from exc
 
 
 @router.post("/ontology-resources/{resource_type}/{resource_name}/branches/{branch_name}/review")
@@ -1161,7 +1951,7 @@ async def review_resource_branch(
             workspace_id=workspace_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('BranchValidationFailed', str(exc)) from exc
 
 
 @router.get("/ontology-resources/{resource_type}/{resource_name}/branches/{branch_name}/reviews")
@@ -1173,7 +1963,7 @@ async def list_resource_branch_reviews(
         core.pool, resource_type=resource_type, resource_name=resource_name, branch_name=branch_name, tenant_id=principal.tenant_id
     )
     if branch is None:
-        raise HTTPException(status_code=404, detail=f"unknown branch: {branch_name}")
+        raise HolonError.not_found('BranchNotFound', f"unknown branch: {branch_name}")
     return await ontology.list_resource_branch_reviews(core.pool, branch["id"])
 
 
@@ -1183,6 +1973,57 @@ async def get_query_log(principal: Principal = Depends(core.current_principal)) 
     inspectable rather than write-only. Auth-only, tenant-scoped.
     """
     return await query_log.list_recent(core.pool, principal.tenant_id)
+
+
+@router.get("/audit-events")
+async def list_audit_events(
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+    category: Optional[str] = None,
+    action: Optional[str] = None,
+    actor: Optional[str] = None,
+    outcome: Optional[str] = None,
+    pageSize: Optional[int] = None,
+    pageToken: Optional[str] = None,
+) -> dict:
+    """Queryable security audit trail (durable). Requires workspace approve.
+
+    Events are available as soon as they are written. SIEM operators still
+    ship ``holon.audit`` stdout independently.
+    """
+    from holon_common import audit_store as audit_store_module
+    from holon_common.audit import CATEGORIES
+    from ..paging import PagingError, clamp_page_size, decode_cursor, encode_cursor
+
+    await _authorize_ontology_governance(principal, workspace_id)
+    if category is not None and category not in CATEGORIES:
+        raise HolonError.invalid_argument("InvalidAuditCategory", f"unknown category: {category}", category=category)
+    try:
+        page_size = clamp_page_size(pageSize)
+    except PagingError as exc:
+        raise HolonError.invalid_argument("InvalidPageSize", str(exc)) from exc
+    after_id = None
+    if pageToken:
+        try:
+            after_id = int(decode_cursor(pageToken))
+        except (PagingError, TypeError, ValueError) as exc:
+            raise HolonError.invalid_argument("InvalidPageToken", "invalid pageToken") from exc
+
+    rows = await audit_store_module.list_events(
+        core.pool,
+        principal.tenant_id,
+        category=category,
+        action=action,
+        actor_urn=actor,
+        outcome=outcome,
+        after_id=after_id,
+        page_size=page_size + 1,
+    )
+    next_token = None
+    if len(rows) > page_size:
+        rows = rows[:page_size]
+        next_token = encode_cursor(after_id=rows[-1]["id"])
+    return {"data": rows, "nextPageToken": next_token, "pageSize": page_size}
 
 
 @router.get("/glossary")
@@ -1197,21 +2038,62 @@ async def list_glossary(principal: Principal = Depends(core.current_principal)) 
 async def get_glossary_term(term: str, principal: Principal = Depends(core.current_principal)) -> dict:
     result = await glossary.get_term(core.pool, principal.tenant_id, term)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"unknown glossary term: {term!r}")
+        raise HolonError.not_found('GlossaryTermNotFound', f"unknown glossary term: {term!r}")
     return result
+
+
+class GlossaryTermRequest(BaseModel):
+    term: str
+    definition: str
+    synonyms: list[str] = []
+    related_object_type: Optional[str] = None
+
+
+@router.post("/glossary", status_code=201)
+async def create_glossary_term(
+    request: GlossaryTermRequest, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    """Registering a glossary term is ontology governance, same tier and
+    gate as RelationTypes/ActionTypes — not a per-ObjectType concern
+    (`related_object_type` is optional context, not an authorization
+    scope), so `approve` on the workspace is what's checked.
+    """
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="workspace",
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
+        permission="approve",
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+    if await glossary.get_term(core.pool, principal.tenant_id, request.term) is not None:
+        raise HolonError.conflict('GlossaryTermAlreadyExists', f"glossary term already exists: {request.term}")
+
+    related_urn = None
+    if request.related_object_type is not None:
+        related_urn = ontology.object_type_urn(principal.tenant_id, workspace_id, request.related_object_type)
+        if await ontology.get_object_type(core.pool, related_urn) is None:
+            raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {request.related_object_type}")
+
+    return await glossary.create_term(
+        core.pool,
+        tenant_id=principal.tenant_id,
+        term=request.term,
+        definition=request.definition,
+        synonyms=request.synonyms,
+        related_object_type_urn=related_urn,
+    )
 
 
 @router.get("/actions")
 async def list_actions(principal: Principal = Depends(core.current_principal)) -> list[dict]:
-    """Read surface for both the two hardcoded `actions.ACTION_DEFINITIONS`
-    entries and every registered declarative Action Type — same auth-only
-    convention as `/ontology/{name}`/`/relation-types` (metadata about a
-    definition, not an instance read; nothing for the PDP to check per-row).
-    Exists so mandatory descriptions are actually queryable (including by
-    an agent tool-compiler), not just inert dict values inside `actions.py`.
+    """Read surface for every registered Action Type — auth-only,
+    same convention as `/ontology/{name}`/`/relation-types` (metadata about a
+    definition, not an instance read). Exists so mandatory descriptions are
+    actually queryable (including by an agent tool-compiler).
     """
-    hardcoded = [{"name": name, **definition} for name, definition in actions.ACTION_DEFINITIONS.items()]
-    declared = [
+    return [
         {
             "name": action_type["name"],
             "target_object_type": action_type["target_object_type"],
@@ -1225,17 +2107,17 @@ async def list_actions(principal: Principal = Depends(core.current_principal)) -
             "edits": action_type["edits"],
             "edit_function": action_type.get("edit_function"),
             "sections": action_type.get("sections", []),
+            "type_classes": action_type.get("type_classes", []),
         }
         for action_type in await ontology.list_action_types(core.pool, principal.tenant_id)
     ]
-    return hardcoded + declared
 
 
 @router.get("/actions/{name}")
 async def get_action(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
     definition = await actions._get_action_definition(core.pool, principal.tenant_id, name)
     if definition is None:
-        raise HTTPException(status_code=404, detail=f"unknown Action: {name}")
+        raise HolonError.not_found('ActionNotFound', f"unknown Action: {name}")
     public = {k: v for k, v in definition.items() if k != "_declarative"}
     return {"name": name, **public}
 
@@ -1254,6 +2136,20 @@ class RelationTypeRequest(BaseModel):
     mid_object_type: Optional[str] = None
     mid_source_property: Optional[str] = None
     mid_target_property: Optional[str] = None
+    source_display_name: str = ""
+    source_plural_display_name: str = ""
+    source_api_name: Optional[str] = None
+    source_visibility: str = "normal"
+    target_display_name: str = ""
+    target_plural_display_name: str = ""
+    target_api_name: Optional[str] = None
+    target_visibility: str = "normal"
+    lifecycle_status: str = "experimental"
+    type_classes: Optional[list[str]] = None
+    project_urn: Optional[str] = None
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
 
 
 @router.get("/relation-types")
@@ -1274,6 +2170,21 @@ class UpdateRelationTypeRequest(BaseModel):
     mid_object_type: Optional[str] = None
     mid_source_property: Optional[str] = None
     mid_target_property: Optional[str] = None
+    source_display_name: Optional[str] = None
+    source_plural_display_name: Optional[str] = None
+    source_api_name: Optional[str] = None
+    source_visibility: Optional[str] = None
+    target_display_name: Optional[str] = None
+    target_plural_display_name: Optional[str] = None
+    target_api_name: Optional[str] = None
+    target_visibility: Optional[str] = None
+    lifecycle_status: Optional[str] = None
+    type_classes: Optional[list[str]] = None
+    project_urn: Optional[str] = None
+    clear_project_urn: bool = False
+    deprecation_reason: Optional[str] = None
+    deprecation_deadline: Optional[str] = None
+    replacement_urn: Optional[str] = None
 
 
 @router.put("/relation-types/{name}")
@@ -1284,12 +2195,16 @@ async def update_relation_type(
     here — they're the structural identity of the link. See
     `ontology/relation_types.py`'s `update_relation_type` docstring.
     """
-    await _authorize_ontology_governance(principal, workspace_id)
     urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
-    if await ontology.get_relation_type(core.pool, urn) is None:
-        raise HTTPException(status_code=404, detail=f"unknown RelationType: {name}")
+    current = await ontology.get_relation_type(core.pool, urn)
+    if current is None:
+        raise HolonError.not_found('RelationTypeNotFound', f"unknown RelationType: {name}")
+    await _authorize_relation_type(principal, urn, "write")
+    project_urn = None
+    if not request.clear_project_urn and request.project_urn is not None:
+        project_urn = await _validate_optional_project_urn(request.project_urn)
     try:
-        return await ontology.update_relation_type(
+        updated = await ontology.update_relation_type(
             core.pool,
             tenant_id=principal.tenant_id,
             workspace_id=workspace_id,
@@ -1303,9 +2218,30 @@ async def update_relation_type(
             mid_object_type=request.mid_object_type,
             mid_source_property=request.mid_source_property,
             mid_target_property=request.mid_target_property,
+            source_display_name=request.source_display_name,
+            source_plural_display_name=request.source_plural_display_name,
+            source_api_name=request.source_api_name,
+            source_visibility=request.source_visibility,
+            target_display_name=request.target_display_name,
+            target_plural_display_name=request.target_plural_display_name,
+            target_api_name=request.target_api_name,
+            target_visibility=request.target_visibility,
+            lifecycle_status=request.lifecycle_status,
+            type_classes=request.type_classes,
+            project_urn=project_urn,
+            clear_project_urn=request.clear_project_urn,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('RelationTypeValidationFailed', str(exc)) from exc
+    if request.clear_project_urn or request.project_urn is not None:
+        try:
+            await _link_relation_type_to_project(updated["urn"], updated.get("project_urn"))
+        except Exception as exc:
+            raise HolonError.unavailable('Unavailable', f"RelationType updated but SpiceDB parent_project reconcile failed: {exc}",) from exc
+    return updated
 
 
 @router.get("/relation-types/{name}")
@@ -1313,8 +2249,115 @@ async def get_relation_type(name: str, principal: Principal = Depends(core.curre
     urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
     relation_type = await ontology.get_relation_type(core.pool, urn)
     if relation_type is None:
-        raise HTTPException(status_code=404, detail=f"unknown RelationType: {name}")
+        raise HolonError.not_found('RelationTypeNotFound', f"unknown RelationType: {name}")
+    await _authorize_relation_type(principal, urn, "read")
     return relation_type
+
+
+@router.get("/relation-types/{name}/permissions")
+async def get_relation_type_permissions(
+    name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
+    relation_type = await ontology.get_relation_type(core.pool, urn)
+    if relation_type is None:
+        raise HolonError.not_found('RelationTypeNotFound', f"unknown RelationType: {name}")
+    await _authorize_relation_type(principal, urn, "read")
+    parent_workspace_urn = ontology.workspace_urn(principal.tenant_id, workspace_id)
+    tiers = ("read", "write", "approve")
+    decisions = await asyncio.gather(
+        *(
+            core.authz.authorize(principal, resource_type="relation_type", resource_urn=urn, permission=permission)
+            for permission in tiers
+        )
+    )
+    permissions = {permission: decision.allowed for permission, decision in zip(tiers, decisions)}
+    return {
+        "name": name,
+        "urn": urn,
+        "parent_workspace_urn": parent_workspace_urn,
+        "project_urn": relation_type.get("project_urn"),
+        "permissions": permissions,
+    }
+
+
+@router.get("/relation-types/{name}/writeback-status")
+async def get_relation_type_writeback_status(
+    name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    """Warn before changing storage/datasource when link overlays exist.
+
+    Foundry surfaces Phonograph/writeback risks on Link Type edits; Holon
+    reports overlay count + lifecycle so the OM UI can show a Callout.
+    """
+    from .. import link_overlays
+
+    urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
+    relation_type = await ontology.get_relation_type(core.pool, urn)
+    if relation_type is None:
+        raise HolonError.not_found('RelationTypeNotFound', f"unknown RelationType: {name}")
+    await _authorize_relation_type(principal, urn, "read")
+    overlay_count = await link_overlays.count_overlays(
+        core.pool, tenant_id=principal.tenant_id, relation_urn=urn
+    )
+    lifecycle = relation_type.get("lifecycle_status") or "experimental"
+    storage = relation_type.get("storage_kind") or "foreign_key"
+    warnings: list[str] = []
+    if lifecycle == "active":
+        warnings.append("RelationType is active — storage/key changes may break existing apps and OSDK accessors.")
+    if overlay_count > 0:
+        warnings.append(
+            f"{overlay_count} link overlay write(s) exist for this relation — changing join/mid storage "
+            "will not migrate those overlays."
+        )
+    if storage == "foreign_key":
+        warnings.append("FK link writes use object_instance_edit overlays, not Iceberg writeback.")
+    return {
+        "name": name,
+        "urn": urn,
+        "storage_kind": storage,
+        "lifecycle_status": lifecycle,
+        "overlay_count": overlay_count,
+        "warnings": warnings,
+        "has_writeback_risk": lifecycle == "active" or overlay_count > 0,
+    }
+
+
+@router.delete("/relation-types/{name}")
+async def delete_relation_type(
+    name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
+) -> dict:
+    urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, name)
+    current = await ontology.get_relation_type(core.pool, urn)
+    if current is None:
+        raise HolonError.not_found('RelationTypeNotFound', f"unknown RelationType: {name}")
+    await _authorize_relation_type(principal, urn, "approve")
+    try:
+        await ontology.delete_relation_type(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            name=name,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail.startswith("unknown") else 400
+        raise HolonError.from_http(status, detail, error_name='RelationTypeValidationFailed') from exc
+    try:
+        await core.authz.delete_relationship(
+            resource_type="relation_type",
+            resource_urn=urn,
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
+        )
+    except Exception:
+        logger.exception("SpiceDB parent_workspace cleanup failed for deleted RelationType %s", urn)
+    try:
+        await _link_relation_type_to_project(urn, None)
+    except Exception:
+        logger.exception("SpiceDB parent_project cleanup failed for deleted RelationType %s", urn)
+    return {"name": name, "deleted": True}
 
 
 @router.post("/relation-types", status_code=201)
@@ -1323,7 +2366,7 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
     a data read/write — gated on the workspace's own `approve` permission
     (admin-only, the same tier that decides high-risk Actions), not
     `_authorize_object_type` (there's no single ObjectType this belongs to;
-    it connects two).
+    it connects two). Seeds SpiceDB `parent_workspace` (+ optional project).
     """
     decision = await core.authz.authorize(
         principal,
@@ -1332,14 +2375,15 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
         permission="approve",
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
     urn = ontology.relation_type_urn(principal.tenant_id, workspace_id, request.name)
     if await ontology.get_relation_type(core.pool, urn) is not None:
-        raise HTTPException(status_code=409, detail=f"RelationType already exists: {request.name}")
+        raise HolonError.conflict('RelationTypeAlreadyExists', f"RelationType already exists: {request.name}")
 
+    project_urn = await _validate_optional_project_urn(request.project_urn)
     try:
-        return await ontology.create_relation_type(
+        created = await ontology.create_relation_type(
             core.pool,
             tenant_id=principal.tenant_id,
             workspace_id=workspace_id,
@@ -1356,9 +2400,34 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
             mid_object_type=request.mid_object_type,
             mid_source_property=request.mid_source_property,
             mid_target_property=request.mid_target_property,
+            source_display_name=request.source_display_name,
+            source_plural_display_name=request.source_plural_display_name,
+            source_api_name=request.source_api_name,
+            source_visibility=request.source_visibility,
+            target_display_name=request.target_display_name,
+            target_plural_display_name=request.target_plural_display_name,
+            target_api_name=request.target_api_name,
+            target_visibility=request.target_visibility,
+            lifecycle_status=request.lifecycle_status,
+            type_classes=request.type_classes,
+            project_urn=project_urn,
+            deprecation_reason=request.deprecation_reason,
+            deprecation_deadline=request.deprecation_deadline,
+            replacement_urn=request.replacement_urn,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('RelationTypeValidationFailed', str(exc)) from exc
+    await _seed_relation_type_authz(
+        tenant_id=principal.tenant_id,
+        workspace_id=workspace_id,
+        urn=created["urn"],
+        name=created["name"],
+    )
+    try:
+        await _link_relation_type_to_project(created["urn"], created.get("project_urn"))
+    except Exception as exc:
+        raise HolonError.unavailable('Unavailable', f"RelationType created but SpiceDB parent_project reconcile failed: {exc}",) from exc
+    return created
 
 
 class ObjectTypeGroupRequest(BaseModel):
@@ -1385,12 +2454,49 @@ async def create_object_type_group(
             object_types=request.object_types,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ObjectTypeValidationFailed', str(exc)) from exc
 
 
 @router.get("/object-type-groups")
 async def list_object_type_groups(principal: Principal = Depends(core.current_principal)) -> list[dict]:
     return await ontology.list_object_type_groups(core.pool, principal.tenant_id)
+
+
+@router.put("/object-type-groups/{name}")
+async def update_object_type_group(
+    name: str,
+    request: ObjectTypeGroupRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        return await ontology.update_object_type_group(
+            core.pool,
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            name=name,
+            description=request.description,
+            object_types=request.object_types,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if detail.startswith("unknown ObjectType group") else 400
+        raise HolonError.from_http(status, detail, error_name='ObjectTypeValidationFailed') from exc
+
+
+@router.delete("/object-type-groups/{name}", status_code=204)
+async def delete_object_type_group(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> Response:
+    await _authorize_ontology_governance(principal, workspace_id)
+    try:
+        await ontology.delete_object_type_group(core.pool, principal.tenant_id, name)
+    except ValueError as exc:
+        raise HolonError.not_found("ObjectTypeGroupNotFound", str(exc)) from exc
+    return Response(status_code=204)
 
 
 class ObjectSetRequest(BaseModel):
@@ -1433,7 +2539,7 @@ async def create_object_set(request: ObjectSetRequest, principal: Principal = De
             visibility=request.visibility,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ObjectSetValidationFailed', str(exc)) from exc
 
 
 @router.get("/object-sets/{name}")
@@ -1441,7 +2547,7 @@ async def get_object_set(name: str, principal: Principal = Depends(core.current_
     urn = ontology.object_set_urn(principal.tenant_id, workspace_id, name)
     row = await ontology.get_object_set(core.pool, urn)
     if row is None:
-        raise HTTPException(status_code=404, detail=f"unknown object set: {name}")
+        raise HolonError.not_found('ObjectSetNotFound', f"unknown object set: {name}")
     return row
 
 
@@ -1464,7 +2570,11 @@ async def update_object_set(
         )
     except ValueError as exc:
         status = 404 if "unknown" in str(exc) else 400
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
+        raise HolonError.from_http(
+            status,
+            str(exc),
+            error_name="ObjectSetNotFound" if status == 404 else "ObjectSetValidationFailed",
+        ) from exc
 
 
 @router.get("/object-sets/{name}/objects")
@@ -1473,18 +2583,18 @@ async def evaluate_object_set(name: str, principal: Principal = Depends(core.cur
     urn = ontology.object_set_urn(principal.tenant_id, workspace_id, name)
     obj_set = await ontology.get_object_set(core.pool, urn)
     if obj_set is None:
-        raise HTTPException(status_code=404, detail=f"unknown object set: {name}")
+        raise HolonError.not_found('ObjectSetNotFound', f"unknown object set: {name}")
     if obj_set.get("visibility") == "hidden":
         # Still readable by admins with ontology approve; others get 404.
         try:
             await _authorize_ontology_governance(principal, workspace_id)
-        except HTTPException:
-            raise HTTPException(status_code=404, detail=f"unknown object set: {name}")
+        except HolonError:
+            raise HolonError.not_found('ObjectSetNotFound', f"unknown object set: {name}")
 
     object_type = obj_set["object_type_urn"].rsplit(":", 1)[-1]
     handle = await core._type_handle(object_type, principal.tenant_id)
     if handle is None:
-        raise HTTPException(status_code=404, detail=f"backing ObjectType {object_type!r} missing")
+        raise HolonError.not_found('ObjectTypeNotFound', f"backing ObjectType {object_type!r} missing")
     await core._authorize_object_type(principal, handle["urn"], "read")
     ot = await ontology.get_object_type(core.pool, obj_set["object_type_urn"])
     rows = await core._resolve_many(
@@ -1494,5 +2604,5 @@ async def evaluate_object_set(name: str, principal: Principal = Depends(core.cur
     matched = [r for r in rows if ontology.matches_predicates(r, obj_set["definition"], mapping)]
     for row in matched:
         row["title"] = ontology.title_of(row, ot)
-    return {"object_set": name, "object_type": object_type, "count": len(matched), "items": matched}
+    return {"object_set": name, "object_type": object_type, "count": len(matched), "data": matched}
 
