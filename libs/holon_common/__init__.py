@@ -3,6 +3,7 @@ from . import event_catalog  # noqa: F401 — importing registers all payload sc
 from . import registry
 from . import secrets as secrets_module
 from . import audit as audit_module
+from . import audit_store as audit_store_module
 from .resource import Classification, most_restrictive, union_markings
 from .urn import URN, InvalidURNError, build as build_urn, parse as parse_urn
 from .events import EventActor, EventConsumer, EventEnvelope, EventProducer
@@ -12,7 +13,9 @@ from .auth import (
     clear_session_cookie,
     decode_token,
     issue_token,
+    jwt_algorithm,
     load_jwt_secrets,
+    load_jwt_verify_keys,
     make_principal_dependency,
     require_tenant_match,
     require_urn_tenant_match,
@@ -25,7 +28,17 @@ from .security_posture import (
 )
 from .db import create_pool
 from .migrations import run_migrations
-from .errors import install_error_handlers
+from .errors import (
+    HolonError,
+    install_error_handlers,
+    raise_conflict,
+    raise_forbidden,
+    raise_invalid_argument,
+    raise_not_found,
+    raise_rate_limited,
+    raise_unauthorized,
+    raise_unavailable,
+)
 from .observability import (
     CircuitBreaker,
     CircuitBreakerOpenError,
@@ -54,8 +67,10 @@ __all__ = [
     "Principal",
     "decode_token",
     "issue_token",
+    "jwt_algorithm",
     "active_jwt",
     "load_jwt_secrets",
+    "load_jwt_verify_keys",
     "make_principal_dependency",
     "require_tenant_match",
     "require_urn_tenant_match",
@@ -68,6 +83,14 @@ __all__ = [
     "create_pool",
     "run_migrations",
     "install_error_handlers",
+    "HolonError",
+    "raise_not_found",
+    "raise_forbidden",
+    "raise_unauthorized",
+    "raise_invalid_argument",
+    "raise_conflict",
+    "raise_rate_limited",
+    "raise_unavailable",
     "CircuitBreaker",
     "CircuitBreakerOpenError",
     "configure_json_logging",
@@ -77,6 +100,7 @@ __all__ = [
     "retry_with_backoff",
     "secrets_module",
     "audit_module",
+    "audit_store_module",
 ]
 
 

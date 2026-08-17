@@ -28,9 +28,9 @@ import os
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import Header, HTTPException, Query
+from fastapi import Header, Query
 
-from holon_common import Principal, active_jwt, build_urn, make_principal_dependency, require_urn_tenant_match
+from holon_common import HolonError, Principal, active_jwt, build_urn, make_principal_dependency, require_urn_tenant_match
 
 from . import function_registry, ontology, resolver, serving_store
 from .struct_values import assemble_struct_value, parse_struct_or_array
@@ -130,7 +130,7 @@ async def _is_authorized_read(principal: Principal, object_type_urn: str) -> boo
     try:
         await _authorize_object_type(principal, object_type_urn, "read")
         return True
-    except HTTPException as exc:
+    except HolonError as exc:
         if exc.status_code == 403:
             return False
         raise
@@ -401,7 +401,11 @@ async def _authorize_object_type(principal: Principal, object_type_urn: str, per
         # us between that check and this one, a real server-side race, not
         # a merely-undefined resource. Fail loudly rather than guess a
         # classification.
-        raise HTTPException(status_code=500, detail=f"ObjectType {object_type_urn} is not catalogued")
+        raise HolonError.internal(
+            "ObjectTypeNotCatalogued",
+            f"ObjectType {object_type_urn} is not catalogued",
+            object_type_urn=object_type_urn,
+        )
 
     resource_attributes = {} if permission == "read" else {"classification": object_type["classification"]}
     decision = await authz.authorize(
@@ -412,31 +416,42 @@ async def _authorize_object_type(principal: Principal, object_type_urn: str, per
         resource_attributes=resource_attributes,
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden(
+            "PermissionDenied",
+            decision.reason,
+            resource_urn=object_type_urn,
+            permission=permission,
+        )
 
     markings = object_type.get("markings") or []
     if markings and not await _authorize_markings(principal, markings):
-        raise HTTPException(
-            status_code=403, detail=f"missing required marking(s) on {object_type_urn}: {markings}"
+        raise HolonError.forbidden(
+            "MarkingDenied",
+            f"missing required marking(s) on {object_type_urn}: {markings}",
+            object_type_urn=object_type_urn,
+            markings=markings,
         )
 
 
 async def _authorize_markings(principal: Principal, markings: list[str]) -> bool:
-    """Markings: composable, on top of ReBAC/ABAC, never
-    instead of it — every listed marking must be held, checked directly
-    against the flat `marking` SpiceDB resource (`hold = holder`, no
-    cascading tree the way `object_type`'s own permissions have one) via
-    `check_rebac`, the same primitive `authorize()` itself calls
-    internally. Bypasses `authorize()`'s decision cache on purpose: that
-    cache is keyed for the object_type/permission shape, not a variable-
-    length marking list, and a marking check is a cheap flat SpiceDB
-    lookup, not worth a second cache dimension for this build's scale.
+    """Markings on top of ReBAC/ABAC: evaluate per category.
+
+    CONJUNCTIVE categories require every applied marking held;
+    DISJUNCTIVE require at least one. Categories AND together. SpiceDB
+    `marking` stays flat (`hold = holder + admin`). Unknown registry
+    names fail closed. Bypasses `authorize()`'s decision cache (keyed for
+    object_type/permission, not marking lists).
     """
-    for name in markings:
+    if not markings:
+        return True
+    meta = await ontology.marking_authz_meta(pool, principal.tenant_id, markings)
+    if len(meta) != len(set(markings)):
+        return False
+    held: dict[str, bool] = {}
+    for name in {m["name"] for m in meta}:
         marking_urn = build_urn(principal.tenant_id, "global", "marking", name)
-        if not await authz.check_rebac(principal.urn, "marking", marking_urn, "hold"):
-            return False
-    return True
+        held[name] = await authz.check_rebac(principal.urn, "marking", marking_urn, "hold")
+    return ontology.category_groups_satisfied(meta, held)
 
 
 async def _mask_confidential_properties(

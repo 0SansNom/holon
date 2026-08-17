@@ -141,14 +141,14 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
     # empty placeholder is harmless here.
     client = HolonClient(identity_url="")
 
-    status, names = client.request("GET", f"{knowledge_url}/ontology", token=token)
+    status, names = client.request("GET", f"{knowledge_url}/api/ontologies/main/objectTypes", token=token)
     if status != 200:
         raise RuntimeError(f"GET /ontology failed ({status}): {names}")
 
     object_types = []
     for entry in names:
         name = entry["name"]
-        status, detail = client.request("GET", f"{knowledge_url}/ontology/{name}", token=token)
+        status, detail = client.request("GET", f"{knowledge_url}/api/ontologies/main/objectTypes/{name}", token=token)
         if status != 200:
             raise RuntimeError(f"GET /ontology/{name} failed ({status}): {detail}")
         # A top-level entry may be metadata-only — visibility/editable/
@@ -169,7 +169,7 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
             property_mapping=detail["property_mapping"], property_types=property_types,
         ))
 
-    status, value_type_rows = client.request("GET", f"{knowledge_url}/value-types", token=token)
+    status, value_type_rows = client.request("GET", f"{knowledge_url}/api/ontologies/main/valueTypes", token=token)
     if status != 200:
         raise RuntimeError(f"GET /value-types failed ({status}): {value_type_rows}")
     value_types = {
@@ -177,7 +177,7 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         for row in value_type_rows
     }
 
-    status, shared_property_type_rows = client.request("GET", f"{knowledge_url}/shared-property-types", token=token)
+    status, shared_property_type_rows = client.request("GET", f"{knowledge_url}/api/ontologies/main/sharedPropertyTypes", token=token)
     if status != 200:
         raise RuntimeError(f"GET /shared-property-types failed ({status}): {shared_property_type_rows}")
     shared_property_types = {
@@ -191,12 +191,12 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
         for row in shared_property_type_rows
     }
 
-    status, action_rows = client.request("GET", f"{knowledge_url}/actions", token=token)
+    status, action_rows = client.request("GET", f"{knowledge_url}/api/holon/actions", token=token)
     if status != 200:
         raise RuntimeError(f"GET /actions failed ({status}): {action_rows}")
     action_types = []
     for row in action_rows:
-        status, detail = client.request("GET", f"{knowledge_url}/actions/{row['name']}", token=token)
+        status, detail = client.request("GET", f"{knowledge_url}/api/holon/actions/{row['name']}", token=token)
         if status != 200:
             continue
         parameters = [
@@ -212,7 +212,7 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
             description=detail["description"], parameters=parameters,
         ))
 
-    status, relation_rows = client.request("GET", f"{knowledge_url}/relation-types", token=token)
+    status, relation_rows = client.request("GET", f"{knowledge_url}/api/ontologies/main/linkTypes", token=token)
     if status != 200:
         raise RuntimeError(f"GET /relation-types failed ({status}): {relation_rows}")
     relation_types: list[RelationTypeSchema] = []
@@ -233,7 +233,7 @@ def fetch_schema(*, knowledge_url: str, token: str) -> OntologySchema:
             )
         )
 
-    status, interface_rows = client.request("GET", f"{knowledge_url}/interfaces", token=token)
+    status, interface_rows = client.request("GET", f"{knowledge_url}/api/ontologies/main/interfaceTypes", token=token)
     if status != 200:
         raise RuntimeError(f"GET /interfaces failed ({status}): {interface_rows}")
     interface_types: list[InterfaceTypeSchema] = []

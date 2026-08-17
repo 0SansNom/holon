@@ -23,6 +23,7 @@ from typing import Optional
 
 import asyncpg
 import httpx
+from .knowledge_urls import holon_url
 
 from holon_common.plugin import (
     PluginConflictError,
@@ -35,6 +36,9 @@ from holon_common.plugin import (
     set_status,
 )
 
+from .tool_plugin_entry import assert_entry_point_allowed
+
+
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     await _shared_ensure_schema(conn)
 
@@ -42,11 +46,12 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
 async def register_tool_plugin(
     pool: asyncpg.Pool, http: httpx.AsyncClient, *, entry_point: str, knowledge_url: str, headers: dict
 ) -> dict:
+    assert_entry_point_allowed(entry_point)
     # Real Knowledge Action tool names, computed the identical way
     # `agent_runtime._list_tools` does — a plugin can't register a tool
     # name that would collide with (and, to the model, be indistinguishable
     # from) a genuine, audited ontology Action.
-    response = await http.get(f"{knowledge_url}/actions", headers=headers)
+    response = await http.get(holon_url(knowledge_url, "/actions"), headers=headers)
     response.raise_for_status()
     knowledge_tool_names = {action["name"].replace(".", "_") for action in response.json()}
 

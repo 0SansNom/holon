@@ -24,6 +24,7 @@ from typing import Any, Optional
 import asyncpg
 import httpx
 
+from .knowledge_urls import holon_url, ontology_url
 from holon_common import EventActor, EventEnvelope, build_urn, outbox
 
 from . import tool_plugin_registry
@@ -189,7 +190,7 @@ async def _list_tools(
     (`GET /tools`, the same list this function computes), not this
     runtime call's.
     """
-    response = await http.get(f"{knowledge_url}/actions", headers=headers)
+    response = await http.get(holon_url(knowledge_url, "/actions"), headers=headers)
     response.raise_for_status()
     tools, by_tool_name = [], {}
     for action in response.json():
@@ -253,7 +254,7 @@ async def _invoke_tool(http: httpx.AsyncClient, knowledge_url: str, headers: dic
     local_name = action["name"].split(".", 1)[1]
     instance_id = tool_input["instance_id"]
     response = await http.post(
-        f"{knowledge_url}/objects/{target_object_type}/{instance_id}/actions/{local_name}",
+        ontology_url(knowledge_url, f"/objects/{target_object_type}/{instance_id}/actions/{local_name}"),
         headers=headers,
         json={"reason": tool_input.get("reason", "")},
     )

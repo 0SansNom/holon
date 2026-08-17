@@ -1,15 +1,60 @@
 import { useAuthStore } from "../store/auth";
 import { redirectToLogin } from "./authRedirect";
 
+export type HolonErrorBody = {
+  detail: string;
+  error_code?: string;
+  error_name?: string;
+  error_instance_id?: string;
+  parameters?: Record<string, unknown>;
+  service?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function detailFromBody(body: unknown): string {
+  if (isRecord(body) && "detail" in body) {
+    const detail = body.detail;
+    if (typeof detail === "string") {
+      return detail;
+    }
+  }
+  return String(body);
+}
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
+  errorCode?: string;
+  errorName?: string;
+  errorInstanceId?: string;
+  parameters: Record<string, unknown>;
+  service?: string;
 
   constructor(status: number, body: unknown) {
-    const detail = typeof body === "object" && body !== null && "detail" in body ? String((body as { detail: unknown }).detail) : String(body);
-    super(detail);
+    super(detailFromBody(body));
     this.status = status;
     this.body = body;
+    this.parameters = {};
+    if (isRecord(body)) {
+      if (typeof body.errorCode === "string") {
+        this.errorCode = body.errorCode;
+      }
+      if (typeof body.errorName === "string") {
+        this.errorName = body.errorName;
+      }
+      if (typeof body.errorInstanceId === "string") {
+        this.errorInstanceId = body.errorInstanceId;
+      }
+      if (typeof body.service === "string") {
+        this.service = body.service;
+      }
+      if (isRecord(body.parameters)) {
+        this.parameters = body.parameters;
+      }
+    }
   }
 }
 
@@ -68,4 +113,3 @@ export function getErrorMessage(error: unknown): string {
   }
   return "An unexpected error occurred";
 }
-

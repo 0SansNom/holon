@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -32,6 +33,18 @@ from holon_common import build_urn
 from . import ui_component_registry
 
 logger = logging.getLogger("experience.application_builder")
+
+_WORKSPACE_ID = os.environ.get("HOLON_WORKSPACE_ID", "main")
+
+
+def _ontology_url(knowledge_url: str, path: str) -> str:
+    suffix = path if path.startswith("/") else f"/{path}"
+    return f"{knowledge_url.rstrip('/')}/api/ontologies/{_WORKSPACE_ID}{suffix}"
+
+
+def _holon_url(knowledge_url: str, path: str) -> str:
+    suffix = path if path.startswith("/") else f"/{path}"
+    return f"{knowledge_url.rstrip('/')}/api/holon{suffix}"
 
 DDL = """
 CREATE TABLE IF NOT EXISTS application (
@@ -227,13 +240,13 @@ async def _validate_definition(
     relation_link_names = sorted(_referenced_relation_types(definition))
 
     for object_type in object_types:
-        response = await http.get(f"{knowledge_url}/ontology/{object_type}", headers=headers)
+        response = await http.get(_ontology_url(knowledge_url, f"/objectTypes/{object_type}"), headers=headers)
         if response.status_code == 404:
             raise InvalidApplicationDefinition(f"unknown ObjectType {object_type!r}")
         response.raise_for_status()
 
     if relation_link_names:
-        response = await http.get(f"{knowledge_url}/relation-types", headers=headers)
+        response = await http.get(_ontology_url(knowledge_url, "/linkTypes"), headers=headers)
         response.raise_for_status()
         relation_rows = response.json()
         known_accessors: set[str] = set()
@@ -268,7 +281,7 @@ async def _validate_definition(
                     )
 
     for object_set in object_sets:
-        response = await http.get(f"{knowledge_url}/object-sets/{object_set}", headers=headers)
+        response = await http.get(_ontology_url(knowledge_url, f"/objectSets/{object_set}"), headers=headers)
         if response.status_code == 404:
             raise InvalidApplicationDefinition(f"unknown Object Set {object_set!r}")
         response.raise_for_status()
@@ -291,7 +304,7 @@ async def _validate_definition(
                 )
 
     for action in actions:
-        response = await http.get(f"{knowledge_url}/actions/{action}", headers=headers)
+        response = await http.get(_holon_url(knowledge_url, f"/actions/{action}"), headers=headers)
         if response.status_code == 404:
             raise InvalidApplicationDefinition(f"unknown Action {action!r}")
         response.raise_for_status()

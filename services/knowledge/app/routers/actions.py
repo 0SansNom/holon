@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from holon_common import Principal, build_urn
+from holon_common import HolonError, Principal, build_urn
 
 from .. import actions
 from .. import core
@@ -37,9 +37,9 @@ def _require_workflow_engine(principal: Principal) -> None:
     """Verify that the principal is the internal Workflow Engine service account."""
     expected_urn = build_urn(core.TENANT_ID, "global", "service-account", actions.WORKFLOW_ENGINE_URN_NAME)
     if principal.type != "service_account" or principal.urn != expected_urn:
-        raise HTTPException(
-            status_code=403,
-            detail="compensate is restricted to Automation's Workflow Engine — it is not a client-facing endpoint",
+        raise HolonError.forbidden(
+            "AutomationOnlyEndpoint",
+            "compensate is restricted to Automation's Workflow Engine — it is not a client-facing endpoint",
         )
 
 
@@ -54,9 +54,9 @@ async def compensate_approval(
             core.pool, approval_id=approval_id, workspace_id=core.WORKSPACE_ID, error=request.error
         )
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HolonError.not_found('ActionNotFound', str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('ApprovalConflict', str(exc)) from exc
 
 
 @router.post("/approvals/{approval_id}/approve")
@@ -65,7 +65,7 @@ async def approve_approval(
 ) -> dict:
     approval = await actions.get_approval(core.pool, approval_id)
     if approval is None:
-        raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+        raise HolonError.not_found('ApprovalNotFound', f"approval {approval_id} not found", approval_id=approval_id)
     await core._authorize_object_type(principal, await _approval_object_type_urn(approval), "approve")
     try:
         return await actions.approve_action(
@@ -76,7 +76,7 @@ async def approve_approval(
             note=request.note,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('ApprovalConflict', str(exc)) from exc
 
 
 @router.post("/approvals/{approval_id}/reject")
@@ -85,21 +85,21 @@ async def reject_approval(
 ) -> dict:
     approval = await actions.get_approval(core.pool, approval_id)
     if approval is None:
-        raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+        raise HolonError.not_found('ApprovalNotFound', f"approval {approval_id} not found", approval_id=approval_id)
     await core._authorize_object_type(principal, await _approval_object_type_urn(approval), "approve")
     try:
         return await actions.reject_action(
             core.pool, approval_id=approval_id, workspace_id=core.WORKSPACE_ID, decider=principal, note=request.note
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HolonError.conflict('ApprovalConflict', str(exc)) from exc
 
 
 @router.get("/approvals/{approval_id}")
 async def get_approval_by_id(approval_id: int, principal: Principal = Depends(core.current_principal)) -> dict:
     approval = await actions.get_approval(core.pool, approval_id)
     if approval is None:
-        raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+        raise HolonError.not_found('ApprovalNotFound', f"approval {approval_id} not found", approval_id=approval_id)
     await core._authorize_object_type(principal, await _approval_object_type_urn(approval), "read")
     return approval
 

@@ -146,8 +146,9 @@ def _emit_object_type(
 
 
 def _emit_action_function(action: ActionTypeSchema) -> str:
-    # Every Action Type is declarative — the one generic
-    # `/objects/{object_type}/{id}/actions/{full_name}` route is the only shape.
+    # Every Action Type is declarative — the generic
+    # `/api/ontologies/{ontology}/objects/{object_type}/{id}/actions/{full_name}`
+    # route is the only shape.
     url_action_name = action.name
     # Two different ObjectTypes can both declare an action with the same
     # `local_name` (e.g. "archive") — a bare function name would be a
@@ -169,7 +170,7 @@ def _emit_action_function(action: ActionTypeSchema) -> str:
         # Uses `_response` instead of `response` to avoid variable shadowing
         # if an Action parameter is named "response".
         f"  const _response = await fetch(\n"
-        f'    `${{knowledgeUrl}}/objects/{action.target_object_type}/${{instanceId}}/actions/{url_action_name}`,\n'
+        f'    `${{knowledgeUrl}}/api/ontologies/main/objects/{action.target_object_type}/${{instanceId}}/actions/{url_action_name}`,\n'
         f"    {{\n"
         f'      method: "POST",\n'
         f"      headers: {{ \"Content-Type\": \"application/json\", Authorization: `Bearer ${{token}}` }},\n"
@@ -199,7 +200,7 @@ def _emit_link_accessors(relation: RelationTypeSchema, emitted: set[str]) -> str
             f"  knowledgeUrl: string, token: string, instanceId: string\n"
             f"): Promise<Record<string, unknown>> {{\n"
             f"  const _response = await fetch(\n"
-            f'    `${{knowledgeUrl}}/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
+            f'    `${{knowledgeUrl}}/api/ontologies/main/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
             f"    {{ headers: {{ Authorization: `Bearer ${{token}}` }} }},\n"
             f"  );\n"
             f"  if (!_response.ok) {{\n"
@@ -217,7 +218,7 @@ def _emit_link_accessors(relation: RelationTypeSchema, emitted: set[str]) -> str
             f"  knowledgeUrl: string, token: string, instanceId: string\n"
             f"): Promise<Record<string, unknown>> {{\n"
             f"  const _response = await fetch(\n"
-            f'    `${{knowledgeUrl}}/objects/{relation.target_object_type}/${{instanceId}}/links/{relation.target_api_name}`,\n'
+            f'    `${{knowledgeUrl}}/api/ontologies/main/objects/{relation.target_object_type}/${{instanceId}}/links/{relation.target_api_name}`,\n'
             f"    {{ headers: {{ Authorization: `Bearer ${{token}}` }} }},\n"
             f"  );\n"
             f"  if (!_response.ok) {{\n"
@@ -237,7 +238,7 @@ def _emit_link_accessors(relation: RelationTypeSchema, emitted: set[str]) -> str
                 f"  knowledgeUrl: string, token: string, instanceId: string, targetId: unknown\n"
                 f"): Promise<Record<string, unknown>> {{\n"
                 f"  const _response = await fetch(\n"
-                f'    `${{knowledgeUrl}}/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
+                f'    `${{knowledgeUrl}}/api/ontologies/main/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
                 f"    {{\n"
                 f'      method: "PUT",\n'
                 f"      headers: {{ \"Content-Type\": \"application/json\", Authorization: `Bearer ${{token}}` }},\n"
@@ -258,7 +259,7 @@ def _emit_link_accessors(relation: RelationTypeSchema, emitted: set[str]) -> str
                 f"  knowledgeUrl: string, token: string, instanceId: string\n"
                 f"): Promise<Record<string, unknown>> {{\n"
                 f"  const _response = await fetch(\n"
-                f'    `${{knowledgeUrl}}/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
+                f'    `${{knowledgeUrl}}/api/ontologies/main/objects/{relation.source_object_type}/${{instanceId}}/links/{relation.source_api_name}`,\n'
                 f"    {{\n"
                 f'      method: "DELETE",\n'
                 f"      headers: {{ Authorization: `Bearer ${{token}}` }},\n"
@@ -310,7 +311,7 @@ def _emit_ontology_interface(
         f"  knowledgeUrl: string, token: string\n"
         f"): Promise<{type_name}[]> {{\n"
         f"  const _response = await fetch(\n"
-        f'    `${{knowledgeUrl}}/interfaces/{iface.name}/objects`,\n'
+        f'    `${{knowledgeUrl}}/api/ontologies/main/interfaceTypes/{iface.name}/objects`,\n'
         f"    {{ headers: {{ Authorization: `Bearer ${{token}}` }} }},\n"
         f"  );\n"
         f"  if (!_response.ok) {{\n"

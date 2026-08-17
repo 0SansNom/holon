@@ -1,0 +1,11 @@
+{{- if .Values.observability.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: holon
+  labels:
+    app.kubernetes.io/name: holon
+    platform: holon
+spec:
+{{ .Files.Get "files/observability/rules.yaml" | nindent 2 }}
+{{- end }}

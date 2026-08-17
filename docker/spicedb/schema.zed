@@ -109,14 +109,14 @@ definition application {
     permission write = parent_workspace->write + parent_project->write
 }
 
-// Markings — deliberately flat, not cascading like `project`
-// above: a marking grant is a direct, admin-issued clearance ("does this
-// principal hold PII clearance"), not something inherited down an org
-// hierarchy. Checked *on top of* `object_type`'s own read/write/approve
-// above, never instead of it (`main.py`'s `_authorize_markings`) — a
-// principal needs both the ordinary ReBAC/ABAC grant *and* every marking
-// the resource carries.
+// Markings — flat clearance labels (not cascading like `project`).
+// Checked on top of object_type ReBAC: a principal needs ordinary
+// read/write *and* to satisfy each applied marking's category rule
+// (CONJUNCTIVE = all held in that category; DISJUNCTIVE = any one).
+// `admin` can grant/revoke holders and automatically satisfies `hold`.
 definition marking {
     relation holder: principal
-    permission hold = holder
+    relation admin: principal
+    permission hold = holder + admin
+    permission administer = admin
 }

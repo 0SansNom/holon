@@ -528,7 +528,11 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                     {markings.map((m) => (
                       <Checkbox
                         key={m.name}
-                        label={m.name}
+                        label={
+                          m.category_name && m.category_name !== "Default"
+                            ? `${m.name} (${m.category_name})`
+                            : m.name
+                        }
                         checked={markingsSet.has(m.name)}
                         onChange={() => toggle(markingsSet, setMarkingsSet, m.name)}
                       />

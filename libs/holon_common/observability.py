@@ -123,9 +123,9 @@ def instrument_metrics(app: FastAPI, *, service_name: str) -> None:
             auth = request.headers.get("authorization") or ""
             expected = f"Bearer {metrics_token}"
             if not secrets_mod.compare_digest(auth, expected):
-                from fastapi import HTTPException
+                from .errors import HolonError
 
-                raise HTTPException(status_code=401, detail="metrics unauthorized")
+                raise HolonError.unauthorized("MetricsUnauthorized", "metrics unauthorized")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

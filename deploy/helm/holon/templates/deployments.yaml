@@ -18,6 +18,9 @@ spec:
         app.kubernetes.io/name: holon
         app.kubernetes.io/component: {{ $name }}
     spec:
+      {{- if and (eq $name "intelligence") $svc.runtimeClassName }}
+      runtimeClassName: {{ $svc.runtimeClassName | quote }}
+      {{- end }}
       containers:
         - name: {{ $name }}
           image: "{{ $.Values.image.registry }}/{{ $.Values.image.repository }}/{{ $name }}:{{ $.Values.image.tag }}"
@@ -97,6 +100,9 @@ apiVersion: v1
 kind: Service
 metadata:
   name: holon-{{ $name }}
+  labels:
+    app.kubernetes.io/name: holon
+    app.kubernetes.io/component: {{ $name }}
 spec:
   selector:
     app.kubernetes.io/component: {{ $name }}

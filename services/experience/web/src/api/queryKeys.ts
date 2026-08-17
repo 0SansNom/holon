@@ -22,6 +22,7 @@ export const queryKeys = {
   interfaces: () => ["interfaces"] as const,
   interfaceObjects: (name: string) => ["interfaceObjects", name] as const,
   markings: () => ["markings"] as const,
+  markingCategories: () => ["markingCategories"] as const,
   objectTypeGroups: () => ["objectTypeGroups"] as const,
   objectSets: () => ["objectSets"] as const,
   ontologyHealthCheck: () => ["ontologyHealthCheck"] as const,

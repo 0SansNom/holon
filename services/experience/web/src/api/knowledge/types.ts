@@ -395,10 +395,25 @@ export interface InterfaceType {
   created_at: string;
 }
 
-export interface Marking {
+export interface MarkingCategory {
+  id: string;
   tenant_id: string;
   name: string;
   description: string;
+  category_type: "CONJUNCTIVE" | "DISJUNCTIVE";
+  marking_type: "MANDATORY";
+  created_at: string;
+}
+
+export interface Marking {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string;
+  category_id: string;
+  category_name?: string;
+  category_type?: "CONJUNCTIVE" | "DISJUNCTIVE";
+  marking_type?: "MANDATORY";
   created_at: string;
 }
 
@@ -621,9 +636,9 @@ export interface TimelineEvent {
 }
 
 export interface ObjectListPage {
-  items: Array<Record<string, unknown>>;
-  next_cursor: string | null;
-  page_size: number;
+  data: Array<Record<string, unknown>>;
+  nextPageToken: string | null;
+  pageSize?: number;
 }
 
 export interface ObjectLinksResponse {
@@ -631,9 +646,9 @@ export interface ObjectLinksResponse {
   direction: "toward_one" | "toward_many" | null;
   cardinality: string;
   storage_kind?: string;
-  items: Array<Record<string, unknown>>;
-  next_cursor?: string | null;
-  page_size?: number;
+  data: Array<Record<string, unknown>>;
+  nextPageToken?: string | null;
+  pageSize?: number;
   link_objects?: Array<{ object_type: string | null; object: Record<string, unknown> }>;
 }
 

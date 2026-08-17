@@ -12,6 +12,7 @@ import time
 
 import asyncpg
 import httpx
+from .knowledge_urls import ontology_url
 from qdrant_client import AsyncQdrantClient
 
 from .context_builder import ask as context_builder_ask
@@ -128,11 +129,11 @@ async def run_security_suite(*, knowledge_url: str, agent_token: str, editor_tok
     """
     checks = []
     async with httpx.AsyncClient(timeout=15.0) as http:
-        response = await http.get(f"{knowledge_url}/objects/Customer", headers={"Authorization": f"Bearer {agent_token}"})
+        response = await http.get(ontology_url(knowledge_url, "/objects/Customer"), headers={"Authorization": f"Bearer {agent_token}"})
         checks.append({"check": "agent_can_read_within_its_grant", "passed": response.status_code == 200})
 
         response = await http.post(
-            f"{knowledge_url}/objects/Customer/1/actions/putOnCreditHold",
+            ontology_url(knowledge_url, "/objects/Customer/1/actions/putOnCreditHold"),
             headers={"Authorization": f"Bearer {agent_token}"},
             json={"reason": "security suite probe"},
         )
@@ -149,7 +150,7 @@ async def run_security_suite(*, knowledge_url: str, agent_token: str, editor_tok
             )
         else:
             response = await http.post(
-                f"{knowledge_url}/objects/Customer/1/actions/putOnCreditHold",
+                ontology_url(knowledge_url, "/objects/Customer/1/actions/putOnCreditHold"),
                 headers={"Authorization": f"Bearer {editor_token}"},
                 json={"reason": "security suite sanity check"},
             )
