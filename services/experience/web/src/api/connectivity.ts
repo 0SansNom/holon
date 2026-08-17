@@ -32,6 +32,27 @@ export interface RegisterSourceRequest {
   incremental_param?: string;
 }
 
+export interface ConnectorPluginManifest {
+  name: string;
+  version: string;
+  plugin_type: string;
+  entry_point: string;
+  dataset_name: string | null;
+  connector_local_name: string | null;
+  capabilities: Record<string, unknown>;
+}
+
+export interface ConnectorPlugin {
+  name: string;
+  version: string;
+  manifest: ConnectorPluginManifest;
+  checksum: string;
+  status: "active" | "disabled";
+  tenant_id: string | null;
+  registered_at: string;
+  schedule_interval_minutes: number | null;
+}
+
 export interface GenericConnection {
   tenant_id: string;
   name: string;
@@ -110,6 +131,13 @@ export const connectivityApi = {
   enableSource: (name: string) => api.post<GenericSource>(`${CONNECTIVITY_URL}/sources/${name}/enable`),
   deleteSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sources/${name}`),
   listSyncs: () => api.get<SyncRun[]>(`${CONNECTIVITY_URL}/syncs`),
+  listPlugins: () => api.get<ConnectorPlugin[]>(`${CONNECTIVITY_URL}/plugins`),
+  disablePlugin: (name: string) => api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/disable`),
+  enablePlugin: (name: string) => api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/enable`),
+  setPluginSchedule: (name: string, scheduleIntervalMinutes: number | null) =>
+    api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/schedule`, {
+      schedule_interval_minutes: scheduleIntervalMinutes,
+    }),
   listConnections: () => api.get<GenericConnection[]>(`${CONNECTIVITY_URL}/connections`),
   registerConnection: (body: RegisterConnectionRequest) => api.post<GenericConnection>(`${CONNECTIVITY_URL}/connections`, body),
   deleteConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/connections/${name}`),

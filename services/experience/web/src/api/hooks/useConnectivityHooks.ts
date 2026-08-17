@@ -51,6 +51,35 @@ export function useDeleteSource() {
   });
 }
 
+export function usePlugins() {
+  return useSuspenseQuery({ queryKey: queryKeys.plugins(), queryFn: connectivityApi.listPlugins });
+}
+
+export function useDisablePlugin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disablePlugin(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
+export function useEnablePlugin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enablePlugin(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
+export function useSetPluginSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, scheduleIntervalMinutes }: { name: string; scheduleIntervalMinutes: number | null }) =>
+      connectivityApi.setPluginSchedule(name, scheduleIntervalMinutes),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
 export function useConnections() {
   return useSuspenseQuery({ queryKey: queryKeys.connections(), queryFn: connectivityApi.listConnections });
 }
