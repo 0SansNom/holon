@@ -145,7 +145,7 @@ jobs:
 
             converged=false
             for i in $(seq 1 30); do
-              MATCH=$(curl -sf "http://localhost:8003/catalog/datasets" -H "Authorization: Bearer $TOKEN" \
+              MATCH=$(curl -sf "http://localhost:8003/api/holon/catalog/datasets" -H "Authorization: Bearer $TOKEN" \
                 | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if any(x['urn']=='$DATASET_URN' and str(x['snapshot_id'])=='$SNAPSHOT_ID' for x in d) else 'no')")
               if [ "$MATCH" = "yes" ]; then
                 echo "  -> catalogued"
