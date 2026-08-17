@@ -79,6 +79,7 @@ export const queryKeys = {
   plugins: () => ["plugins"] as const,
   syncs: () => ["syncs"] as const,
   connections: () => ["connections"] as const,
+  writeTargets: () => ["writeTargets"] as const,
   pipelines: () => ["pipelines"] as const,
   pipeline: (name: string) => ["pipeline", name] as const,
   pipelineRuns: (name: string) => ["pipelineRuns", name] as const,

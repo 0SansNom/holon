@@ -100,6 +100,12 @@ async def list_write_targets(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     return [_parse_row(row) for row in rows]
 
 
+async def delete_write_target(pool: asyncpg.Pool, tenant_id: str, dataset_name: str) -> None:
+    await pool.execute(
+        "DELETE FROM write_target WHERE tenant_id = $1 AND dataset_name = $2", tenant_id, dataset_name
+    )
+
+
 async def apply_write(
     pool: asyncpg.Pool, source_db_url: str, *, tenant_id: str, dataset_name: str, instance_id: str, edits: dict[str, Any]
 ) -> dict:

@@ -103,6 +103,23 @@ export interface PipelineDefinition {
   updated_at: string;
 }
 
+export interface WriteTarget {
+  tenant_id: string;
+  dataset_name: string;
+  table_name: string;
+  id_column: string;
+  allowed_properties: Record<string, string>;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterWriteTargetRequest {
+  dataset_name: string;
+  table_name: string;
+  id_column: string;
+  allowed_properties: Record<string, string>;
+}
+
 export interface PipelineStepResult {
   step_name: string;
   dataset_urn: string;
@@ -141,6 +158,12 @@ export const connectivityApi = {
   listConnections: () => api.get<GenericConnection[]>(`${CONNECTIVITY_URL}/connections`),
   registerConnection: (body: RegisterConnectionRequest) => api.post<GenericConnection>(`${CONNECTIVITY_URL}/connections`, body),
   deleteConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/connections/${name}`),
+
+  listWriteTargets: () => api.get<WriteTarget[]>(`${CONNECTIVITY_URL}/write-targets`),
+  registerWriteTarget: (body: RegisterWriteTargetRequest) =>
+    api.post<WriteTarget>(`${CONNECTIVITY_URL}/write-targets`, body),
+  deleteWriteTarget: (datasetName: string) =>
+    api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/write-targets/${datasetName}`),
 
   listPipelines: () => api.get<PipelineDefinition[]>(`${CONNECTIVITY_URL}/pipelines`),
   getPipeline: (name: string) => api.get<PipelineDefinition>(`${CONNECTIVITY_URL}/pipelines/${name}`),
