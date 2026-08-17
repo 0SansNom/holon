@@ -10,9 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 30
     needs: unit
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The suite is black-box e2e over HTTP: it needs the full stack.
       # .env is git-ignored by design, so CI builds one from the example —
@@ -46,7 +46,7 @@ jobs:
       # `runsc-hostnet` would be an unrecognized Docker runtime there.
       # Real dev/prod environments keep the default.
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: 'pip'
