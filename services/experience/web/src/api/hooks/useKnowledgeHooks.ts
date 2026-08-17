@@ -1,5 +1,5 @@
 import { useQuery, useSuspenseQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { knowledgeApi } from "../knowledge";
+import { knowledgeApi, type ActionApprovalStatus } from "../knowledge";
 import { queryKeys, BRANCH_KIND_LIST_QUERY_KEY, type BranchKind } from "../queryKeys";
 import { useOptionalSuspenseQuery } from "../optionalSuspenseQuery";
 
@@ -7,6 +7,10 @@ export type { BranchKind };
 
 export function useObjectTypes() {
   return useSuspenseQuery({ queryKey: queryKeys.objectTypes(), queryFn: knowledgeApi.listObjectTypes });
+}
+
+export function useDatasets() {
+  return useSuspenseQuery({ queryKey: queryKeys.datasets(), queryFn: knowledgeApi.listDatasets });
 }
 
 export function useDatasetPreview(datasetName: string) {
@@ -40,6 +44,14 @@ export function useObjects(objectType: string) {
   return useOptionalSuspenseQuery(!!objectType, queryKeys.objects(objectType), () => knowledgeApi.listObjects(objectType));
 }
 
+export function useObjectsPage(objectType: string, pageSize: number, cursor: string | null, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.objectsPage(objectType, pageSize, cursor),
+    queryFn: () => knowledgeApi.listObjectsPage(objectType, { pageSize, cursor }),
+    enabled: !!objectType && enabled,
+  });
+}
+
 export function useObject(objectType: string, id: string | number | undefined) {
   return useOptionalSuspenseQuery(
     !!objectType && id !== undefined,
@@ -69,6 +81,38 @@ export function useUpdateRelationType() {
   });
 }
 
+export function useDeleteRelationType() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => knowledgeApi.deleteRelationType(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.relationTypes() }),
+  });
+}
+
+export function useRelationTypePermissions(name: string, enabled = true) {
+  return useQuery({
+    queryKey: [...queryKeys.relationTypes(), name, "permissions"],
+    queryFn: () => knowledgeApi.getRelationTypePermissions(name),
+    enabled: enabled && !!name,
+  });
+}
+
+export function useRelationTypeWritebackStatus(name: string, enabled = true) {
+  return useQuery({
+    queryKey: [...queryKeys.relationTypes(), name, "writeback-status"],
+    queryFn: () => knowledgeApi.getRelationTypeWritebackStatus(name),
+    enabled: enabled && !!name,
+  });
+}
+
+export function useGenerateJoinDataset() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof knowledgeApi.generateJoinDataset>[0]) => knowledgeApi.generateJoinDataset(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.datasets() }),
+  });
+}
+
 export function useActions() {
   return useSuspenseQuery({ queryKey: queryKeys.actions(), queryFn: knowledgeApi.listActions });
 }
@@ -94,6 +138,36 @@ export function useUpdateValueType() {
   });
 }
 
+export function useDeprecateValueType() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      name,
+      body,
+    }: {
+      name: string;
+      body: { deprecation_reason: string; deprecation_deadline: string; replacement_urn?: string };
+    }) => knowledgeApi.deprecateValueType(name, body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.valueTypes() }),
+  });
+}
+
+export function useValueTypeRevisions(name: string, enabled = true) {
+  return useQuery({
+    queryKey: [...queryKeys.valueTypes(), name, "revisions"],
+    queryFn: () => knowledgeApi.listValueTypeRevisions(name),
+    enabled: enabled && !!name,
+  });
+}
+
+export function useValueTypePermissions(name: string, enabled = true) {
+  return useQuery({
+    queryKey: [...queryKeys.valueTypes(), name, "permissions"],
+    queryFn: () => knowledgeApi.getValueTypePermissions(name),
+    enabled: enabled && !!name,
+  });
+}
+
 export function useSharedPropertyTypes() {
   return useSuspenseQuery({ queryKey: queryKeys.sharedPropertyTypes(), queryFn: knowledgeApi.listSharedPropertyTypes });
 }
@@ -113,6 +187,34 @@ export function useUpdateSharedPropertyType() {
     mutationFn: ({ apiName, body }: { apiName: string; body: Parameters<typeof knowledgeApi.updateSharedPropertyType>[1] }) =>
       knowledgeApi.updateSharedPropertyType(apiName, body),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sharedPropertyTypes() }),
+  });
+}
+
+export function useSharedPropertyTypeUsage(apiName: string, enabled = true) {
+  return useQuery({
+    queryKey: [...queryKeys.sharedPropertyTypes(), apiName, "usage"],
+    queryFn: () => knowledgeApi.getSharedPropertyTypeUsage(apiName),
+    enabled: enabled && !!apiName,
+  });
+}
+
+export function useSharedPropertyTypePermissions(apiName: string, enabled = true) {
+  return useQuery({
+    queryKey: [...queryKeys.sharedPropertyTypes(), apiName, "permissions"],
+    queryFn: () => knowledgeApi.getSharedPropertyTypePermissions(apiName),
+    enabled: enabled && !!apiName,
+  });
+}
+
+export function useDeleteSharedPropertyType() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (apiName: string) => knowledgeApi.deleteSharedPropertyType(apiName),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sharedPropertyTypes() });
+      // Delete auto-detaches SPT refs into local rules on ObjectTypes.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypes() });
+    },
   });
 }
 
@@ -143,8 +245,24 @@ export function useUpdateActionType() {
   });
 }
 
+export function useActionTypeObservability(name: string, days = 30, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.actionTypeObservability(name, days),
+    queryFn: () => knowledgeApi.getActionTypeObservability(name, days),
+    enabled: enabled && !!name,
+  });
+}
+
 export function useInterfaces() {
   return useSuspenseQuery({ queryKey: queryKeys.interfaces(), queryFn: knowledgeApi.listInterfaces });
+}
+
+export function useInterfaceObjects(name: string | null) {
+  return useQuery({
+    queryKey: queryKeys.interfaceObjects(name ?? ""),
+    queryFn: () => knowledgeApi.listInterfaceObjects(name!),
+    enabled: !!name,
+  });
 }
 
 export function useCreateInterface() {
@@ -160,12 +278,43 @@ export function useUpdateInterface() {
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: Parameters<typeof knowledgeApi.updateInterface>[1] }) =>
       knowledgeApi.updateInterface(name, body),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.interfaces() }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.interfaces() });
+      void queryClient.invalidateQueries({ queryKey: ["interfaceObjects"] });
+    },
+  });
+}
+
+export function useDeleteInterface() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => knowledgeApi.deleteInterface(name),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.interfaces() });
+      void queryClient.invalidateQueries({ queryKey: ["interfaceObjects"] });
+    },
   });
 }
 
 export function useMarkings() {
-  return useSuspenseQuery({ queryKey: queryKeys.markings(), queryFn: knowledgeApi.listMarkings });
+  return useSuspenseQuery({
+    queryKey: queryKeys.markings(),
+    queryFn: () => knowledgeApi.listMarkings(),
+  });
+}
+
+export function useMarkingCategories() {
+  return useQuery({
+    queryKey: queryKeys.markingCategories(),
+    queryFn: knowledgeApi.listMarkingCategories,
+  });
+}
+
+// Non-suspense: consumed from inside a dialog nested in an already-loaded
+// tab, so a first-time fetch shouldn't flash the whole tab back to its
+// Suspense skeleton.
+export function useTypeClasses() {
+  return useQuery({ queryKey: queryKeys.typeClasses(), queryFn: knowledgeApi.listTypeClasses });
 }
 
 export function useCreateMarking() {
@@ -173,6 +322,15 @@ export function useCreateMarking() {
   return useMutation({
     mutationFn: (body: Parameters<typeof knowledgeApi.createMarking>[0]) => knowledgeApi.createMarking(body),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.markings() }),
+  });
+}
+
+export function useCreateMarkingCategory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof knowledgeApi.createMarkingCategory>[0]) =>
+      knowledgeApi.createMarkingCategory(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.markingCategories() }),
   });
 }
 
@@ -194,6 +352,12 @@ export function usePublishObjectTypeVersion(name: string) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.objectType(name) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypes() });
     },
+  });
+}
+
+export function useReindexObjectTypeSearch(name: string) {
+  return useMutation({
+    mutationFn: () => knowledgeApi.reindexObjectTypeSearch(name),
   });
 }
 
@@ -298,6 +462,36 @@ export function useObjectLinks(objectType: string, id: string | number | undefin
   });
 }
 
+export function usePutObjectLink(objectType: string, id: string | number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ linkName, targetId }: { linkName: string; targetId: unknown }) =>
+      knowledgeApi.putObjectLink(objectType, id, linkName, targetId),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.objectLinks(objectType, id, variables.linkName),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.object(objectType, id) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.objects(objectType) });
+    },
+  });
+}
+
+export function useDeleteObjectLink(objectType: string, id: string | number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ linkName, targetId }: { linkName: string; targetId?: unknown }) =>
+      knowledgeApi.deleteObjectLink(objectType, id, linkName, targetId),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.objectLinks(objectType, id, variables.linkName),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.object(objectType, id) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.objects(objectType) });
+    },
+  });
+}
+
 /** On-demand — only fetched after the user clicks "Run health check". */
 export function useOntologyHealthCheck(triggered: boolean) {
   return useQuery({
@@ -315,6 +509,28 @@ export function useCreateObjectTypeGroup() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: Parameters<typeof knowledgeApi.createObjectTypeGroup>[0]) => knowledgeApi.createObjectTypeGroup(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypeGroups() }),
+  });
+}
+
+export function useUpdateObjectTypeGroup() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      name,
+      body,
+    }: {
+      name: string;
+      body: Parameters<typeof knowledgeApi.updateObjectTypeGroup>[1];
+    }) => knowledgeApi.updateObjectTypeGroup(name, body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypeGroups() }),
+  });
+}
+
+export function useDeleteObjectTypeGroup() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => knowledgeApi.deleteObjectTypeGroup(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectTypeGroups() }),
   });
 }
@@ -349,9 +565,25 @@ export function useEvaluateObjectSet(name: string, enabled: boolean) {
 }
 
 /** Search input — only runs when the user has typed a query. */
-export function useSearch(q: string, options?: { objectType?: string; from?: number; size?: number }) {
+export function useSearch(
+  q: string,
+  options?: {
+    objectType?: string;
+    interface?: string;
+    from?: number;
+    size?: number;
+    propFilters?: Record<string, string>;
+  },
+) {
   return useQuery({
-    queryKey: queryKeys.search(q, options?.objectType, options?.from, options?.size),
+    queryKey: queryKeys.search(
+      q,
+      options?.objectType,
+      options?.from,
+      options?.size,
+      options?.propFilters,
+      options?.interface,
+    ),
     queryFn: () => knowledgeApi.search(q, options),
     enabled: q.length > 0,
   });
@@ -359,6 +591,37 @@ export function useSearch(q: string, options?: { objectType?: string; from?: num
 
 export function useGlossary() {
   return useSuspenseQuery({ queryKey: queryKeys.glossary(), queryFn: knowledgeApi.listGlossary });
+}
+
+export function useApprovals(status?: ActionApprovalStatus) {
+  return useQuery({
+    queryKey: queryKeys.approvals(status),
+    queryFn: () => knowledgeApi.listApprovals(status),
+  });
+}
+
+export function useApproveApproval() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: number; note?: string }) => knowledgeApi.approveApproval(id, note),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      void queryClient.invalidateQueries({ queryKey: ["objects"] });
+      void queryClient.invalidateQueries({ queryKey: ["object"] });
+      void queryClient.invalidateQueries({ queryKey: ["objectTimeline"] });
+    },
+  });
+}
+
+export function useRejectApproval() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: number; note?: string }) => knowledgeApi.rejectApproval(id, note),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      void queryClient.invalidateQueries({ queryKey: ["objectTimeline"] });
+    },
+  });
 }
 
 export function useInvokeAction(objectType: string) {
@@ -379,6 +642,34 @@ export function useInvokeAction(objectType: string) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.objects(objectType) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.object(objectType, variables.id) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.objectTimeline(objectType, variables.id) });
+      void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+    },
+  });
+}
+
+export function useInvokeActionBatch(objectType: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      actionName,
+      reason,
+      instanceIds,
+      parameters,
+    }: {
+      actionName: string;
+      reason: string;
+      instanceIds: string[];
+      parameters?: Record<string, unknown>;
+    }) =>
+      knowledgeApi.invokeActionBatch(objectType, actionName, {
+        reason,
+        instance_ids: instanceIds,
+        parameters,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.objects(objectType) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.objectSets() });
+      void queryClient.invalidateQueries({ queryKey: ["approvals"] });
     },
   });
 }

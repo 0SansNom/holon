@@ -1,12 +1,9 @@
 """A real client SDK — the "products/SDK" gap this build otherwise left
 open (Experience's own web app was the only thing ever built against the
-platform's HTTP API). Standard library only, matching `scripts/demo.py`'s
-own "any Python 3.9+, no extra install" constraint, since that script
-and roughly a dozen `tests/` files are exactly what this consolidates:
-each one used to hand-roll its own copy of the same three things —
-a token+JSON request helper, a poll-with-retry login, and a sync-then-
-poll-the-catalog convergence wait — because no shared, importable
-version of them existed outside a single service's own internals.
+platform's HTTP API). Standard library only — any Python 3.9+, no extra
+install — consolidating the token+JSON request helper, poll-with-retry
+login, and sync-then-poll-catalog wait that used to be hand-rolled across
+tests and CLI.
 
 Deliberately thin: no retries/backoff policy beyond what every call site
 already did by hand, no service-URL registry (callers keep passing full
@@ -89,9 +86,8 @@ class HolonClient:
         outbox-relay/Kafka-consumer path — this closes that gap by
         polling `/catalog/datasets` for the matching (urn, snapshot_id)
         pair, not just index [0] (the bug this exact idiom used to have,
-        fixed everywhere it appeared: `scripts/demo.py`, the CI
-        workflow's own sync step, and every per-file `..._synced`
-        fixture built on this).
+        fixed everywhere it appeared: the CI workflow's sync step and every
+        per-file `..._synced` fixture built on this).
         """
         status, result = self.request(
             "POST", f"{connectivity_url}/sync", token=token, body={"dataset": dataset}
@@ -101,7 +97,7 @@ class HolonClient:
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status, datasets = self.request("GET", f"{knowledge_url}/catalog/datasets", token=token)
+            status, datasets = self.request("GET", f"{knowledge_url}/api/holon/catalog/datasets", token=token)
             if status != 200:
                 raise RuntimeError(f"GET /catalog/datasets failed ({status}): {datasets}")
             match = next((d for d in datasets if d["urn"] == result["dataset_urn"]), None)

@@ -11,6 +11,7 @@ export interface Crumb {
   label: string;
   to?: string;
   params?: Record<string, string>;
+  search?: Record<string, string | undefined>;
 }
 
 export function PageBreadcrumbs({ items }: { items: Crumb[] }) {
@@ -20,7 +21,12 @@ export function PageBreadcrumbs({ items }: { items: Crumb[] }) {
     text: item.label,
     current: index === items.length - 1,
     onClick: item.to
-      ? () => void navigate({ to: item.to!, params: item.params as never })
+      ? () =>
+          void navigate({
+            to: item.to!,
+            params: item.params as never,
+            search: (item.search ?? {}) as never,
+          })
       : undefined,
   }));
 

@@ -115,6 +115,20 @@ def _validate_steps(steps: list[dict]) -> None:
                 f"step {step['step_name']!r} reads {step['input_dataset']!r}, "
                 f"which is produced later by step {later_producer!r} — reorder the steps"
             )
+        casts = step.get("value_type_casts")
+        if casts is not None:
+            if not isinstance(casts, dict) or not casts:
+                raise ValueError(
+                    f"step {step['step_name']!r}: value_type_casts must be a non-empty "
+                    f"column → value_type map"
+                )
+            for column, value_type_name in casts.items():
+                if not isinstance(column, str) or not column:
+                    raise ValueError(f"step {step['step_name']!r}: value_type_casts keys must be column names")
+                if not isinstance(value_type_name, str) or not value_type_name:
+                    raise ValueError(
+                        f"step {step['step_name']!r}: value_type_casts[{column!r}] must be a Value Type name"
+                    )
         outputs_so_far.add(step["output_dataset"])
 
 
@@ -146,6 +160,25 @@ async def get_pipeline(pool: asyncpg.Pool, name: str) -> Optional[dict]:
 async def list_pipelines(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     rows = await pool.fetch("SELECT * FROM pipeline_definition WHERE tenant_id = $1 ORDER BY name", tenant_id)
     return [_parse_pipeline_row(row) for row in rows]
+
+
+async def delete_pipeline(pool: asyncpg.Pool, *, tenant_id: str, name: str) -> bool:
+    """Remove definition + run history for this tenant. Returns False if missing."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            deleted = await conn.fetchrow(
+                "DELETE FROM pipeline_definition WHERE name = $1 AND tenant_id = $2 RETURNING name",
+                name,
+                tenant_id,
+            )
+            if deleted is None:
+                return False
+            await conn.execute(
+                "DELETE FROM pipeline_run WHERE pipeline_name = $1 AND tenant_id = $2",
+                name,
+                tenant_id,
+            )
+    return True
 
 
 async def record_run(

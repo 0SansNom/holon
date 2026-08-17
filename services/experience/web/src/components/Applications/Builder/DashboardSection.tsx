@@ -2,12 +2,14 @@ import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Button, Card, Checkbox, HTMLSelect, InputGroup, Icon } from "@blueprintjs/core";
-import type { ObjectType } from "../../../api/knowledge";
+import type { ObjectSet, ObjectType } from "../../../api/knowledge";
+import { urnShortName } from "../../ObjectExplorer/objectExplorerUtils";
 
 export interface DashboardWidgetConfig {
   id: string;
   component: "kpi" | "table";
   objectType: string;
+  objectSet: string;
   label: string;
 }
 
@@ -20,15 +22,21 @@ export interface DashboardValue {
 function SortableWidgetRow({
   widget,
   objectTypes,
+  objectSets,
   onChange,
   onRemove,
 }: {
   widget: DashboardWidgetConfig;
   objectTypes: ObjectType[];
+  objectSets: ObjectSet[];
   onChange: (widget: DashboardWidgetConfig) => void;
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: widget.id });
+  const setsForType = objectSets.filter(
+    (os) => os.visibility !== "hidden" && (!widget.objectType || urnShortName(os.object_type_urn) === widget.objectType),
+  );
+
   return (
     <div
       ref={setNodeRef}
@@ -41,13 +49,33 @@ function SortableWidgetRow({
         <Icon icon={widget.component === "kpi" ? "numerical" : "th"} />
         <HTMLSelect
           value={widget.objectType}
-          onChange={(e) => onChange({ ...widget, objectType: e.target.value })}
+          onChange={(e) =>
+            onChange({
+              ...widget,
+              objectType: e.target.value,
+              objectSet: "",
+            })
+          }
           minimal
         >
           <option value="">Select ObjectType…</option>
           {objectTypes.map((ot) => (
             <option key={ot.name} value={ot.name}>
               {ot.name}
+            </option>
+          ))}
+        </HTMLSelect>
+        <HTMLSelect
+          value={widget.objectSet}
+          disabled={!widget.objectType}
+          onChange={(e) => onChange({ ...widget, objectSet: e.target.value })}
+          minimal
+          title="Optional Object Set filter"
+        >
+          <option value="">All instances</option>
+          {setsForType.map((os) => (
+            <option key={os.name} value={os.name}>
+              {os.display_name || os.name}
             </option>
           ))}
         </HTMLSelect>
@@ -71,10 +99,12 @@ function SortableWidgetRow({
 export function DashboardSection({
   value,
   objectTypes,
+  objectSets,
   onChange,
 }: {
   value: DashboardValue;
   objectTypes: ObjectType[];
+  objectSets: ObjectSet[];
   onChange: (value: DashboardValue) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: "dashboard-canvas" });
@@ -111,6 +141,7 @@ export function DashboardSection({
                 key={widget.id}
                 widget={widget}
                 objectTypes={objectTypes}
+                objectSets={objectSets}
                 onChange={(updated) =>
                   onChange({ ...value, widgets: value.widgets.map((w) => (w.id === updated.id ? updated : w)) })
                 }

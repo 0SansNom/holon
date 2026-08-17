@@ -1,0 +1,496 @@
+"""Tests for Application Builder."""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+import pytest
+from conftest import EXPERIENCE, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+
+
+def _token_for(principal_urn: str) -> str:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        local_name = principal_urn.rsplit(":", 1)[-1]
+        status, body = _request(
+            "POST",
+            f"{IDENTITY}/token",
+            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
+        )
+        if status == 200:
+            return body["access_token"]
+        time.sleep(1.5)
+    pytest.fail(f"could not mint a token for {principal_urn}")
+
+
+def _object_app_definition(*, include_close_account: bool = False) -> dict:
+    action_refs = [{"action": "Customer.putOnCreditHold", "riskClass": "low"}]
+    if include_close_account:
+        action_refs.append({"action": "Customer.closeAccount", "riskClass": "high"})
+    return {
+        "surfaces": [{"type": "objectApp", "objectType": "Customer", "route": "/apps/test"}],
+        "bindings": [{"component": "table", "objectType": "Customer"}, {"component": "detail", "objectType": "Customer"}],
+        "actionRefs": action_refs,
+    }
+
+
+def test_create_draft_validates_and_computes_dependencies(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200, app
+    assert app["version"] == 1, app
+    assert app["status"] == "draft", app
+    assert app["dependencies"] == {
+        "objectTypes": ["Customer"],
+        "objectSets": [],
+        "actions": ["Customer.putOnCreditHold"],
+        "relationTypes": [],
+    }, app
+
+
+def test_object_app_link_binding_validates_and_lists_relation_types(jdoe_token: str) -> None:
+    name = f"test-app-links-{uuid.uuid4().hex[:8]}"
+    definition = {
+        "surfaces": [
+            {
+                "type": "objectApp",
+                "objectType": "Customer",
+                "route": "/apps/test-links",
+                "links": ["orders"],
+            }
+        ],
+        "bindings": [{"component": "table", "objectType": "Customer"}, {"component": "detail", "objectType": "Customer"}],
+        "actionRefs": [],
+    }
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": definition}
+    )
+    assert status == 200, app
+    assert app["dependencies"]["relationTypes"] == ["orders"], app
+
+
+def test_unknown_link_accessor_is_rejected(jdoe_token: str) -> None:
+    name = f"test-app-bad-link-{uuid.uuid4().hex[:8]}"
+    definition = {
+        "surfaces": [
+            {
+                "type": "objectApp",
+                "objectType": "Customer",
+                "route": "/apps/bad-link",
+                "links": ["notARealLink"],
+            }
+        ],
+        "bindings": [],
+        "actionRefs": [],
+    }
+    status, body = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": definition}
+    )
+    assert status == 400, body
+    assert "notARealLink" in body["detail"], body
+
+
+def test_undeclared_object_type_is_rejected(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    bad_definition = {
+        "surfaces": [{"type": "objectApp", "objectType": "NotARealObjectType", "route": "/apps/bad"}],
+        "bindings": [],
+        "actionRefs": [],
+    }
+    status, body = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": bad_definition}
+    )
+    assert status == 400, body
+    assert "NotARealObjectType" in body["detail"], body
+
+
+def test_undeclared_action_is_rejected(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    bad_definition = {
+        "surfaces": [{"type": "objectApp", "objectType": "Customer", "route": "/apps/bad"}],
+        "bindings": [],
+        "actionRefs": [{"action": "Customer.notARealAction", "riskClass": "low"}],
+    }
+    status, body = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": bad_definition}
+    )
+    assert status == 400, body
+    assert "notARealAction" in body["detail"], body
+
+
+def test_editing_a_draft_updates_in_place_but_editing_after_promotion_creates_a_new_version(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, v1 = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200 and v1["version"] == 1, v1
+
+    # Editing the still-unpromoted draft updates it in place
+    status, v1_again = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200 and v1_again["version"] == 1, v1_again
+
+    status, promoted = _request("POST", f"{EXPERIENCE}/api/applications/{name}/promote", token=jdoe_token)
+    assert status == 200, promoted
+    assert promoted["status"] == "promoted", promoted
+    assert promoted["promoted_at"] is not None, promoted
+
+    status, v2 = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{name}",
+        token=jdoe_token,
+        body={"definition": _object_app_definition(include_close_account=True)},
+    )
+    assert status == 200, v2
+    assert v2["version"] == 2, v2
+    assert v2["status"] == "draft", v2
+
+    # v2 is still a draft, so this promotes it for the first time...
+    status, v2_promoted = _request("POST", f"{EXPERIENCE}/api/applications/{name}/promote", token=jdoe_token)
+    assert status == 200 and v2_promoted["version"] == 2 and v2_promoted["status"] == "promoted", v2_promoted
+
+    # ...and re-promoting the now-already-promoted v2 must fail.
+    status, re_promote_error = _request("POST", f"{EXPERIENCE}/api/applications/{name}/promote", token=jdoe_token)
+    assert status == 400, re_promote_error
+
+
+def test_object_app_data_surface_serves_list_detail_and_gates_undeclared_actions(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200, app
+    status, _ = _request("POST", f"{EXPERIENCE}/api/applications/{name}/promote", token=jdoe_token)
+    assert status == 200
+
+    status, listing = _request("GET", f"{EXPERIENCE}/api/applications/{name}/data", token=jdoe_token)
+    assert status == 200, listing
+    assert isinstance(listing, list) and len(listing) > 0, listing
+
+    status, detail = _request("GET", f"{EXPERIENCE}/api/applications/{name}/data/1", token=jdoe_token)
+    assert status == 200, detail
+    assert detail["id"] == 1, detail
+
+    marker = uuid.uuid4().hex
+    status, declared = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{name}/data/1/actions/putOnCreditHold",
+        token=jdoe_token,
+        body={"reason": marker, "parameters": {"reason": marker}},
+    )
+    assert status == 200, declared
+    assert declared["credit_hold_reason"] == marker, declared
+
+    status, undeclared = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{name}/data/1/actions/closeAccount",
+        token=jdoe_token,
+        body={"reason": "should be blocked"},
+    )
+    assert status == 403, undeclared
+    assert "did not declare" in undeclared["detail"], undeclared
+
+
+def _full_definition_with_dashboard_and_form() -> dict:
+    return {
+        "surfaces": [
+            {"type": "objectApp", "objectType": "Customer", "route": "/apps/test"},
+            {
+                "type": "dashboard",
+                "route": "/apps/test/dashboard",
+                "widgets": [
+                    {"component": "kpi", "objectType": "Customer", "label": "Total customers"},
+                    {"component": "table", "objectType": "Order", "label": "Recent orders"},
+                ],
+            },
+            {
+                "type": "form",
+                "route": "/apps/test/hold-form",
+                "action": "Customer.putOnCreditHold",
+                "fields": [{"name": "reason", "type": "string", "required": True}],
+            },
+        ],
+        "bindings": [{"component": "table", "objectType": "Customer"}, {"component": "detail", "objectType": "Customer"}],
+        "actionRefs": [{"action": "Customer.putOnCreditHold", "riskClass": "low"}],
+    }
+
+
+def test_dashboard_surface_serves_kpi_and_table_widgets(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token,
+        body={"definition": _full_definition_with_dashboard_and_form()},
+    )
+    assert status == 200, app
+    assert set(app["dependencies"]["objectTypes"]) == {"Customer", "Order"}, app
+    assert app["dependencies"]["objectSets"] == [], app
+
+    status, dash = _request("GET", f"{EXPERIENCE}/api/applications/{name}/dashboard", token=jdoe_token)
+    assert status == 200, dash
+    widgets = dash["widgets"]
+    assert widgets[0]["component"] == "kpi" and widgets[0]["value"] > 0, widgets
+    assert widgets[1]["component"] == "table" and len(widgets[1]["rows"]) > 0, widgets
+
+
+def test_dashboard_and_object_app_bind_object_set(jdoe_token: str, msmith_token: str) -> None:
+    set_name = f"ShippedOrdersApp{uuid.uuid4().hex[:6]}"
+    status, created = _request(
+        "POST",
+        ontology_url("/objectSets"),
+        token=msmith_token,
+        body={
+            "name": set_name,
+            "object_type": "Order",
+            "display_name": "Shipped orders",
+            "definition": {"all": [{"property": "status", "op": "eq", "value": "shipped"}]},
+            "lifecycle_status": "active",
+            "visibility": "normal",
+        },
+    )
+    assert status == 201, created
+
+    status, evaluated = _request(
+        "GET", ontology_url(f"/objectSets/{set_name}/objects"), token=jdoe_token
+    )
+    assert status == 200, evaluated
+    expected_count = evaluated["count"]
+
+    app_name = f"test-os-app-{uuid.uuid4().hex[:8]}"
+    definition = {
+        "surfaces": [
+            {
+                "type": "objectApp",
+                "objectType": "Order",
+                "objectSet": set_name,
+                "route": "/apps/os",
+            },
+            {
+                "type": "dashboard",
+                "route": "/apps/os/dashboard",
+                "widgets": [
+                    {
+                        "component": "kpi",
+                        "objectType": "Order",
+                        "objectSet": set_name,
+                        "label": "Shipped",
+                    },
+                    {
+                        "component": "table",
+                        "objectType": "Order",
+                        "objectSet": set_name,
+                        "label": "Shipped rows",
+                    },
+                ],
+            },
+        ],
+        "bindings": [
+            {"component": "table", "objectType": "Order"},
+            {"component": "detail", "objectType": "Order"},
+        ],
+        "actionRefs": [],
+    }
+    status, app = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{app_name}",
+        token=jdoe_token,
+        body={"definition": definition},
+    )
+    assert status == 200, app
+    assert app["dependencies"]["objectSets"] == [set_name], app
+
+    status, dash = _request(
+        "GET", f"{EXPERIENCE}/api/applications/{app_name}/dashboard", token=jdoe_token
+    )
+    assert status == 200, dash
+    assert dash["widgets"][0]["value"] == expected_count, dash
+    assert dash["widgets"][0]["objectSet"] == set_name, dash
+    assert len(dash["widgets"][1]["rows"]) == expected_count, dash
+    assert all(row.get("status") == "shipped" for row in dash["widgets"][1]["rows"]), dash
+
+    status, rows = _request(
+        "GET", f"{EXPERIENCE}/api/applications/{app_name}/data", token=jdoe_token
+    )
+    assert status == 200, rows
+    assert isinstance(rows, list), rows
+    assert len(rows) == expected_count, rows
+    assert all(row.get("status") == "shipped" for row in rows), rows
+
+
+def test_form_surface_schema_validation_and_submission(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token,
+        body={"definition": _full_definition_with_dashboard_and_form()},
+    )
+    assert status == 200, app
+
+    status, schema = _request("GET", f"{EXPERIENCE}/api/applications/{name}/form", token=jdoe_token)
+    assert status == 200, schema
+    assert schema["action"] == "Customer.putOnCreditHold", schema
+    assert schema["fields"] == [{"name": "reason", "type": "string", "required": True}], schema
+
+    status, missing = _request("POST", f"{EXPERIENCE}/api/applications/{name}/form/2", token=jdoe_token, body={})
+    assert status == 400, missing
+    assert "missing required field" in missing["detail"], missing
+
+    status, wrong_type = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/form/2", token=jdoe_token, body={"reason": 12345}
+    )
+    assert status == 400, wrong_type
+    assert "must be of type" in wrong_type["detail"], wrong_type
+
+    marker = uuid.uuid4().hex
+    status, result = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/form/2", token=jdoe_token, body={"reason": marker}
+    )
+    assert status == 200, result
+    assert result["credit_hold_reason"] == marker, result
+
+
+def test_form_referencing_an_undeclared_action_is_rejected(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    bad_definition = {
+        "surfaces": [
+            {
+                "type": "form",
+                "route": "/bad",
+                "action": "Customer.closeAccount",
+                "fields": [{"name": "reason", "type": "string", "required": True}],
+            }
+        ],
+        "bindings": [],
+        "actionRefs": [{"action": "Customer.putOnCreditHold", "riskClass": "low"}],  # closeAccount not declared
+    }
+    status, body = _request("POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": bad_definition})
+    assert status == 400, body
+    assert "closeAccount" in body["detail"], body
+
+
+def test_form_with_invalid_field_type_is_rejected(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    bad_definition = {
+        "surfaces": [
+            {
+                "type": "form",
+                "route": "/bad2",
+                "action": "Customer.putOnCreditHold",
+                "fields": [{"name": "reason", "type": "notarealtype", "required": True}],
+            }
+        ],
+        "bindings": [],
+        "actionRefs": [{"action": "Customer.putOnCreditHold", "riskClass": "low"}],
+    }
+    status, body = _request("POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": bad_definition})
+    assert status == 400, body
+    assert "invalid type" in body["detail"], body
+
+
+def _analytics_definition(object_type: str = "Customer") -> dict:
+    return {
+        "surfaces": [{"type": "analytics", "route": "/apps/test/analytics", "objectType": object_type}],
+        "bindings": [], "actionRefs": [],
+    }
+
+
+def test_analytics_surface_creates_and_computes_dependencies(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _analytics_definition()}
+    )
+    assert status == 200, app
+    assert app["dependencies"]["objectTypes"] == ["Customer"], app
+
+
+def test_analytics_execute_is_bounded_to_the_declared_object_type(jdoe_token: str) -> None:
+    """The **analytics** surface: a real `ExecutionRequest` is."""
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _analytics_definition()}
+    )
+    assert status == 200, app
+
+    status, group_by = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Customer", "operation": "group_by", "group_by_property": "segment"},
+    )
+    assert status == 200, group_by
+    assert len(group_by["results"]) > 0, group_by
+
+    status, out_of_scope = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Order", "operation": "count", "filter_property": "status", "filter_value": "pending"},
+    )
+    assert status == 403, out_of_scope
+    assert "scoped to" in out_of_scope["detail"], out_of_scope
+
+
+def test_analytics_replay_proxies_through_and_analytics_masking_is_preserved(
+    jdoe_token: str, kenji_token: str
+) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _analytics_definition()}
+    )
+    assert status == 200, app
+
+    status, run = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Customer", "operation": "filter", "filter_property": "id", "filter_value": "1"},
+    )
+    assert status == 200, run
+    assert run["results"][0]["email"] is not None, run
+
+    status, replayed = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/{run['planHash']}/replay", token=jdoe_token,
+    )
+    assert status == 200, replayed
+    assert replayed["reproducible"] is True, replayed
+
+    # Same application, same declared scope, a different (ABAC-denied)
+    # caller
+    # is really proving Knowledge's own R8.7 masking survives the
+    # extra hop through Experience unchanged.
+    status, masked = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=kenji_token,
+        body={"object_type": "Customer", "operation": "filter", "filter_property": "id", "filter_value": "1"},
+    )
+    assert status == 200, masked
+    assert masked["results"][0]["email"] is None, masked
+
+
+def test_analytics_endpoints_require_the_surface_to_be_declared(jdoe_token: str) -> None:
+    name = f"test-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200, app
+    status, err = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}/analytics/execute", token=jdoe_token,
+        body={"object_type": "Customer", "operation": "count", "filter_property": "id", "filter_value": "1"},
+    )
+    assert status == 400, err
+    assert "no analytics surface" in err["detail"], err
+
+
+def test_application_surfaces_require_application_access(jdoe_token: str, alice_token: str) -> None:
+    """A tenant member without an application grant cannot inspect its."""
+    name = f"private-app-{uuid.uuid4().hex[:8]}"
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token, body={"definition": _object_app_definition()}
+    )
+    assert status == 200, app
+
+    for method, path in (
+        ("GET", f"/api/applications/{name}/data"),
+        ("GET", f"/api/applications/{name}/form"),
+        ("POST", f"/api/applications/{name}/promote"),
+    ):
+        status, body = _request(method, f"{EXPERIENCE}{path}", token=alice_token)
+        assert status == 403, body

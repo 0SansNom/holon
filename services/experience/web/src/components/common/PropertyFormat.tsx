@@ -1,6 +1,6 @@
 import { Tag, type Intent } from "@blueprintjs/core";
 import { Link } from "@tanstack/react-router";
-import type { PropertyFormatRule } from "../../api/knowledge";
+import type { PropertyFormatRule, PropertyTypeRule } from "../../api/knowledge";
 
 // object_type.property_formats is keyed by the ontology's camelCase
 // property name (e.g. "lifetimeValue"), but object payloads always use
@@ -112,16 +112,139 @@ function urnId(urn: string): string {
   return urn.split(":").pop() ?? urn;
 }
 
+function formatPrimitive(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function structFieldEntries(
+  value: Record<string, unknown>,
+  typeRule: PropertyTypeRule | undefined,
+  compact: boolean,
+): Array<{ name: string; value: unknown; description?: string }> {
+  const properties =
+    typeRule?.kind === "struct"
+      ? typeRule.properties
+      : typeRule?.kind === "array" && typeRule.element.kind === "struct"
+        ? typeRule.element.properties
+        : undefined;
+
+  if (!properties) {
+    return Object.entries(value).map(([name, fieldValue]) => ({ name, value: fieldValue }));
+  }
+
+  const declared = Object.entries(properties).map(([name, leaf]) => ({
+    name,
+    value: value[name],
+    description: leaf.description,
+    main: !!leaf.main_field,
+  }));
+  const hasMain = declared.some((f) => f.main);
+  const visible = compact && hasMain ? declared.filter((f) => f.main) : declared;
+  // Preserve undeclared extras in full view only.
+  if (!compact) {
+    for (const [name, fieldValue] of Object.entries(value)) {
+      if (!(name in properties)) visible.push({ name, value: fieldValue, description: undefined, main: false });
+    }
+  }
+  return visible.map(({ name, value: fieldValue, description }) => ({ name, value: fieldValue, description }));
+}
+
+function StructObjectView({
+  value,
+  typeRule,
+  compact,
+}: {
+  value: Record<string, unknown>;
+  typeRule?: PropertyTypeRule;
+  compact: boolean;
+}) {
+  const fields = structFieldEntries(value, typeRule, compact);
+  if (compact) {
+    return (
+      <span className="hl-struct-compact" title={fields.map((f) => `${f.name}: ${formatPrimitive(f.value)}`).join(" · ")}>
+        {fields.map((f, i) => (
+          <span key={f.name} className="hl-struct-compact-field">
+            {i > 0 && <span className="hl-struct-compact-sep"> · </span>}
+            <span className="hl-struct-field-name">{f.name}</span>
+            <span className="hl-struct-field-value">{formatPrimitive(f.value)}</span>
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return (
+    <dl className="hl-struct-fields-view">
+      {fields.map((f) => (
+        <div key={f.name} className="hl-struct-field-view-row">
+          <dt title={f.description}>{f.name}</dt>
+          <dd className="hl-mono">{formatPrimitive(f.value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function StructuredValue({
+  value,
+  typeRule,
+  compact,
+}: {
+  value: object;
+  typeRule?: PropertyTypeRule;
+  compact: boolean;
+}) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="hl-text-muted">[]</span>;
+    const elementRule =
+      typeRule?.kind === "array"
+        ? typeRule.element.kind === "struct"
+          ? ({ kind: "struct", properties: typeRule.element.properties } as PropertyTypeRule)
+          : undefined
+        : typeRule?.kind === "struct"
+          ? typeRule
+          : undefined;
+    return (
+      <ul className={compact ? "hl-struct-array-compact" : "hl-struct-array"}>
+        {value.map((item, index) => (
+          <li key={index}>
+            {item !== null && typeof item === "object" && !Array.isArray(item) ? (
+              <StructObjectView value={item as Record<string, unknown>} typeRule={elementRule} compact={compact} />
+            ) : (
+              <span className="hl-mono">{formatPrimitive(item)}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <StructObjectView value={value as Record<string, unknown>} typeRule={typeRule} compact={compact} />;
+}
+
 export function FormattedValue({
   rule,
   value,
   principalsByUrn,
+  typeRule,
+  compact = false,
 }: {
   rule: PropertyFormatRule | undefined;
   value: unknown;
   principalsByUrn?: Map<string, string>;
+  /** When set, object/array values render as labeled struct fields (main fields in compact mode). */
+  typeRule?: PropertyTypeRule;
+  /** Table cells: main fields only when designated; detail views pass false. */
+  compact?: boolean;
 }) {
   if (value === null || value === undefined) return <>—</>;
+
+  // Foundry `identifier` render hint: treat as opaque key — no locale /
+  // currency / numeric formatting (Object Views won't format as numbers).
+  const asIdentifier = typeRule?.render_hints?.includes("identifier");
+  if (asIdentifier) {
+    return <span className="hl-mono">{String(value)}</span>;
+  }
 
   if (rule?.kind === "currency") {
     // Postgres NUMERIC columns are serialized as strings (avoids float
@@ -182,10 +305,10 @@ export function FormattedValue({
     );
   }
 
-  // An object/array with no matching rule (e.g. a struct_reducer's
-  // struct-shaped output) — `String()` gives the useless "[object
-  // Object]"; every primitive fallback below this stays on `String()`
-  // unchanged.
-  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
-  return <span className="hl-mono">{text}</span>;
+  // Struct / array / plain object — labeled fields when we have a type
+  // rule; otherwise still avoid the useless "[object Object]".
+  if (typeof value === "object") {
+    return <StructuredValue value={value} typeRule={typeRule} compact={compact} />;
+  }
+  return <span className="hl-mono">{String(value)}</span>;
 }

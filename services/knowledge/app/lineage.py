@@ -1,17 +1,4 @@
-"""Lineage graph management.
-
-Lineage MUST be captured automatically from execution, never
-hand-declared. In this build the "execution" is a single connector sync,
-so every edge is recorded as a direct side effect of cataloguing a new
-DatasetVersion — never typed in by an operator.
-
-Minimum granularity is dataset, target granularity is column. Both
-coexist here: a coarse dataset-level edge (`source_column`/
-`target_property` left as `''`, the "not applicable" sentinel — kept as
-an empty string rather than NULL so the uniqueness constraint below stays
-a plain column list, not a NULL-aware expression) plus one column-level
-edge per mapped property.
-"""
+"""Lineage graph management."""
 
 from __future__ import annotations
 
@@ -33,10 +20,6 @@ CREATE TABLE IF NOT EXISTS lineage_edge (
 -- additive migrations for databases seeded before column-level lineage existed
 ALTER TABLE lineage_edge ADD COLUMN IF NOT EXISTS source_column TEXT NOT NULL DEFAULT '';
 ALTER TABLE lineage_edge ADD COLUMN IF NOT EXISTS target_property TEXT NOT NULL DEFAULT '';
-ALTER TABLE lineage_edge DROP CONSTRAINT IF EXISTS lineage_edge_source_urn_target_urn_relation_key;
-ALTER TABLE lineage_edge DROP CONSTRAINT IF EXISTS lineage_edge_full_key;
-ALTER TABLE lineage_edge ADD CONSTRAINT lineage_edge_full_key
-    UNIQUE (source_urn, target_urn, relation, source_column, target_property);
 """
 
 

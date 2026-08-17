@@ -1,0 +1,59 @@
+groups:
+  - name: holon.alerts
+    rules:
+      - alert: HolonHighErrorRate
+        expr: holon:http_request_error:ratio_rate5m > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          platform: holon
+        annotations:
+          summary: "Holon {{ $labels.service }} 5xx ratio > 1%"
+          description: >-
+            Service {{ $labels.service }} error ratio is {{ $value | humanizePercentage }}
+            over 5m (probes excluded). Check /ready, recent deploys, and dependency health.
+
+      - alert: HolonHighLatencyP99
+        expr: holon:http_request_duration:p99_5m > 2
+        for: 5m
+        labels:
+          severity: warning
+          platform: holon
+        annotations:
+          summary: "Holon {{ $labels.service }} p99 latency > 2s"
+          description: >-
+            Service {{ $labels.service }} p99 is {{ $value | humanizeDuration }} over 5m
+            (probes excluded). Check DB/SpiceDB/Kafka and hot routes.
+
+      # Fast burn vs 99.9% SLO (error budget ≈ 0.1%). Multi-window: 14.4× burn
+      # over 1h and 6× over 6h ≈ classic "page on fast burn".
+      - alert: HolonErrorBudgetBurn
+        expr: |
+          (
+            (1 - holon:http_request_success:ratio_rate1h) > (14.4 * 0.001)
+          )
+          and
+          (
+            (1 - holon:http_request_success:ratio_rate6h) > (6 * 0.001)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          platform: holon
+        annotations:
+          summary: "Holon {{ $labels.service }} burning availability error budget"
+          description: >-
+            {{ $labels.service }} is burning the 99.9% availability budget quickly.
+            See docs/ops/observability.md.
+
+      - alert: HolonMetricsScrapeAbsent
+        expr: up{job="holon"} == 0 or absent(up{job="holon"})
+        for: 10m
+        labels:
+          severity: critical
+          platform: holon
+        annotations:
+          summary: "Holon metrics scrape missing or down"
+          description: >-
+            Prometheus cannot scrape Holon /metrics (job=holon). Check NetworkPolicy,
+            HOLON_METRICS_TOKEN, and Service endpoints.

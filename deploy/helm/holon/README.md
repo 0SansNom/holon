@@ -20,15 +20,17 @@ at them.
   `knowledge`, and `experience` at startup from `HOLON_SPICEDB_SCHEMA_PATH`.
   The chart mounts it itself (`templates/spicedb-schema-configmap.yaml`,
   built from `files/spicedb-schema.zed`) into those three pods only —
-  nothing to configure. **That copy must be kept in sync by hand**:
-  `files/spicedb-schema.zed` is a copy of `docker/spicedb/schema.zed`
-  (Helm can't reference a file outside its own chart directory), so
-  re-copy it whenever the source changes, before packaging a new chart
-  version.
+  nothing to configure. **Keep the copy in sync** with
+  `docker/spicedb/schema.zed` via `make sync-spicedb-schema` (CI runs
+  `make check-spicedb-schema`). Helm cannot reference files outside the
+  chart directory, so the checked-in copy is intentional.
 - OPA (`external.opaUrl`), OpenSearch (`external.opensearchUrl`), Qdrant
   (`external.qdrantUrl`).
 - An OTLP collector (`external.otlpEndpoint`) if you want traces — the
   exporter soft-fails (logged, non-blocking) without one.
+- Prometheus Operator CRDs only if you enable `observability.serviceMonitor`
+  / `observability.prometheusRule` (see `docs/ops/observability.md` and
+  standalone YAML under `deploy/observability/`).
 
 ## Secrets
 
@@ -39,7 +41,8 @@ least:
 
 | Key | Used by |
 |---|---|
-| `HOLON_JWT_SECRET` | every service |
+| `HOLON_JWT_SECRET` | every service (HS256) |
+| `HOLON_JWT_PRIVATE_KEYS` / `HOLON_JWT_PUBLIC_KEYS` | every service when `jwt.algorithm=RS256` (`make gen-jwt-rsa`) |
 | `HOLON_SPICEDB_PRESHARED_KEY` | every service |
 | `POSTGRES_PASSWORD` | every service |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | connectivity, knowledge, intelligence (S3/MinIO) |
@@ -55,14 +58,23 @@ you've wired the app side to fetch from Vault directly instead.
 
 ## Known chart limitations
 
-- **The bundled walking-skeleton demo connectors** (`demo.*` in
-  `values.yaml`: a source ERP Postgres, a support-desk Mongo, a reviews
-  REST API) are required at boot by `connectivity` today — real
-  `os.environ[...]` reads, no fallback — even though a real deployer has
-  no use for them. Left pointed at unreachable placeholders by default;
-  the pod boots fine, only those specific demo connectors' own syncs
-  would fail. Making this genuinely optional is an app-side fix, not a
-  chart one.
-- **No Ingress template** — front `holon-experience` (the web UI) and
-  `holon-identity` (needs to be externally reachable for the OIDC
-  redirect URI) with your own Ingress/Gateway.
+- **Connector backends** (`connectorBackends.*` in `values.yaml`) are
+  ConfigMap URLs only. Plugins are never auto-registered — use
+  `POST /plugins`. Leave empty in production unless you register matching
+  plugins.
+- **Ingress / NetworkPolicy** are optional (`ingress.enabled`,
+  `networkPolicy.enabled`). Use `values-production.yaml` as a starting
+  overlay; set `networkPolicy.dataPlaneCidrs` to your SI ranges, and
+  optionally `networkPolicy.intelligence.llmEgressCidrs` for Anthropic /
+  Voyage instead of open public `:443`.
+- **Intelligence sandbox** — set `services.intelligence.runtimeClassName`
+  (production overlay defaults to `gvisor`). The cluster must define that
+  RuntimeClass; leave empty only for clusters without gVisor.
+- **No load / soak suite** in CI — e2e is compose HTTP pytest only. Treat
+  green CI as correctness, not capacity. Local light probe: `make smoke-load`.
+- **JWT** — ConfigMap sets `HOLON_JWT_ALG` from `jwt.algorithm` (default
+  HS256). RS256 keys live in `existingSecret`; set `jwt.requireAsymmetric`
+  to force posture checks.
+- **Observability** — `observability.serviceMonitor` /
+  `observability.prometheusRule` are off by default (need Prometheus
+  Operator CRDs). Standalone YAML: `deploy/observability/`.

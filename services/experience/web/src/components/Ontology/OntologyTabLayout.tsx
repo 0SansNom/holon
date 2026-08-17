@@ -33,11 +33,16 @@ export function RegistryCard({
   name,
   onEdit,
   onBranch,
+  onDelete,
+  onView,
   children,
 }: {
   name: string;
   onEdit?: () => void;
   onBranch?: () => void;
+  onDelete?: () => void;
+  /** Read-only inspect (e.g. Implementations browser). */
+  onView?: () => void;
   children?: ReactNode;
 }) {
   return (
@@ -46,10 +51,12 @@ export function RegistryCard({
         <strong className="hl-registry-card-title" title={name}>
           {name}
         </strong>
-        {(onEdit || onBranch) && (
+        {(onEdit || onBranch || onDelete || onView) && (
           <div className="hl-flex-row">
+            {onView && <Button minimal small icon="layers" title="Implementations" onClick={onView} />}
             {onEdit && <Button minimal small icon="edit" onClick={onEdit} />}
             {onBranch && <Button minimal small icon="git-branch" onClick={onBranch} />}
+            {onDelete && <Button minimal small icon="trash" intent="danger" onClick={onDelete} />}
           </div>
         )}
       </div>

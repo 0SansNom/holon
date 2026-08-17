@@ -1,20 +1,25 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button, Checkbox, FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
 import type { PropertyFormatRule, PropertyRenderHint, SharedPropertyType, ValueType } from "../../api/knowledge";
 import { FormattedValue } from "../common/PropertyFormat";
 import {
   ALL_RENDER_HINTS,
   applyBulkPropertyPatch,
+  automapStructFieldsFromKeys,
+  collectStructSampleKeys,
   type EditableProperty,
   type EditableStructField,
   emptyProperty,
   emptyStructFieldExport,
+  editableStructFieldsFromProperties,
+  mapStructFieldColumnsByName,
   parseTypeClassesInput,
   serializePropertyEditor,
   sharedPropertyOptions,
   suggestSharedApiName,
   valueTypeOptions,
 } from "./propertyEditorUtils";
+import { PROPERTY_LIFECYCLE_STATUSES } from "./lifecycleUtils";
 
 const FORMAT_KINDS = ["", "currency", "numeric", "datetime", "principal", "resource-link", "badge"] as const;
 
@@ -31,7 +36,7 @@ function previewSample(prop: EditableProperty): unknown {
   }
   if (prop.formatKind === "badge") return "active";
   if (prop.formatKind === "principal") return "hl:acme:global:user:jdoe";
-  if (prop.formatKind === "resource-link") return "hl:acme:demo:object_type:Customer";
+  if (prop.formatKind === "resource-link") return "hl:acme:main:object_type:Customer";
   return "sample";
 }
 
@@ -40,14 +45,23 @@ function StructFieldsEditor({
   onChange,
   valueTypes,
   sharedPropertyTypes,
+  sampleKeys = [],
+  allowFieldColumns = false,
 }: {
   fields: EditableStructField[];
   onChange: (next: EditableStructField[]) => void;
   valueTypes: ValueType[];
   sharedPropertyTypes: SharedPropertyType[];
+  /** JSON keys from sample object values — powers Automap all. */
+  sampleKeys?: string[];
+  /** Top-level struct only — per-field dataset column mapping. */
+  allowFieldColumns?: boolean;
 }) {
   const vtNames = valueTypeOptions(valueTypes);
-  const sptNames = sharedPropertyOptions(sharedPropertyTypes);
+  // Struct-typed SPTs cannot nest inside another struct field.
+  const sptNames = sharedPropertyOptions(sharedPropertyTypes.filter((s) => !s.struct_properties));
+  const defaultVt = vtNames.includes("String") ? "String" : (vtNames[0] ?? "String");
+  const missingSampleKeys = sampleKeys.filter((k) => !fields.some((f) => f.name.trim() === k));
 
   function updateField(index: number, patch: Partial<EditableStructField>) {
     onChange(fields.map((f, i) => (i === index ? { ...f, ...patch } : f)));
@@ -56,69 +70,129 @@ function StructFieldsEditor({
   return (
     <div className="hl-struct-fields">
       {fields.map((field, index) => (
-        <div key={index} className="hl-struct-field-row">
-          <InputGroup
-            small
-            className="hl-mono"
-            placeholder="fieldName"
-            value={field.name}
-            onChange={(e) => updateField(index, { name: e.target.value })}
-          />
-          <HTMLSelect
-            value={field.leafKind}
-            onChange={(e) =>
-              updateField(index, {
-                leafKind: e.target.value as EditableStructField["leafKind"],
-                valueType: "",
-                sharedPropertyType: "",
-              })
-            }
-          >
-            <option value="value_type">Value type</option>
-            <option value="shared_property_type">Shared PT</option>
-          </HTMLSelect>
-          {field.leafKind === "value_type" ? (
+        <div key={index} className="hl-struct-field-block">
+          <div className="hl-struct-field-row">
+            <InputGroup
+              small
+              className="hl-mono"
+              placeholder="fieldName"
+              value={field.name}
+              onChange={(e) => updateField(index, { name: e.target.value })}
+            />
             <HTMLSelect
-              value={field.valueType}
-              onChange={(e) => updateField(index, { valueType: e.target.value })}
+              value={field.leafKind}
+              onChange={(e) =>
+                updateField(index, {
+                  leafKind: e.target.value as EditableStructField["leafKind"],
+                  valueType: "",
+                  sharedPropertyType: "",
+                })
+              }
             >
-              <option value="">Select…</option>
-              {vtNames.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
+              <option value="value_type">Value type</option>
+              <option value="shared_property_type">Shared PT</option>
             </HTMLSelect>
-          ) : (
-            <HTMLSelect
-              value={field.sharedPropertyType}
-              onChange={(e) => updateField(index, { sharedPropertyType: e.target.value })}
+            {field.leafKind === "value_type" ? (
+              <HTMLSelect
+                value={field.valueType}
+                onChange={(e) => updateField(index, { valueType: e.target.value })}
+              >
+                <option value="">Select…</option>
+                {vtNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </HTMLSelect>
+            ) : (
+              <HTMLSelect
+                value={field.sharedPropertyType}
+                onChange={(e) => updateField(index, { sharedPropertyType: e.target.value })}
+              >
+                <option value="">Select…</option>
+                {sptNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </HTMLSelect>
+            )}
+            <Button
+              small
+              minimal
+              icon="cross"
+              disabled={fields.length <= 1}
+              onClick={() => onChange(fields.filter((_, i) => i !== index))}
+            />
+          </div>
+          <div className="hl-struct-field-meta">
+            <InputGroup
+              small
+              placeholder="Description (optional)"
+              value={field.description}
+              onChange={(e) => updateField(index, { description: e.target.value })}
+            />
+            <Checkbox
+              className="hl-switch-reset"
+              label="Main field"
+              checked={field.mainField}
+              onChange={() => updateField(index, { mainField: !field.mainField })}
+            />
+          </div>
+          {allowFieldColumns && (
+            <FormGroup
+              label="Backing column"
+              helperText="Optional dataset column for this field (overlays the JSON backing column)"
+              className="hl-mt-xs"
             >
-              <option value="">Select…</option>
-              {sptNames.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </HTMLSelect>
+              <InputGroup
+                small
+                className="hl-mono"
+                placeholder={field.name.trim() || "column_name"}
+                value={field.column}
+                onChange={(e) => updateField(index, { column: e.target.value })}
+              />
+            </FormGroup>
           )}
+        </div>
+      ))}
+      <div className="hl-flex-row hl-gap-sm" style={{ flexWrap: "wrap" }}>
+        <Button
+          small
+          minimal
+          icon="add"
+          onClick={() => onChange([...fields, emptyStructFieldExport(`field${fields.length + 1}`)])}
+        >
+          Add field
+        </Button>
+        <Button
+          small
+          minimal
+          icon="lightning"
+          disabled={missingSampleKeys.length === 0}
+          title={
+            sampleKeys.length === 0
+              ? "No sample JSON keys from object data yet"
+              : missingSampleKeys.length === 0
+                ? "All sample keys already mapped"
+                : `Add ${missingSampleKeys.length} field(s) from sample JSON keys`
+          }
+          onClick={() => onChange(automapStructFieldsFromKeys(sampleKeys, fields, defaultVt))}
+        >
+          Automap all
+        </Button>
+        {allowFieldColumns && (
           <Button
             small
             minimal
-            icon="cross"
-            disabled={fields.length <= 1}
-            onClick={() => onChange(fields.filter((_, i) => i !== index))}
-          />
-        </div>
-      ))}
-      <Button
-        small
-        minimal
-        icon="add"
-        onClick={() => onChange([...fields, emptyStructFieldExport(`field${fields.length + 1}`)])}
-      >
-        Add field
-      </Button>
+            icon="column-layout"
+            title="Set empty backing columns to the field API name"
+            onClick={() => onChange(mapStructFieldColumnsByName(fields))}
+          >
+            Map columns by name
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -134,6 +208,7 @@ export function ObjectTypePropertyEditor({
   sharedPropertyTypes,
   onConvertToShared,
   convertPending,
+  sampleRows = [],
 }: {
   properties: EditableProperty[];
   selectedName: string | null;
@@ -144,6 +219,8 @@ export function ObjectTypePropertyEditor({
   sharedPropertyTypes: SharedPropertyType[];
   onConvertToShared?: (property: EditableProperty) => Promise<void>;
   convertPending?: boolean;
+  /** Live object rows used to Automap struct fields from JSON keys. */
+  sampleRows?: Array<Record<string, unknown>>;
 }) {
   const selected = properties.find((p) => p.name === selectedName) ?? null;
   const vtNames = valueTypeOptions(valueTypes);
@@ -151,6 +228,18 @@ export function ObjectTypePropertyEditor({
   const [checkedNames, setCheckedNames] = useState<Set<string>>(() => new Set());
   const [bulkVisibility, setBulkVisibility] = useState<EditableProperty["visibility"] | "">("");
   const [bulkFormatKind, setBulkFormatKind] = useState<EditableProperty["formatKind"] | "keep">("keep");
+
+  const structSampleKeys = useMemo(() => {
+    if (!selected) return [];
+    const wantsStruct =
+      selected.typeKind === "struct" ||
+      (selected.typeKind === "array" && selected.arrayElementKind === "struct");
+    if (!wantsStruct) return [];
+    const samples = sampleRows
+      .map((row) => row[selected.name] ?? (selected.column ? row[selected.column] : undefined))
+      .filter((v) => v != null);
+    return collectStructSampleKeys(samples);
+  }, [selected, sampleRows]);
 
   function toggleChecked(name: string) {
     setCheckedNames((prev) => {
@@ -166,12 +255,26 @@ export function ObjectTypePropertyEditor({
     onChange(properties.map((p) => (p.name === selected.name ? { ...p, ...patch } : p)));
   }
 
+  // Mirrors backend's _REQUIRES_SEARCHABLE (render_hints.py) — keep in sync.
+  const REQUIRES_SEARCHABLE: PropertyRenderHint[] = [
+    "sortable",
+    "selectable",
+    "low_cardinality",
+    "enable_leading_wildcards",
+    "enable_regex_queries",
+  ];
+
   function toggleHint(hint: PropertyRenderHint) {
     if (!selected) return;
     const has = selected.renderHints.includes(hint);
-    updateSelected({
-      renderHints: has ? selected.renderHints.filter((h) => h !== hint) : [...selected.renderHints, hint],
-    });
+    let next = has ? selected.renderHints.filter((h) => h !== hint) : [...selected.renderHints, hint];
+    if (!has && REQUIRES_SEARCHABLE.includes(hint) && !next.includes("searchable")) {
+      next = ["searchable", ...next];
+    }
+    if (has && hint === "searchable" && REQUIRES_SEARCHABLE.some((h) => next.includes(h))) {
+      next = next.filter((h) => !REQUIRES_SEARCHABLE.includes(h));
+    }
+    updateSelected({ renderHints: next });
   }
 
   function applyBulk() {
@@ -226,6 +329,15 @@ export function ObjectTypePropertyEditor({
   function detachShared() {
     if (!selected || selected.typeKind !== "shared_property_type") return;
     const spt = sharedPropertyTypes.find((s) => s.api_name === selected.sharedPropertyType);
+    if (spt?.struct_properties && Object.keys(spt.struct_properties).length > 0) {
+      updateSelected({
+        typeKind: "struct",
+        structFields: editableStructFieldsFromProperties(spt.struct_properties),
+        sharedPropertyType: "",
+        valueType: "",
+      });
+      return;
+    }
     updateSelected({
       typeKind: "value_type",
       valueType: spt?.value_type ?? "",
@@ -234,10 +346,11 @@ export function ObjectTypePropertyEditor({
   }
 
   const canConvert =
-    selected?.typeKind === "value_type" &&
-    !!selected.valueType &&
     !!onConvertToShared &&
-    !sharedPropertyTypes.some((s) => s.api_name === suggestSharedApiName(selected.name));
+    !sharedPropertyTypes.some((s) => s.api_name === suggestSharedApiName(selected?.name ?? "")) &&
+    ((selected?.typeKind === "value_type" && !!selected.valueType) ||
+      (selected?.typeKind === "struct" &&
+        selected.structFields.some((f) => f.name.trim() && (f.valueType || f.sharedPropertyType))));
 
   return (
     <div className="hl-property-editor">
@@ -350,6 +463,23 @@ export function ObjectTypePropertyEditor({
                 <option value="hidden">hidden</option>
               </HTMLSelect>
             </FormGroup>
+            <FormGroup label="Property status">
+              <HTMLSelect
+                fill
+                value={selected.lifecycleStatus}
+                onChange={(e) =>
+                  updateSelected({
+                    lifecycleStatus: e.target.value as EditableProperty["lifecycleStatus"],
+                  })
+                }
+              >
+                {PROPERTY_LIFECYCLE_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </HTMLSelect>
+            </FormGroup>
             <div className="hl-flex-row hl-mb-sm">
               <Checkbox
                 label="Editable"
@@ -364,7 +494,7 @@ export function ObjectTypePropertyEditor({
             </div>
             <FormGroup
               label="Render hints"
-              helperText="Searchable feeds unified search text; sortable indexes keyword props under props.<name>."
+              helperText="Searchable / sortable / selectable / low_cardinality / identifier / keywords / long_text / wildcards / regex. Sortable, Selectable, Low cardinality & search modes require Searchable."
             >
               <div className="hl-flex-row hl-flex-wrap">
                 {ALL_RENDER_HINTS.map((hint) => (
@@ -377,12 +507,12 @@ export function ObjectTypePropertyEditor({
                 ))}
               </div>
             </FormGroup>
-            <FormGroup label="Type classes" helperText="Comma-separated (e.g. priority, important)">
+            <FormGroup label="Type classes" helperText="Bare tags or Foundry kind:name (e.g. hubble:media_url, hubble:icon)">
               <InputGroup
                 className="hl-mono"
                 value={selected.typeClasses.join(", ")}
                 onChange={(e) => updateSelected({ typeClasses: parseTypeClassesInput(e.target.value) })}
-                placeholder="priority"
+                placeholder="hubble:media_url, priority"
               />
             </FormGroup>
 
@@ -406,34 +536,33 @@ export function ObjectTypePropertyEditor({
               </HTMLSelect>
             </FormGroup>
 
+            {(selected.typeKind === "value_type" || selected.typeKind === "struct") && canConvert && (
+              <Button
+                small
+                icon="globe"
+                loading={convertPending}
+                className="hl-mb-sm"
+                onClick={() => void onConvertToShared?.(selected)}
+              >
+                Convert to shared property
+              </Button>
+            )}
+
             {selected.typeKind === "value_type" && (
-              <>
-                <FormGroup label="Value type">
-                  <HTMLSelect
-                    fill
-                    value={selected.valueType}
-                    onChange={(e) => updateSelected({ valueType: e.target.value })}
-                  >
-                    <option value="">Select…</option>
-                    {vtNames.map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </HTMLSelect>
-                </FormGroup>
-                {canConvert && (
-                  <Button
-                    small
-                    icon="globe"
-                    loading={convertPending}
-                    className="hl-mb-sm"
-                    onClick={() => void onConvertToShared?.(selected)}
-                  >
-                    Convert to shared property
-                  </Button>
-                )}
-              </>
+              <FormGroup label="Value type">
+                <HTMLSelect
+                  fill
+                  value={selected.valueType}
+                  onChange={(e) => updateSelected({ valueType: e.target.value })}
+                >
+                  <option value="">Select…</option>
+                  {vtNames.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </HTMLSelect>
+              </FormGroup>
             )}
 
             {selected.typeKind === "shared_property_type" && (
@@ -461,12 +590,17 @@ export function ObjectTypePropertyEditor({
             )}
 
             {selected.typeKind === "struct" && (
-              <FormGroup label="Struct fields" helperText="One nesting level — each field is a Value Type or SPT leaf">
+              <FormGroup
+                label="Struct fields"
+                helperText="One nesting level — each field is a Value Type or SPT leaf. Automap all adds missing keys from sample object data."
+              >
                 <StructFieldsEditor
                   fields={selected.structFields}
                   onChange={(structFields) => updateSelected({ structFields })}
                   valueTypes={valueTypes}
                   sharedPropertyTypes={sharedPropertyTypes}
+                  sampleKeys={structSampleKeys}
+                  allowFieldColumns
                 />
               </FormGroup>
             )}
@@ -527,6 +661,7 @@ export function ObjectTypePropertyEditor({
                       onChange={(arrayElementStructFields) => updateSelected({ arrayElementStructFields })}
                       valueTypes={valueTypes}
                       sharedPropertyTypes={sharedPropertyTypes}
+                      sampleKeys={structSampleKeys}
                     />
                   </FormGroup>
                 )}

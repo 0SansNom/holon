@@ -1,4 +1,5 @@
-import { Tag } from "@blueprintjs/core";
+import { Button, Tag } from "@blueprintjs/core";
+import { useNavigate } from "@tanstack/react-router";
 import type { ActionType } from "../../api/knowledge";
 import { RegistryCard } from "./OntologyTabLayout";
 
@@ -11,6 +12,7 @@ export function ActionTypeCard({
   onEdit: () => void;
   onBranch: () => void;
 }) {
+  const navigate = useNavigate();
   return (
     <RegistryCard name={actionType.name} onEdit={onEdit} onBranch={onBranch}>
       <div className="hl-tag-row hl-mt-xs">
@@ -23,6 +25,9 @@ export function ActionTypeCard({
         )}
         <Tag minimal intent={actionType.risk_level === "high" ? "warning" : "none"}>
           {actionType.risk_level} risk
+        </Tag>
+        <Tag minimal intent={actionType.lifecycle_status === "deprecated" ? "warning" : "none"}>
+          {actionType.lifecycle_status ?? "experimental"}
         </Tag>
         {actionType.writeback_dataset && (
           <Tag minimal icon="cloud-upload">
@@ -39,8 +44,28 @@ export function ActionTypeCard({
             {actionType.sections.length} section{actionType.sections.length === 1 ? "" : "s"}
           </Tag>
         )}
+        {(actionType.type_classes ?? []).map((tc) => (
+          <Tag key={tc} minimal>
+            {tc}
+          </Tag>
+        ))}
       </div>
       {actionType.description && <p className="hl-card-desc">{actionType.description}</p>}
+      <div className="hl-card-actions">
+        <Button
+          small
+          minimal
+          icon="document-open"
+          onClick={() =>
+            void navigate({
+              to: "/ontology/action-types/$name",
+              params: { name: actionType.name },
+            })
+          }
+        >
+          Open
+        </Button>
+      </div>
     </RegistryCard>
   );
 }

@@ -12,7 +12,7 @@ export interface Application {
   name: string;
   version: number;
   definition: ApplicationDefinition;
-  dependencies: { objectTypes: string[]; actions: string[] };
+  dependencies: { objectTypes: string[]; actions: string[]; relationTypes?: string[]; objectSets?: string[] };
   status: "draft" | "promoted";
   created_at: string;
   promoted_at: string | null;
@@ -24,6 +24,7 @@ export interface DashboardWidget {
   component: string;
   value?: number;
   rows?: Array<Record<string, unknown>>;
+  objectSet?: string | null;
   iframeUrl?: string | null;
 }
 

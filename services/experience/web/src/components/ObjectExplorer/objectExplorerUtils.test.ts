@@ -2,15 +2,21 @@ import { describe, expect, it } from "vitest";
 import type { ActionDefinition } from "../../api/knowledge";
 import {
   computeInlineEditableActions,
+  buildRelatedLinksForObjectType,
+  buildExplorerColumnKeys,
+  instancePropertyValue,
+  parseInstanceUrn,
   parseSearchHitRef,
+  preferTitleColumnFirst,
   preferredSearchProperty,
+  resolveInstanceColumnKey,
   titleOf,
   urnShortName,
 } from "./objectExplorerUtils";
 
 describe("urnShortName", () => {
   it("returns the last colon segment", () => {
-    expect(urnShortName("hl:acme:demo:object-type:Customer")).toBe("Customer");
+    expect(urnShortName("hl:acme:main:object-type:Customer")).toBe("Customer");
   });
 });
 
@@ -45,6 +51,53 @@ describe("preferredSearchProperty", () => {
   });
 });
 
+describe("parseInstanceUrn", () => {
+  it("parses ObjectType/id from the final segment", () => {
+    expect(parseInstanceUrn("hl:acme:main:instance:Customer/9")).toEqual({ type: "Customer", id: "9" });
+    expect(parseInstanceUrn("hl:acme:main:instance:Order/ord-1")).toEqual({ type: "Order", id: "ord-1" });
+  });
+
+  it("returns null when the local segment has no slash", () => {
+    expect(parseInstanceUrn("hl:acme:main:object-type:Customer")).toBeNull();
+  });
+});
+
+describe("buildRelatedLinksForObjectType", () => {
+  it("hides hidden sides and sorts prominent first", () => {
+    const links = buildRelatedLinksForObjectType("Order", [
+      {
+        name: "acme.orderCustomer",
+        source_object_type_urn: "hl:t:w:object-type:Order",
+        target_object_type_urn: "hl:t:w:object-type:Customer",
+        source_api_name: "customer",
+        source_display_name: "Customer",
+        source_visibility: "normal",
+        cardinality: "many_to_one",
+      },
+      {
+        name: "acme.orderLines",
+        source_object_type_urn: "hl:t:w:object-type:Order",
+        target_object_type_urn: "hl:t:w:object-type:Line",
+        source_api_name: "lines",
+        source_display_name: "Lines",
+        source_plural_display_name: "Order lines",
+        source_visibility: "prominent",
+        cardinality: "one_to_many",
+      },
+      {
+        name: "acme.hidden",
+        source_object_type_urn: "hl:t:w:object-type:Order",
+        target_object_type_urn: "hl:t:w:object-type:Secret",
+        source_api_name: "secret",
+        source_visibility: "hidden",
+      },
+    ]);
+    expect(links.map((l) => l.linkName)).toEqual(["lines", "customer"]);
+    expect(links[0].visibility).toBe("prominent");
+    expect(links[0].pluralLabel).toBe("Order lines");
+  });
+});
+
 describe("titleOf", () => {
   it("prefers title_key then primary_key", () => {
     expect(
@@ -65,6 +118,57 @@ describe("titleOf", () => {
         { title_key: "name", primary_key: "id", property_mapping: { id: "id", name: "customer_name" } },
       ),
     ).toBe("Globex");
+  });
+});
+
+describe("buildExplorerColumnKeys", () => {
+  const mapping = {
+    id: "id",
+    name: "name",
+    email: "email",
+    lifetimeValue: "lifetime_value",
+  };
+
+  it("orders ontology columns before action side-effect fields", () => {
+    const row = {
+      account_closed: false,
+      credit_hold: true,
+      email: "a@b.c",
+      id: 1,
+      lifetime_value: "10",
+      name: "Acme",
+      degraded: false,
+    };
+    expect(
+      buildExplorerColumnKeys({ property_mapping: mapping, derived_properties: { mlValueTier: "fn" } }, row),
+    ).toEqual(["id", "name", "email", "lifetime_value", "mlValueTier", "account_closed", "credit_hold"]);
+  });
+
+  it("falls back to row keys when mapping empty", () => {
+    expect(buildExplorerColumnKeys(null, { id: 1, name: "x", degraded: false })).toEqual(["id", "name"]);
+  });
+});
+
+describe("preferTitleColumnFirst", () => {
+  it("moves title_key / name to the front", () => {
+    expect(
+      preferTitleColumnFirst(["id", "email", "name"], {
+        title_key: "name",
+        property_mapping: { id: "id", name: "name", email: "email" },
+      }),
+    ).toEqual(["name", "id", "email"]);
+  });
+});
+
+describe("instancePropertyValue / resolveInstanceColumnKey", () => {
+  it("reads snake_case backing columns from api names", () => {
+    const row = { lifetime_value: "184500.00", name: "Acme" };
+    const mapping = { lifetimeValue: "lifetime_value", name: "name" };
+    expect(resolveInstanceColumnKey("lifetimeValue", mapping, new Set(Object.keys(row)))).toBe(
+      "lifetime_value",
+    );
+    expect(instancePropertyValue(row, "lifetimeValue", mapping)).toBe("184500.00");
+    expect(instancePropertyValue(row, "name", mapping)).toBe("Acme");
   });
 });
 

@@ -12,10 +12,10 @@ import json
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 
-from holon_common import Principal
+from holon_common import HolonError, Principal
 
 from .. import execution, lineage, ontology, query_log, search
 from .. import core
@@ -96,41 +96,79 @@ async def execute_plan(request: ExecutionRequest, principal: Principal = Depends
     served from cache, never re-executed — `cached` in the response makes
     that directly observable.
     """
-    object_type_urn = core.OBJECT_TYPE_URNS.get(request.object_type)
-    if object_type_urn is None:
-        raise HTTPException(status_code=404, detail=f"unknown ObjectType: {request.object_type}")
+    try:
+        object_type_urn = await core._object_type_urn_for(request.object_type, tenant_id=principal.tenant_id)
+    except KeyError:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {request.object_type}")
     await core._authorize_object_type(principal, object_type_urn, "read")
 
     object_type = await ontology.get_object_type(core.pool, object_type_urn)
     if object_type is None:
-        raise HTTPException(status_code=500, detail=f"ObjectType {object_type_urn} is not catalogued")
+        raise HolonError.internal('ObjectTypeNotCatalogued', f"ObjectType {object_type_urn} is not catalogued")
     property_mapping = object_type["property_mapping"]
 
     target_object_type_name = target_property_mapping = join_source_property = target_object_type_urn = None
+    storage_kind = "foreign_key"
+    bridge_dataset_name = bridge_source_column = bridge_target_column = source_id_column = None
     if request.operation == "join":
         if not request.relation_name:
-            raise HTTPException(status_code=400, detail="join requires relation_name")
+            raise HolonError.invalid_argument('InvalidJoin', "join requires relation_name")
         relation_urn = ontology.relation_type_urn(principal.tenant_id, core.WORKSPACE_ID, request.relation_name)
         relation_type = await ontology.get_relation_type(core.pool, relation_urn)
         if relation_type is None:
-            raise HTTPException(status_code=404, detail=f"unknown RelationType: {request.relation_name}")
+            raise HolonError.not_found('RelationTypeNotFound', f"unknown RelationType: {request.relation_name}")
         if relation_type["source_object_type_urn"] != object_type_urn:
-            raise HTTPException(
-                status_code=400,
-                detail=f"RelationType {request.relation_name!r} does not originate from {request.object_type}",
-            )
-        join_source_property = relation_type["source_property"]
+            raise HolonError.invalid_argument('RelationTypeMismatch', f"RelationType {request.relation_name!r} does not originate from {request.object_type}",)
+        storage_kind = relation_type.get("storage_kind") or "foreign_key"
         target_object_type_urn = relation_type["target_object_type_urn"]
         target_object_type_name = target_object_type_urn.rsplit(":", 1)[-1]
-        # Joining in a related ObjectType's data is still a read of that
-        # ObjectType — gated the same as reading it directly, or a
-        # principal without Customer access could see Customer fields
-        # smuggled in by joining from an Order they *do* have read on.
         await core._authorize_object_type(principal, target_object_type_urn, "read")
         target_object_type = await ontology.get_object_type(core.pool, target_object_type_urn)
         if target_object_type is None:
-            raise HTTPException(status_code=500, detail=f"ObjectType {target_object_type_urn} is not catalogued")
+            raise HolonError.internal('ObjectTypeNotCatalogued', f"ObjectType {target_object_type_urn} is not catalogued")
         target_property_mapping = target_object_type["property_mapping"]
+
+        if storage_kind == "foreign_key":
+            join_source_property = relation_type["source_property"]
+        elif storage_kind == "join_dataset":
+            join_urn = relation_type.get("join_dataset_urn")
+            bridge_source_column = relation_type.get("join_source_column")
+            bridge_target_column = relation_type.get("join_target_column")
+            if not join_urn or not bridge_source_column or not bridge_target_column:
+                raise HolonError.invalid_argument('DatasetNotFound', "join_dataset RelationType is missing join_dataset_urn / join columns",)
+            bridge_dataset_name = join_urn.rsplit(":", 1)[-1]
+            source_pk = object_type.get("primary_key") or "id"
+            if source_pk not in property_mapping:
+                raise HolonError.invalid_argument('MissingPrimaryKey', f"{request.object_type} has no primary key {source_pk!r} to join through",)
+            source_id_column = property_mapping[source_pk]
+        elif storage_kind == "object_backed":
+            mid_urn = relation_type.get("mid_object_type_urn")
+            mid_src_prop = relation_type.get("mid_source_property")
+            mid_tgt_prop = relation_type.get("mid_target_property")
+            if not mid_urn or not mid_src_prop or not mid_tgt_prop:
+                raise HolonError.invalid_argument('IncompleteObjectBackedRelation', "object_backed RelationType is missing mid ObjectType / properties")
+            await core._authorize_object_type(principal, mid_urn, "read")
+            mid_object_type = await ontology.get_object_type(core.pool, mid_urn)
+            if mid_object_type is None:
+                raise HolonError.internal('ObjectTypeNotCatalogued', f"ObjectType {mid_urn} is not catalogued")
+            mid_mapping = mid_object_type["property_mapping"]
+            if mid_src_prop not in mid_mapping or mid_tgt_prop not in mid_mapping:
+                raise HolonError.invalid_argument('IncompleteMidObjectType', f"mid ObjectType is missing mapped properties {mid_src_prop!r}/{mid_tgt_prop!r}",)
+            bridge_source_column = mid_mapping[mid_src_prop]
+            bridge_target_column = mid_mapping[mid_tgt_prop]
+            mid_name = mid_urn.rsplit(":", 1)[-1]
+            if mid_name in execution._OBJECT_TYPE_TO_DATASET:
+                bridge_dataset_name = execution._OBJECT_TYPE_TO_DATASET[mid_name]
+            elif mid_object_type.get("source_dataset_urn"):
+                bridge_dataset_name = mid_object_type["source_dataset_urn"].rsplit(":", 1)[-1]
+            else:
+                raise HolonError.invalid_argument('DatasetNotFound', f"mid ObjectType {mid_name!r} has no dataset mapping for analytics join",)
+            source_pk = object_type.get("primary_key") or "id"
+            if source_pk not in property_mapping:
+                raise HolonError.invalid_argument('MissingPrimaryKey', f"{request.object_type} has no primary key {source_pk!r} to join through",)
+            source_id_column = property_mapping[source_pk]
+        else:
+            raise HolonError.invalid_argument('UnsupportedStorageKind', f"unsupported RelationType storage_kind: {storage_kind!r}")
 
     try:
         result = await execution.get_or_execute(
@@ -151,9 +189,14 @@ async def execute_plan(request: ExecutionRequest, principal: Principal = Depends
             join_source_property=join_source_property,
             target_object_type_name=target_object_type_name,
             target_property_mapping=target_property_mapping,
+            storage_kind=storage_kind,
+            bridge_dataset_name=bridge_dataset_name,
+            bridge_source_column=bridge_source_column,
+            bridge_target_column=bridge_target_column,
+            source_id_column=source_id_column,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ExecutionPlanInvalid', str(exc)) from exc
 
     if request.operation in ("filter", "join"):
         result["results"] = await _mask_execution_rows(
@@ -180,22 +223,30 @@ async def replay_plan(plan_hash: str, principal: Principal = Depends(core.curren
     """
     row = await core.pool.fetchrow("SELECT plan FROM execution_run WHERE plan_hash = $1", plan_hash)
     if row is None:
-        raise HTTPException(status_code=404, detail=f"no execution_run found for plan_hash {plan_hash!r}")
+        raise HolonError.not_found('ExecutionRunNotFound', f"no execution_run found for plan_hash {plan_hash!r}")
     plan = json.loads(row["plan"])
     operation = plan.get("operation", "filter")
     object_type_name = plan["object_type"]
-    object_type_urn = core.OBJECT_TYPE_URNS[object_type_name]
+    try:
+        object_type_urn = await core._object_type_urn_for(object_type_name, tenant_id=principal.tenant_id)
+    except KeyError:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {object_type_name}")
     await core._authorize_object_type(principal, object_type_urn, "read")
     target_object_type_urn = None
     if operation == "join" and plan.get("target_object_type"):
-        target_object_type_urn = core.OBJECT_TYPE_URNS.get(plan["target_object_type"])
+        try:
+            target_object_type_urn = await core._object_type_urn_for(
+                plan["target_object_type"], tenant_id=principal.tenant_id
+            )
+        except KeyError:
+            target_object_type_urn = None
         if target_object_type_urn is not None:
             await core._authorize_object_type(principal, target_object_type_urn, "read")
 
     try:
         result = await execution.replay(core.pool, core.ICEBERG_CONFIG, plan_hash=plan_hash)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HolonError.invalid_argument('ExecutionPlanInvalid', str(exc)) from exc
 
     # Same R8.7 masking `/execute` itself applies, see `_mask_execution_rows` —
     # a replay is still a read, and `execution.replay()`'s own
@@ -222,8 +273,10 @@ async def replay_plan(plan_hash: str, principal: Principal = Depends(core.curren
 
 @router.get("/search")
 async def unified_search(
+    request: Request,
     q: str,
     object_type: Optional[str] = None,
+    interface: Optional[str] = None,
     from_: int = Query(0, alias="from", ge=0),
     size: int = Query(20, ge=1, le=100),
     principal: Principal = Depends(core.current_principal),
@@ -237,6 +290,12 @@ async def unified_search(
     (there's no single object_type_urn to check `_authorize_object_type`
     against). ABAC's per-document narrowing happens *inside* the
     OpenSearch query itself via entitlement tokens, not here.
+
+    Optional ``interface`` resolves to ObjectTypes whose published
+    ``implements`` expand to that interface (including via parent
+    interfaces), then narrows hits with an OpenSearch ``terms``
+    post_filter — same pattern as ``object_type``, without indexing
+    ``implements`` on documents.
     """
     decision = await core.authz.authorize(
         principal,
@@ -245,11 +304,54 @@ async def unified_search(
         permission="read",
     )
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+    selectable_props: list[str] = []
+    search_caps = {"allow_leading_wildcards": False, "allow_regex_queries": False}
+    property_filters: dict[str, str] = {}
+    for key, value in request.query_params.multi_items():
+        if key.startswith("prop.") and value:
+            property_filters[key[5:]] = value
+
+    interface_object_types: Optional[list[str]] = None
+    if interface:
+        if await ontology.get_interface_type(core.pool, principal.tenant_id, interface) is None:
+            raise HolonError.not_found('InterfaceNotFound', f"unknown interface: {interface}")
+        interface_object_types = await ontology.object_type_names_for_interface(
+            core.pool, principal.tenant_id, interface,
+        )
+        if object_type and object_type not in interface_object_types:
+            return {"total": 0, "results": [], "facets": {}, "property_facets": {}}
+        if not interface_object_types:
+            return {"total": 0, "results": [], "facets": {}, "property_facets": {}}
+
+    if object_type:
+        try:
+            ot_urn = await core._object_type_urn_for(
+                object_type, tenant_id=principal.tenant_id, workspace_id=core.WORKSPACE_ID
+            )
+            ot = await ontology.get_object_type(core.pool, ot_urn)
+            if ot:
+                selectable_props = search.selectable_property_names(ot.get("property_types"))
+                from ..ontology.render_hints import search_capability_hints
+
+                search_caps = search_capability_hints(ot.get("property_types"))
+        except KeyError:
+            selectable_props = []
 
     result = await search.search(
-        OPENSEARCH_URL, OPENSEARCH_PASSWORD, principal=principal, query_text=q,
-        object_type=object_type, from_=from_, size=size,
+        OPENSEARCH_URL,
+        OPENSEARCH_PASSWORD,
+        principal=principal,
+        query_text=q,
+        object_type=object_type,
+        object_types=None if object_type else interface_object_types,
+        from_=from_,
+        size=size,
+        selectable_props=selectable_props or None,
+        property_filters=property_filters or None,
+        allow_leading_wildcards=search_caps["allow_leading_wildcards"],
+        allow_regex=search_caps["allow_regex_queries"],
     )
     # Anonymized query log: tenant + query text + result count only,
     # never the principal who asked. See query_log.py's module docstring.
@@ -259,5 +361,17 @@ async def unified_search(
 
 @router.get("/lineage/{urn:path}")
 async def get_lineage(urn: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
-    await core._authorize_object_type(principal, core.CUSTOMER_OBJECT_TYPE_URN, "read")  # all lineage here traces back to Customer or Order
+    """`urn` can be a dataset-version or an ObjectType, on either side of a
+    `maps_to`/`derived_from` edge — same "spans everything, no single
+    object_type_urn to check" situation `unified_search` above already
+    handles, so this reduces to the same workspace `read` permission.
+    """
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="workspace",
+        resource_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
+        permission="read",
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
     return await lineage.edges_touching(core.pool, principal.tenant_id, urn)

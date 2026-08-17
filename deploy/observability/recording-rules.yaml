@@ -1,0 +1,65 @@
+groups:
+  - name: holon.recording
+    interval: 30s
+    rules:
+      # Success ratio (non-5xx), excluding probes.
+      - record: holon:http_request_success:ratio_rate5m
+        expr: |
+          sum by (service) (
+            rate(http_requests_total{path!~"/live|/ready|/metrics",status!~"5.."}[5m])
+          )
+          /
+          clamp_min(
+            sum by (service) (
+              rate(http_requests_total{path!~"/live|/ready|/metrics"}[5m])
+            ),
+            1e-9
+          )
+
+      - record: holon:http_request_error:ratio_rate5m
+        expr: |
+          sum by (service) (
+            rate(http_requests_total{path!~"/live|/ready|/metrics",status=~"5.."}[5m])
+          )
+          /
+          clamp_min(
+            sum by (service) (
+              rate(http_requests_total{path!~"/live|/ready|/metrics"}[5m])
+            ),
+            1e-9
+          )
+
+      - record: holon:http_request_duration:p99_5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (service, le) (
+              rate(http_request_duration_seconds_bucket{path!~"/live|/ready|/metrics"}[5m])
+            )
+          )
+
+      - record: holon:http_request_success:ratio_rate1h
+        expr: |
+          sum by (service) (
+            rate(http_requests_total{path!~"/live|/ready|/metrics",status!~"5.."}[1h])
+          )
+          /
+          clamp_min(
+            sum by (service) (
+              rate(http_requests_total{path!~"/live|/ready|/metrics"}[1h])
+            ),
+            1e-9
+          )
+
+      - record: holon:http_request_success:ratio_rate6h
+        expr: |
+          sum by (service) (
+            rate(http_requests_total{path!~"/live|/ready|/metrics",status!~"5.."}[6h])
+          )
+          /
+          clamp_min(
+            sum by (service) (
+              rate(http_requests_total{path!~"/live|/ready|/metrics"}[6h])
+            ),
+            1e-9
+          )

@@ -9,19 +9,19 @@ import {
 
 const RELATIONS: RelationType[] = [
   {
-    urn: "hl:acme:demo:relation_type:Order.customer",
+    urn: "hl:acme:main:relation_type:Order.customer",
     name: "Order.customer",
-    source_object_type_urn: "hl:acme:demo:object_type:Order",
-    target_object_type_urn: "hl:acme:demo:object_type:Customer",
+    source_object_type_urn: "hl:acme:main:object_type:Order",
+    target_object_type_urn: "hl:acme:main:object_type:Customer",
     source_property: "customerId",
     target_property: "orders",
     cardinality: "many_to_one",
   },
   {
-    urn: "hl:acme:demo:relation_type:ProductReview.order",
+    urn: "hl:acme:main:relation_type:ProductReview.order",
     name: "ProductReview.order",
-    source_object_type_urn: "hl:acme:demo:object_type:ProductReview",
-    target_object_type_urn: "hl:acme:demo:object_type:Order",
+    source_object_type_urn: "hl:acme:main:object_type:ProductReview",
+    target_object_type_urn: "hl:acme:main:object_type:Order",
     source_property: "orderId",
     target_property: "reviews",
     cardinality: "many_to_one",
@@ -47,7 +47,7 @@ describe("derivedEditorUtils", () => {
       },
       productNames: {
         kind: "link_aggregate",
-        relation: "orders",
+        path: ["orders"],
         aggregate: "collect_list",
         property: "product",
         collect_limit: 5,
@@ -68,7 +68,6 @@ describe("derivedEditorUtils", () => {
     expect(serialized.productNames).toMatchObject({
       kind: "link_aggregate",
       path: ["orders"],
-      relation: "orders",
       aggregate: "collect_list",
       property: "product",
       collect_limit: 5,

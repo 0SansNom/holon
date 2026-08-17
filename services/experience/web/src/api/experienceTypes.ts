@@ -6,12 +6,18 @@ export interface ActionRef {
 export interface ObjectAppSurface {
   type: "objectApp";
   objectType: string;
+  /** Optional PDP-gated Object Set filter for the list surface. */
+  objectSet?: string;
+  /** Optional RelationType accessor names to surface as related-link panels. */
+  links?: string[];
   route?: string;
 }
 
 export interface DashboardWidgetSurface {
   component: "kpi" | "table" | string;
   objectType?: string;
+  /** Optional Object Set — when set, widget rows come from evaluate, not full type list. */
+  objectSet?: string;
   label?: string;
 }
 

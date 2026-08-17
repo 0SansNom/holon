@@ -1,10 +1,4 @@
-"""Approval lifecycle CRUD — `reject`/`expire`/`get`/`list`. Unlike
-`__init__.py`'s `approve_action`/`compensate_from_workflow_engine`, none
-of this branches between `hardcoded`/`declarative` Actions at all (a
-rejected or expired approval never applied anything, so there's nothing
-to dispatch into) — a leaf module, imports `_event` from `.hardcoded`
-(one-way) and nothing else package-internal.
-"""
+"""Approval lifecycle CRUD — reject, expire, get, list."""
 
 from __future__ import annotations
 
@@ -21,10 +15,6 @@ from .hardcoded import _event
 
 logger = logging.getLogger("knowledge.actions")
 
-# Default human-in-the-loop review window (a pending high-risk request that
-# never expires is indistinguishable from one still being reviewed). The
-# caller-supplied `ttl_seconds` override on `request_action`/
-# `request_generic_action` exists purely as a test/demo hook.
 APPROVAL_TTL = timedelta(hours=24)
 
 
