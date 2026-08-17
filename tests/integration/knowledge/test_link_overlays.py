@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 import uuid
 from pathlib import Path
@@ -52,9 +53,19 @@ def test_admin_can_generate_join_dataset(msmith_token: str) -> None:
     assert body["target_column"] == "order_id", body
     assert body["row_count"] == 0, body
 
-    status, datasets = _request("GET", holon_url("/catalog/datasets"), token=msmith_token)
-    assert status == 200, datasets
-    assert any(d["urn"] == body["dataset_urn"] for d in datasets), datasets
+    # Cataloguing happens asynchronously via Knowledge's own bus consumer
+    # (see generate_join_dataset's docstring) — poll for convergence like
+    # every other dataset-creation path in this suite.
+    deadline = time.monotonic() + 30
+    datasets: list = []
+    while time.monotonic() < deadline:
+        status, datasets = _request("GET", holon_url("/catalog/datasets"), token=msmith_token)
+        assert status == 200, datasets
+        if any(d["urn"] == body["dataset_urn"] for d in datasets):
+            break
+        time.sleep(1)
+    else:
+        pytest.fail(f"join dataset {body['dataset_urn']} never converged in the catalog: {datasets}")
 
 
 def test_editor_cannot_generate_join_dataset(jdoe_token: str) -> None:
