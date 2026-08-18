@@ -173,6 +173,19 @@ async def _require_active_principal_row(urn: str) -> asyncpg.Record:
     return row
 
 
+def _reject_group_authentication(row: asyncpg.Record) -> None:
+    if row["type"] == "group":
+        raise HolonError.forbidden("GroupCannotAuthenticate", "groups cannot mint tokens or sign in")
+
+
+def _grant_subject_relation(target: Principal) -> str | None:
+    """A grant *on* a group is `group#member` so members inherit.
+
+    A grant on a user/agent/SA stays a direct `principal` userset.
+    """
+    return "member" if target.type == "group" else None
+
+
 def _reject_dev_secret_if_disabled(client_secret: str) -> None:
     if allow_dev_login():
         return
@@ -253,6 +266,7 @@ async def mint_token(request: TokenRequest) -> dict:
     cookie jar. `/login` below is the browser's own path.
     """
     row = await _require_active_principal_row(request.principal_urn)
+    _reject_group_authentication(row)
     _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
@@ -294,6 +308,7 @@ async def oauth2_token(request: OAuth2TokenForm) -> dict:
             raise
         sa_urn = build_urn(TENANT_ID, "global", "service-account", client_id)
         row = await _require_active_principal_row(sa_urn)
+    _reject_group_authentication(row)
     _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HolonError.unauthorized("InvalidCredentials", "invalid client_id or client_secret")
@@ -315,6 +330,7 @@ async def login(request: TokenRequest, response: Response) -> dict:
     """
     try:
         row = await _require_active_principal_row(request.principal_urn)
+        _reject_group_authentication(row)
         _reject_dev_secret_if_disabled(request.client_secret)
         if not secrets.compare_digest(row["client_secret"], request.client_secret):
             raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
@@ -622,7 +638,7 @@ class CreateWorkspaceRequest(BaseModel):
 
 class CreatePrincipalRequest(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=64)
-    type: str = Field(pattern=r"^(user|agent|service_account)$")
+    type: str = Field(pattern=r"^(user|agent|service_account|group)$")
     local_name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     display_name: str = Field(min_length=1, max_length=256)
     country: str | None = None
@@ -751,6 +767,8 @@ async def principals_create(
         await _authorize_bootstrap_governance(principal)
     else:
         await _authorize_workspace_governance(principal, request.tenant_id, workspaces[0]["workspace_id"])
+    if request.type == "group" and request.on_behalf_of:
+        raise HolonError.invalid_argument("GroupCannotDelegate", "a group cannot act on behalf of another principal")
     try:
         row = await insert_principal(
             app.state.pool,
@@ -769,8 +787,9 @@ async def principals_create(
         relation="member",
         subject_urn=row["urn"],
     )
-    # Never return client_secret in list form; include once at create for service accounts.
-    return {
+    # Never return client_secret in list form; include once at create for
+    # service accounts / users. Groups cannot authenticate.
+    payload = {
         "urn": row["urn"],
         "type": row["type"],
         "tenant_id": row["tenant_id"],
@@ -778,8 +797,10 @@ async def principals_create(
         "on_behalf_of": row["on_behalf_of"],
         "country": row["country"],
         "status": row["status"],
-        "client_secret": row["client_secret"],
     }
+    if request.type != "group":
+        payload["client_secret"] = row["client_secret"]
+    return payload
 
 
 @app.post("/principals/{principal_urn:path}/status")
@@ -797,6 +818,111 @@ async def principals_set_status(
     updated = await set_principal_status(app.state.pool, principal_urn, request.status)
     assert updated is not None
     return {k: updated[k] for k in ("urn", "type", "tenant_id", "display_name", "status")}
+
+
+class GroupMemberRequest(BaseModel):
+    principal_urn: str
+
+
+async def _require_group(group_urn: str) -> Principal:
+    group = await _fetch_principal(app.state.pool, group_urn)
+    if group is None:
+        raise HolonError.not_found("PrincipalNotFound", f"unknown principal: {group_urn}")
+    if group.type != "group":
+        raise HolonError.invalid_argument("NotAGroup", f"{group_urn} is not a group", urn=group_urn)
+    return group
+
+
+async def _authorize_principal_governance(principal: Principal, tenant_id: str) -> None:
+    workspaces = await list_workspaces(app.state.pool, tenant_id)
+    if not workspaces:
+        await _authorize_bootstrap_governance(principal)
+    else:
+        await _authorize_workspace_governance(principal, tenant_id, workspaces[0]["workspace_id"])
+
+
+@app.get("/principals/{group_urn:path}/members")
+async def list_group_members(group_urn: str, principal: Principal = Depends(current_principal)) -> list[dict]:
+    group = await _require_group(group_urn)
+    if group.tenant_id != principal.tenant_id:
+        raise HolonError.invalid_argument("CrossTenantPrincipal", "principal belongs to another tenant")
+    return await _access_listing("principal", group_urn, {"member"})
+
+
+@app.post("/principals/{group_urn:path}/members", status_code=201)
+async def add_group_member(
+    group_urn: str, request: GroupMemberRequest, principal: Principal = Depends(current_principal)
+) -> dict:
+    group = await _require_group(group_urn)
+    await _authorize_principal_governance(principal, group.tenant_id)
+    member = await _require_grant_target(request.principal_urn, tenant_id=group.tenant_id)
+    if member.type == "group":
+        raise HolonError.invalid_argument("NestedGroupForbidden", "group membership is one level only")
+    if member.urn == group.urn:
+        raise HolonError.invalid_argument("GroupCannotContainSelf", "a group cannot contain itself")
+    await app.state.authz.write_relationship(
+        resource_type="principal",
+        resource_urn=group.urn,
+        relation="member",
+        subject_urn=member.urn,
+    )
+    await _enqueue_permission_event(
+        event_type="identity.permission.granted",
+        target_principal_urn=member.urn,
+        resource_type="principal",
+        resource_urn=group.urn,
+        relation="member",
+        actor=principal,
+        tenant_id=group.tenant_id,
+    )
+    emit_audit(
+        category="identity",
+        action="identity.group.member_added",
+        outcome="success",
+        tenant_id=group.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="principal",
+        resource_urn=group.urn,
+        extra={"memberUrn": member.urn},
+    )
+    return {"status": "added", "groupUrn": group.urn, "memberUrn": member.urn}
+
+
+@app.delete("/principals/{group_urn:path}/members/{member_urn:path}")
+async def remove_group_member(
+    group_urn: str, member_urn: str, principal: Principal = Depends(current_principal)
+) -> dict:
+    group = await _require_group(group_urn)
+    await _authorize_principal_governance(principal, group.tenant_id)
+    member = await _require_grant_target(member_urn, tenant_id=group.tenant_id)
+    await app.state.authz.delete_relationship(
+        resource_type="principal",
+        resource_urn=group.urn,
+        relation="member",
+        subject_urn=member.urn,
+    )
+    await _enqueue_permission_event(
+        event_type="identity.permission.revoked",
+        target_principal_urn=member.urn,
+        resource_type="principal",
+        resource_urn=group.urn,
+        relation="member",
+        actor=principal,
+        tenant_id=group.tenant_id,
+    )
+    emit_audit(
+        category="identity",
+        action="identity.group.member_removed",
+        outcome="success",
+        tenant_id=group.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="principal",
+        resource_urn=group.urn,
+        extra={"memberUrn": member.urn},
+    )
+    return {"status": "removed", "groupUrn": group.urn, "memberUrn": member.urn}
 
 
 async def _resolve_workspace_governance(
@@ -910,6 +1036,35 @@ async def _enqueue_permission_event(
             await outbox.enqueue(conn, event)
 
 
+async def _fanout_group_permission_event(
+    group: Principal,
+    *,
+    event_type: str,
+    resource_type: str,
+    resource_urn: str,
+    relation: str,
+    actor: Principal,
+    tenant_id: str,
+    workspace_id: str | None = None,
+) -> None:
+    """Group grants change every member's effective rights. Knowledge
+    caches decisions per acting principal — invalidate the members, not
+    just the group URN (which is never the actor on an object read).
+    """
+    members = await _access_listing("principal", group.urn, {"member"})
+    for member in members:
+        await _enqueue_permission_event(
+            event_type=event_type,
+            target_principal_urn=member["principal_urn"],
+            resource_type=resource_type,
+            resource_urn=resource_urn,
+            relation=relation,
+            actor=actor,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+
+
 @app.post("/principals/{principal_urn:path}/access/grant")
 async def grant_access(
     principal_urn: str, request: AccessRequest, principal: Principal = Depends(current_principal)
@@ -928,6 +1083,7 @@ async def grant_access(
         resource_urn=w_urn,
         relation=request.relation,
         subject_urn=principal_urn,
+        optional_subject_relation=_grant_subject_relation(target),
     )
     await _enqueue_permission_event(
         event_type="identity.permission.granted",
@@ -939,6 +1095,17 @@ async def grant_access(
         tenant_id=tid,
         workspace_id=wid,
     )
+    if target.type == "group":
+        await _fanout_group_permission_event(
+            target,
+            event_type="identity.permission.granted",
+            resource_type="workspace",
+            resource_urn=w_urn,
+            relation=request.relation,
+            actor=principal,
+            tenant_id=tid,
+            workspace_id=wid,
+        )
     emit_audit(
         category="identity",
         action="identity.permission.granted",
@@ -976,6 +1143,7 @@ async def revoke_access(
         resource_urn=w_urn,
         relation=request.relation,
         subject_urn=principal_urn,
+        optional_subject_relation=_grant_subject_relation(target),
     )
 
     await _enqueue_permission_event(
@@ -988,6 +1156,17 @@ async def revoke_access(
         tenant_id=tid,
         workspace_id=wid,
     )
+    if target.type == "group":
+        await _fanout_group_permission_event(
+            target,
+            event_type="identity.permission.revoked",
+            resource_type="workspace",
+            resource_urn=w_urn,
+            relation=request.relation,
+            actor=principal,
+            tenant_id=tid,
+            workspace_id=wid,
+        )
 
     emit_audit(
         category="identity",
@@ -1096,9 +1275,13 @@ async def grant_project_access(
 ) -> dict:
     p_urn = await _authorize_project_governance(principal, name)
     _validate_project_relation(request.relation)
-    await _require_grant_target(principal_urn, tenant_id=principal.tenant_id)
+    target = await _require_grant_target(principal_urn, tenant_id=principal.tenant_id)
     await app.state.authz.write_relationship(
-        resource_type="project", resource_urn=p_urn, relation=request.relation, subject_urn=principal_urn,
+        resource_type="project",
+        resource_urn=p_urn,
+        relation=request.relation,
+        subject_urn=principal_urn,
+        optional_subject_relation=_grant_subject_relation(target),
     )
     await _enqueue_permission_event(
         event_type="identity.permission.granted",
@@ -1108,6 +1291,16 @@ async def grant_project_access(
         relation=request.relation,
         actor=principal,
     )
+    if target.type == "group":
+        await _fanout_group_permission_event(
+            target,
+            event_type="identity.permission.granted",
+            resource_type="project",
+            resource_urn=p_urn,
+            relation=request.relation,
+            actor=principal,
+            tenant_id=principal.tenant_id,
+        )
     return {"status": "granted", "principalUrn": principal_urn, "project": name, "relation": request.relation}
 
 
@@ -1117,8 +1310,13 @@ async def revoke_project_access(
 ) -> dict:
     p_urn = await _authorize_project_governance(principal, name)
     _validate_project_relation(request.relation)
+    target = await _require_grant_target(principal_urn, tenant_id=principal.tenant_id)
     await app.state.authz.delete_relationship(
-        resource_type="project", resource_urn=p_urn, relation=request.relation, subject_urn=principal_urn,
+        resource_type="project",
+        resource_urn=p_urn,
+        relation=request.relation,
+        subject_urn=principal_urn,
+        optional_subject_relation=_grant_subject_relation(target),
     )
 
     await _enqueue_permission_event(
@@ -1129,6 +1327,16 @@ async def revoke_project_access(
         relation=request.relation,
         actor=principal,
     )
+    if target.type == "group":
+        await _fanout_group_permission_event(
+            target,
+            event_type="identity.permission.revoked",
+            resource_type="project",
+            resource_urn=p_urn,
+            relation=request.relation,
+            actor=principal,
+            tenant_id=principal.tenant_id,
+        )
 
     return {"status": "revoked", "principalUrn": principal_urn, "project": name, "relation": request.relation}
 

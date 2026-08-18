@@ -19,7 +19,7 @@ export async function logout(): Promise<void> {
 
 export interface IdentityPrincipal {
   urn: string;
-  type: "user" | "agent" | "service_account";
+  type: "user" | "agent" | "service_account" | "group";
   tenant_id: string;
   display_name: string;
   on_behalf_of: string | null;
@@ -53,7 +53,7 @@ export const identityApi = {
   listPrincipals: () => api.get<IdentityPrincipal[]>(`${IDENTITY_URL}/principals`),
   createPrincipal: (body: {
     tenant_id: string;
-    type: "user" | "agent" | "service_account";
+    type: "user" | "agent" | "service_account" | "group";
     local_name: string;
     display_name: string;
     country?: string | null;
@@ -87,6 +87,19 @@ export const identityApi = {
 
   listProjects: () => api.get<Project[]>(`${IDENTITY_URL}/projects`),
   createProject: (name: string) => api.post<Project>(`${IDENTITY_URL}/projects`, { name }),
+
+  listGroupMembers: (groupUrn: string) =>
+    api.get<{ principal_urn: string; display_name: string | null; type: string | null; relation: string }[]>(
+      `${IDENTITY_URL}/principals/${encodeURIComponent(groupUrn)}/members`,
+    ),
+  addGroupMember: (groupUrn: string, principalUrn: string) =>
+    api.post<{ status: string }>(`${IDENTITY_URL}/principals/${encodeURIComponent(groupUrn)}/members`, {
+      principal_urn: principalUrn,
+    }),
+  removeGroupMember: (groupUrn: string, memberUrn: string) =>
+    api.delete<{ status: string }>(
+      `${IDENTITY_URL}/principals/${encodeURIComponent(groupUrn)}/members/${encodeURIComponent(memberUrn)}`,
+    ),
 
   grantWorkspaceAccess: (principalUrn: string, relation: AccessRelation) =>
     api.post<{ status: string }>(`${IDENTITY_URL}/principals/${encodeURIComponent(principalUrn)}/access/grant`, { relation }),

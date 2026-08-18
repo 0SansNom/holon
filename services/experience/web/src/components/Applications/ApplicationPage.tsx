@@ -24,15 +24,7 @@ import { ApiError } from "../../api/client";
 import { ResourceActionsMenu } from "../common/ResourceActionsMenu";
 import { DetailPage } from "../common/PageLayout";
 import { ObjectAppSkeleton } from "../common/Skeleton";
-
-const DEFAULT_DEFINITION = {
-  surfaces: [{ type: "objectApp", objectType: "Customer", route: "/apps/example" }],
-  bindings: [
-    { component: "table", objectType: "Customer" },
-    { component: "detail", objectType: "Customer" },
-  ],
-  actionRefs: [{ action: "Customer.putOnCreditHold", riskClass: "low" }],
-};
+import { defaultApplicationDefinition } from "./objectAppSurface";
 
 export function ApplicationPage() {
   const { name } = useParams({ from: "/shell/applications/$name" });
@@ -49,15 +41,19 @@ export function ApplicationPage() {
   const promoteMutation = usePromoteApplication(name);
   const setProjectMutation = useSetApplicationProject(name);
 
-  const [editorValue, setEditorValue] = useState(JSON.stringify(DEFAULT_DEFINITION, null, 2));
+  const [editorValue, setEditorValue] = useState("{}");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
+  const notFound = error instanceof ApiError && error.status === 404;
+  const draftDefinition = application?.definition ?? defaultApplicationDefinition(objectTypes, actions);
 
   useEffect(() => {
-    if (application) setEditorValue(JSON.stringify(application.definition, null, 2));
-  }, [application]);
-
-  const notFound = error instanceof ApiError && error.status === 404;
+    if (application) {
+      setEditorValue(JSON.stringify(application.definition, null, 2));
+      return;
+    }
+    setEditorValue(JSON.stringify(defaultApplicationDefinition(objectTypes, actions), null, 2));
+  }, [application, objectTypes, actions]);
 
   // Shared by both editors — the Builder tab constructs a definition
   // object directly, the Definition tab parses one from Monaco's raw
@@ -144,7 +140,7 @@ export function ApplicationPage() {
           title="Builder"
           panel={
             <ApplicationBuilder
-              definition={application?.definition ?? DEFAULT_DEFINITION}
+              definition={draftDefinition}
               objectTypes={objectTypes}
               objectSets={objectSets}
               actions={actions}

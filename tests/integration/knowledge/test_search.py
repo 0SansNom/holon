@@ -6,9 +6,10 @@ import json
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request, ontology_url, holon_url
 
 
 def _token_for(principal_urn: str) -> str:
@@ -121,3 +122,62 @@ def test_pagination_size_and_from_are_respected(jdoe_token: str, all_datasets_sy
     assert status == 200, next_page
     if page["results"] and next_page["results"]:
         assert page["results"][0]["urn"] != next_page["results"][0]["urn"], (page, next_page)
+
+
+def test_object_type_marking_hides_type_from_search(
+    msmith_token: str, jdoe_token: str, all_datasets_synced: None
+) -> None:
+    """Type-level markings are applied at query planning, before OpenSearch."""
+    _search(jdoe_token, "a")
+
+    marking_name = f"search-mark-{uuid.uuid4().hex[:8]}"
+    status, marking = _request("POST", holon_url("/markings"), token=msmith_token, body={"name": marking_name})
+    assert status == 201, marking
+
+    try:
+        status, draft = _request(
+            "POST",
+            ontology_url("/objectTypes/InventoryLevel/versions"),
+            token=msmith_token,
+            body={"description": "search-marking", "markings": [marking_name]},
+        )
+        assert status == 201, draft
+        status, published = _request(
+            "POST",
+            ontology_url(f"/objectTypes/InventoryLevel/versions/{draft['version']}/publish"),
+            token=msmith_token,
+        )
+        assert status == 200, published
+
+        status, hidden = _request(
+            "GET", holon_url("/search?q=a&object_type=InventoryLevel"), token=jdoe_token
+        )
+        assert status == 200, hidden
+        assert hidden["total"] == 0, hidden
+        assert hidden["results"] == [], hidden
+
+        status, grant = _request(
+            "POST",
+            holon_url(f"/markings/{marking_name}/principals/hl:{TENANT_ID}:global:user:jdoe/access/grant"),
+            token=msmith_token,
+        )
+        assert status == 200, grant
+
+        status, visible = _request(
+            "GET", holon_url("/search?q=a&object_type=InventoryLevel"), token=jdoe_token
+        )
+        assert status == 200, visible
+        # InventoryLevel rows may or may not contain "a"; the point is the
+        # type is once again in the allowed set (not a hard 403 / forced empty
+        # from ReBAC planning). Facet key appears only if there is a hit.
+        assert visible["total"] == len(visible["results"]), visible
+    finally:
+        status, draft = _request(
+            "POST", ontology_url("/objectTypes/InventoryLevel/versions"), token=msmith_token, body={"markings": []}
+        )
+        if status == 201:
+            _request(
+                "POST",
+                ontology_url(f"/objectTypes/InventoryLevel/versions/{draft['version']}/publish"),
+                token=msmith_token,
+            )

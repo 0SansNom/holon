@@ -281,15 +281,12 @@ async def unified_search(
     size: int = Query(20, ge=1, le=100),
     principal: Principal = Depends(core.current_principal),
 ) -> dict:
-    """Entitlement-token-filtered search, no post-filtering. See
-    `search.py`'s module docstring for the exact ReBAC/ABAC split.
-    The ReBAC half is checked here, once, before
-    any query reaches OpenSearch — the same workspace `read` permission
-    every other read ultimately reduces to, checked directly against the
-    `workspace` resource since a search spans every ObjectType at once
-    (there's no single object_type_urn to check `_authorize_object_type`
-    against). ABAC's per-document narrowing happens *inside* the
-    OpenSearch query itself via entitlement tokens, not here.
+    """Entitlement-token-filtered search, no post-filtering.
+
+    ReBAC is the allowed ObjectType set (LookupResources + markings),
+    not a single workspace `read` — a project-only principal can search
+    the types they can actually read. ABAC country tokens and instance
+    markings filter inside OpenSearch (R8.6).
 
     Optional ``interface`` resolves to ObjectTypes whose published
     ``implements`` expand to that interface (including via parent
@@ -297,14 +294,13 @@ async def unified_search(
     post_filter — same pattern as ``object_type``, without indexing
     ``implements`` on documents.
     """
-    decision = await core.authz.authorize(
-        principal,
-        resource_type="workspace",
-        resource_urn=ontology.workspace_urn(principal.tenant_id, core.WORKSPACE_ID),
-        permission="read",
-    )
-    if not decision.allowed:
-        raise HolonError.forbidden("PermissionDenied", decision.reason)
+    allowed_object_types = await core.readable_object_type_names(principal)
+    if not allowed_object_types:
+        raise HolonError.forbidden(
+            "PermissionDenied",
+            f"rebac_denied: {principal.urn} has no 'read' on any object_type",
+        )
+    held_markings = await core.held_marking_names(principal)
 
     selectable_props: list[str] = []
     search_caps = {"allow_leading_wildcards": False, "allow_regex_queries": False}
@@ -317,13 +313,20 @@ async def unified_search(
     if interface:
         if await ontology.get_interface_type(core.pool, principal.tenant_id, interface) is None:
             raise HolonError.not_found('InterfaceNotFound', f"unknown interface: {interface}")
-        interface_object_types = await ontology.object_type_names_for_interface(
-            core.pool, principal.tenant_id, interface,
-        )
+        interface_object_types = [
+            name
+            for name in await ontology.object_type_names_for_interface(
+                core.pool, principal.tenant_id, interface,
+            )
+            if name in allowed_object_types
+        ]
         if object_type and object_type not in interface_object_types:
             return {"total": 0, "results": [], "facets": {}, "property_facets": {}}
         if not interface_object_types:
             return {"total": 0, "results": [], "facets": {}, "property_facets": {}}
+
+    if object_type and object_type not in allowed_object_types:
+        return {"total": 0, "results": [], "facets": {}, "property_facets": {}}
 
     if object_type:
         try:
@@ -352,6 +355,8 @@ async def unified_search(
         property_filters=property_filters or None,
         allow_leading_wildcards=search_caps["allow_leading_wildcards"],
         allow_regex=search_caps["allow_regex_queries"],
+        allowed_object_types=allowed_object_types,
+        held_markings=held_markings,
     )
     # Anonymized query log: tenant + query text + result count only,
     # never the principal who asked. See query_log.py's module docstring.

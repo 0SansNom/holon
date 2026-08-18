@@ -29,6 +29,8 @@ _INDEX_MAPPING = {
             "tenant_id": {"type": "keyword"},
             "classification": {"type": "keyword"},
             "entitlement_tokens": {"type": "keyword"},
+            "required_markings": {"type": "keyword"},
+            "required_marking_count": {"type": "integer"},
             "text": {"type": "text"},
             "props": {"type": "object", "dynamic": True},
         },
@@ -226,6 +228,11 @@ def _build_post_filter(
 
 
 def _entitlement_tokens_for(classification: str, allowed_countries: set[str]) -> list[str]:
+    """ABAC half of R8.6 — country clearance. ReBAC is applied at query
+    time as an `object_type` filter (see `readable_object_type_names`),
+    not as a second token on the document: grants change without a
+    reindex, and SpiceDB object IDs are not reversible into URNs.
+    """
     if classification != "confidential":
         return ["public-read"]
     return [f"country:{country}" for country in sorted(allowed_countries)]
@@ -236,6 +243,41 @@ def _principal_tokens(principal: Principal) -> list[str]:
     if principal.country:
         tokens.append(f"country:{principal.country}")
     return tokens
+
+
+def _required_marking_tokens(markings: list[str] | None) -> list[str]:
+    return [f"mark:{name}" for name in (markings or []) if name]
+
+
+def _principal_marking_tokens(held_markings: list[str] | None) -> list[str]:
+    tokens = _required_marking_tokens(held_markings)
+    return tokens or ["mark:__none__"]
+
+
+def _rebac_object_type_filter(allowed_object_types: list[str]) -> dict[str, Any]:
+    return {"terms": {"object_type": list(allowed_object_types)}}
+
+
+def _marking_filter(held_marking_tokens: list[str]) -> dict[str, Any]:
+    """Unmarked documents stay visible. Marked documents require the
+    principal to hold every `required_markings` token (terms_set).
+    """
+    return {
+        "bool": {
+            "should": [
+                {"bool": {"must_not": {"exists": {"field": "required_markings"}}}},
+                {
+                    "terms_set": {
+                        "required_markings": {
+                            "terms": held_marking_tokens,
+                            "minimum_should_match_field": "required_marking_count",
+                        }
+                    }
+                },
+            ],
+            "minimum_should_match": 1,
+        }
+    }
 
 
 async def delete_object_type_documents(
@@ -264,11 +306,23 @@ async def delete_object_type_documents(
         await client.post(f"{base_url}/{INDEX_NAME}/_refresh", json={})
 
 
+_MAPPING_ADDITIONS = {
+    "properties": {
+        "required_markings": {"type": "keyword"},
+        "required_marking_count": {"type": "integer"},
+    }
+}
+
+
 async def ensure_index(base_url: str, password: str) -> None:
     async with httpx.AsyncClient(auth=("admin", password), timeout=10.0) as client:
         response = await client.put(f"{base_url}/{INDEX_NAME}", json=_INDEX_MAPPING)
         if response.status_code not in (200, 400):  # 400 covers "already exists"
             response.raise_for_status()
+        # Existing indexes ignore PUT body; add new R8.6 fields in place.
+        mapping_response = await client.put(f"{base_url}/{INDEX_NAME}/_mapping", json=_MAPPING_ADDITIONS)
+        if mapping_response.status_code not in (200, 400):
+            mapping_response.raise_for_status()
 
 
 async def index_rows(
@@ -283,6 +337,7 @@ async def index_rows(
     allowed_countries: set[str],
     property_types: dict | None = None,
     shared_property_types: dict | None = None,
+    instance_markings: dict[str, list[str]] | None = None,
 ) -> None:
     if not rows:
         return
@@ -307,6 +362,10 @@ async def index_rows(
             "entitlement_tokens": tokens,
             "text": text,
         }
+        required = _required_marking_tokens((instance_markings or {}).get(str(instance_id)))
+        if required:
+            document["required_markings"] = required
+            document["required_marking_count"] = len(required)
         props = _keyword_prop_values(row, property_mapping, property_types)
         if props:
             document["props"] = props
@@ -335,12 +394,16 @@ async def search(
     property_filters: Optional[dict[str, str]] = None,
     allow_leading_wildcards: bool = False,
     allow_regex: bool = False,
+    allowed_object_types: Optional[list[str]] = None,
+    held_markings: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Unified search with stable facet aggregations via ``post_filter``.
 
-    ``object_type`` / ``object_types`` and ``property_filters`` narrow hits
-    only — facet bucket counts stay scoped to the text query +
-    entitlement filter.
+    Security filters live in the query ``filter`` (R8.6): ReBAC
+    (`allowed_object_types`), ABAC entitlement tokens, and instance
+    markings. ``object_type`` / ``object_types`` and ``property_filters``
+    are UX narrowing only — facet bucket counts stay scoped to the text
+    query + those security filters.
     """
     # `props.*` is mapped directly to `keyword` (dynamic template above) —
     # no `.keyword` sub-field exists to aggregate on top of it, unlike a
@@ -354,11 +417,17 @@ async def search(
         allow_leading_wildcards=allow_leading_wildcards,
         allow_regex=allow_regex,
     )
+    security_filters: list[dict[str, Any]] = [
+        {"terms": {"entitlement_tokens": _principal_tokens(principal)}},
+        _marking_filter(_principal_marking_tokens(held_markings)),
+    ]
+    if allowed_object_types is not None:
+        security_filters.append(_rebac_object_type_filter(allowed_object_types))
     query: dict[str, Any] = {
         "query": {
             "bool": {
                 "must": [text_clause],
-                "filter": [{"terms": {"entitlement_tokens": _principal_tokens(principal)}}],
+                "filter": security_filters,
             }
         },
         "aggs": aggs,

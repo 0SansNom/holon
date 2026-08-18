@@ -41,8 +41,8 @@ def test_experience_config():
     assert status == 200
     assert body["tenant_id"] == TENANT_ID
     assert body["workspace_id"] == "main"
-    assert "default_user_urn" in body
-    assert "customer_object_type_urn" in body
+    assert "default_user_urn" not in body
+    assert "customer_object_type_urn" not in body
     assert "allow_dev_login" in body
     assert "intelligence_enabled" in body
     assert isinstance(body["allow_dev_login"], bool)

@@ -110,7 +110,14 @@ class PermissionClient:
         response.raise_for_status()
 
     async def write_relationship(
-        self, *, resource_type: str, resource_urn: str, relation: str, subject_urn: str, subject_type: str = "principal"
+        self,
+        *,
+        resource_type: str,
+        resource_urn: str,
+        relation: str,
+        subject_urn: str,
+        subject_type: str = "principal",
+        optional_subject_relation: Optional[str] = None,
     ) -> None:
         body = {
             "updates": [
@@ -119,7 +126,7 @@ class PermissionClient:
                     "relationship": {
                         "resource": {"objectType": resource_type, "objectId": _object_id(resource_urn)},
                         "relation": relation,
-                        "subject": {"object": {"objectType": subject_type, "objectId": _object_id(subject_urn)}},
+                        "subject": _subject(subject_type, subject_urn, optional_subject_relation),
                     },
                 }
             ]
@@ -130,7 +137,14 @@ class PermissionClient:
         response.raise_for_status()
 
     async def delete_relationship(
-        self, *, resource_type: str, resource_urn: str, relation: str, subject_urn: str, subject_type: str = "principal"
+        self,
+        *,
+        resource_type: str,
+        resource_urn: str,
+        relation: str,
+        subject_urn: str,
+        subject_type: str = "principal",
+        optional_subject_relation: Optional[str] = None,
     ) -> None:
         """Revocation (`identity.permission.revoked`). Same
         `WriteRelationships` call shape as `write_relationship`, just
@@ -143,7 +157,7 @@ class PermissionClient:
                     "relationship": {
                         "resource": {"objectType": resource_type, "objectId": _object_id(resource_urn)},
                         "relation": relation,
-                        "subject": {"object": {"objectType": subject_type, "objectId": _object_id(subject_urn)}},
+                        "subject": _subject(subject_type, subject_urn, optional_subject_relation),
                     },
                 }
             ]
@@ -188,6 +202,58 @@ class PermissionClient:
                 continue
             relationships.append(json.loads(line)["result"]["relationship"])
         return relationships
+
+    async def lookup_resource_ids(
+        self, *, resource_type: str, permission: str, principal_urn: str
+    ) -> set[str]:
+        """SpiceDB LookupResources: every resource of `resource_type` on
+        which `principal_urn` has `permission`.
+
+        Returns SpiceDB object IDs (`spicedb_object_id(urn)`), not URNs —
+        the `:`/`.` encoding is not reversible. Callers match against
+        `spicedb_object_id(known_urn)`.
+
+        Used by Knowledge search to derive ReBAC entitlement tokens
+        (SAS R8.6) without a CheckPermission round-trip per ObjectType.
+        """
+        body = {
+            "resourceObjectType": resource_type,
+            "permission": permission,
+            "subject": {"object": {"objectType": "principal", "objectId": _object_id(principal_urn)}},
+            "consistency": {"fullyConsistent": True},
+        }
+
+        async def _do() -> httpx.Response:
+            response = await self._client.post(
+                f"{self._spicedb_url}/v1/permissions/resources",
+                headers=self._spicedb_headers,
+                json=body,
+            )
+            response.raise_for_status()
+            return response
+
+        response = await self._rebac_breaker.call(_do)
+        ids: set[str] = set()
+        for line in response.text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            result = payload.get("result") or payload
+            resource_id = (
+                result.get("resourceObjectId")
+                or result.get("resource_object_id")
+                or (result.get("resource") or {}).get("objectId")
+                or (result.get("resource") or {}).get("object_id")
+            )
+            permissionship = result.get("permissionship") or ""
+            # CheckPermission uses PERMISSIONSHIP_HAS_PERMISSION;
+            # LookupResources uses LOOKUP_PERMISSIONSHIP_HAS_PERMISSION.
+            if resource_id and "HAS_PERMISSION" in permissionship and "NO_PERMISSION" not in permissionship:
+                ids.add(resource_id)
+            elif resource_id and permissionship == "":
+                ids.add(resource_id)
+        return ids
 
     async def check_rebac(self, principal_urn: str, resource_type: str, resource_urn: str, permission: str) -> bool:
         body = {
@@ -372,9 +438,19 @@ class PermissionClient:
         return decision
 
 
-def _object_id(urn: str) -> str:
+def spicedb_object_id(urn: str) -> str:
     """SpiceDB object IDs disallow ':' and '.' — URNs use both freely
     (e.g. RelationType `Order.customer`). A plain, deterministic swap
     keeps the mapping obvious without adding a lookup table.
     """
     return urn.replace(":", "_").replace(".", "_")
+
+
+def _subject(subject_type: str, subject_urn: str, optional_subject_relation: Optional[str] = None) -> dict:
+    subject: dict[str, Any] = {"object": {"objectType": subject_type, "objectId": spicedb_object_id(subject_urn)}}
+    if optional_subject_relation:
+        subject["optionalRelation"] = optional_subject_relation
+    return subject
+
+
+_object_id = spicedb_object_id
