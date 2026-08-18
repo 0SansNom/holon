@@ -1,24 +1,10 @@
-"""Streaming connector — streaming Connectivity capability.
-
-Unlike every other connector, this one isn't triggered by `/sync`: a
-long-running background task (started in `main.py`'s `lifespan`,
-mirroring the outbox relay task already running there) continuously
-consumes an *external* system's raw Kafka topic via a plain
-`aiokafka.AIOKafkaConsumer` — not `holon_common.EventConsumer`, which
-assumes Holon's own `EventEnvelope` shape; this topic carries an external
-system's native messages, the same reasoning that makes
-`mongo_connector`/`rest_connector` use their source's own client rather
-than an internal abstraction.
-
-Ingestion shape: keep the latest reading per SKU in Postgres
-(`stream_inventory_state`) and mirror it in memory for the batch window.
-Kafka offsets are committed **only after** a successful Iceberg snapshot
-+ outbox finalize — auto-commit would advance past messages that never
-landed. On process restart, SKU state is reloaded from Postgres so the
-next snapshot is still a full last-write-wins map; uncommitted Kafka
-messages redeliver and merge. Periodic micro-batches commit one Iceberg
-snapshot and announce it via the same `connectivity.sync.completed`
-event every other connector uses.
+"""Streaming connector engine — generic over any registered
+`kafka_stream_source` (see `kafka_stream_registry.py`). Consumes a
+source's topic, keyed by its own `key_field`, maintains full
+current-state in Postgres, and commits a periodic Iceberg snapshot of
+that state — the same "latest reading per key, not an append-only
+event log" shape the original single hardcoded inventory stream always
+had, just parameterized instead of compiled in.
 """
 
 from __future__ import annotations
@@ -32,66 +18,17 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import asyncpg
 from aiokafka import AIOKafkaConsumer
 
-from . import iceberg_writer
+from . import iceberg_writer, kafka_stream_registry
 
 logger = logging.getLogger("connectivity.stream")
 
-EXTERNAL_TOPIC = "external-inventory-stream"
-BATCH_INTERVAL_SECONDS = 5.0
-
-_STATE_DDL = """
-CREATE TABLE IF NOT EXISTS stream_inventory_state (
-    sku TEXT PRIMARY KEY,
-    warehouse TEXT NOT NULL,
-    quantity DOUBLE PRECISION NOT NULL,
-    updated_at TEXT NOT NULL,
-    updated_row_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(_STATE_DDL)
-
-
-async def _load_state(pool: asyncpg.Pool) -> dict[str, dict]:
-    rows = await pool.fetch(
-        "SELECT sku, warehouse, quantity, updated_at FROM stream_inventory_state"
-    )
-    return {
-        row["sku"]: {
-            "id": row["sku"],
-            "warehouse": row["warehouse"],
-            "quantity": row["quantity"],
-            "updated_at": row["updated_at"],
-        }
-        for row in rows
-    }
-
-
-async def _persist_state(pool: asyncpg.Pool, rows: list[dict]) -> None:
-    if not rows:
-        return
-    async with pool.acquire() as conn:
-        await conn.executemany(
-            """
-            INSERT INTO stream_inventory_state (sku, warehouse, quantity, updated_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (sku) DO UPDATE SET
-                warehouse = EXCLUDED.warehouse,
-                quantity = EXCLUDED.quantity,
-                updated_at = EXCLUDED.updated_at,
-                updated_row_at = now()
-            """,
-            [(r["id"], r["warehouse"], r["quantity"], r["updated_at"]) for r in rows],
-        )
+    await kafka_stream_registry.ensure_schema(conn)
 
 
 async def _drain(consumer: AIOKafkaConsumer, *, timeout: float) -> AsyncIterator[Any]:
-    """Yield whatever messages are already available within `timeout`
-    seconds, then return — a bounded micro-batch window, not an unbounded
-    per-message loop (which would never leave room to commit a snapshot).
-    """
+    """Yield available messages within timeout window."""
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout
     while True:
@@ -105,73 +42,84 @@ async def _drain(consumer: AIOKafkaConsumer, *, timeout: float) -> AsyncIterator
         yield msg
 
 
-async def consume_inventory_stream_forever(
+async def consume_stream_forever(
     *,
+    source: dict,
     kafka_bootstrap: str,
     iceberg_config: dict,
     connector_urn: str,
     record_sync: Callable[..., Awaitable[Any]],
     pool: asyncpg.Pool,
 ) -> None:
+    """One consumer per registered stream source — `main.py` spawns and
+    cancels one of these per active `kafka_stream_source` row, the same
+    enable/disable-without-redeploy lifecycle a connector plugin
+    already has.
+    """
+    tenant_id = source["tenant_id"]
+    source_name = source["name"]
+    topic = source["topic"]
+    key_field = source["key_field"]
+    dataset_name = source["dataset_name"]
+    batch_interval_seconds = source["batch_interval_seconds"]
+
     consumer = AIOKafkaConsumer(
-        EXTERNAL_TOPIC,
+        topic,
         bootstrap_servers=kafka_bootstrap,
-        group_id="connectivity-inventory-stream",
+        group_id=f"connectivity-stream-{tenant_id}-{source_name}",
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
         auto_offset_reset="earliest",
         enable_auto_commit=False,
     )
     await consumer.start()
 
-    latest_by_sku = await _load_state(pool)
-    if latest_by_sku:
-        logger.info("inventory stream restored %d SKUs from Postgres", len(latest_by_sku))
+    latest_by_key = await kafka_stream_registry.load_state(pool, tenant_id, source_name)
+    if latest_by_key:
+        logger.info("stream %r restored %d records from Postgres", source_name, len(latest_by_key))
     dirty = False
-    batch_skus: set[str] = set()
+    batch_keys: set[str] = set()
     try:
         while True:
             try:
-                async for msg in _drain(consumer, timeout=BATCH_INTERVAL_SECONDS):
+                async for msg in _drain(consumer, timeout=batch_interval_seconds):
                     payload = msg.value
-                    sku = payload["sku"]
-                    latest_by_sku[sku] = {
-                        "id": sku,
-                        "warehouse": payload["warehouse"],
-                        "quantity": payload["quantity"],
-                        "updated_at": payload["updated_at"],
-                    }
-                    batch_skus.add(sku)
+                    if key_field not in payload:
+                        logger.warning(
+                            "stream %r: message missing key field %r, skipping: %s", source_name, key_field, payload
+                        )
+                        continue
+                    record_key = str(payload[key_field])
+                    latest_by_key[record_key] = {**payload, "id": record_key}
+                    batch_keys.add(record_key)
                     dirty = True
             except Exception:
-                logger.exception("inventory stream consume error, retrying")
+                logger.exception("stream %r consume error, retrying", source_name)
 
-            if dirty and latest_by_sku:
+            if dirty and latest_by_key:
                 try:
-                    changed = [latest_by_sku[s] for s in batch_skus] if batch_skus else list(latest_by_sku.values())
-                    # Durability before Iceberg: crash after this still has
-                    # SKU state in Postgres; Kafka offsets are not yet
-                    # committed, so messages redeliver (SKU last-write-wins).
-                    await _persist_state(pool, changed)
+                    changed = {k: latest_by_key[k] for k in batch_keys} if batch_keys else dict(latest_by_key)
+                    await kafka_stream_registry.persist_state(pool, tenant_id, source_name, changed)
                     started_at = datetime.now(timezone.utc)
-                    rows = list(latest_by_sku.values())
+                    rows = list(latest_by_key.values())
                     result = await asyncio.to_thread(
-                        iceberg_writer.write_snapshot, rows, "inventory_levels", **iceberg_config
+                        iceberg_writer.write_snapshot, rows, dataset_name, **iceberg_config
                     )
                     finished_at = datetime.now(timezone.utc)
                     await record_sync(
                         connector_urn=connector_urn,
-                        dataset_name="inventory_levels",
+                        dataset_name=dataset_name,
                         result=result,
                         started_at=started_at,
                         finished_at=finished_at,
+                        tenant_id=tenant_id,
                     )
                     await consumer.commit()
                     dirty = False
-                    batch_skus = set()
+                    batch_keys = set()
                     logger.info(
-                        "inventory stream committed snapshot %s (%d SKUs)", result.snapshot_id, len(rows)
+                        "stream %r committed snapshot %s (%d records)", source_name, result.snapshot_id, len(rows)
                     )
                 except Exception:
-                    logger.exception("inventory stream snapshot commit failed, will retry next cycle")
+                    logger.exception("stream %r snapshot commit failed, will retry next cycle", source_name)
     finally:
         await consumer.stop()

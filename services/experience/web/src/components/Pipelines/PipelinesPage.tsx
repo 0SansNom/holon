@@ -16,6 +16,19 @@ function formatWhen(value: string): string {
   }
 }
 
+function statusIntent(status: string): "success" | "danger" | "none" {
+  if (status === "succeeded") return "success";
+  if (status === "failed") return "danger";
+  return "none";
+}
+
+function formatLag(seconds: number): string {
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
 export function PipelinesPage() {
   const { data: pipelines } = usePipelines();
   const deletePipeline = useDeletePipeline();
@@ -59,6 +72,8 @@ export function PipelinesPage() {
               <tr>
                 <th>Name</th>
                 <th>Steps</th>
+                <th>Health</th>
+                <th>Schedule</th>
                 <th>Updated</th>
                 <th aria-label="Actions" />
               </tr>
@@ -75,6 +90,23 @@ export function PipelinesPage() {
                     <Tag minimal>
                       {p.steps.length} step{p.steps.length === 1 ? "" : "s"}
                     </Tag>
+                  </td>
+                  <td>
+                    {p.last_run ? (
+                      <span className="hl-flex-row hl-items-center hl-gap-sm">
+                        <Tag minimal intent={statusIntent(p.last_run.status)}>
+                          {p.last_run.status}
+                        </Tag>
+                        {p.lag_seconds != null && (
+                          <span className="hl-text-muted-sm">{formatLag(p.lag_seconds)}</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="hl-text-muted-sm">never run</span>
+                    )}
+                  </td>
+                  <td className="hl-text-muted-sm">
+                    {p.schedule_interval_minutes != null ? `every ${p.schedule_interval_minutes}min` : "manual"}
                   </td>
                   <td className="hl-text-muted-sm">{formatWhen(p.updated_at)}</td>
                   <td style={{ textAlign: "right" }}>

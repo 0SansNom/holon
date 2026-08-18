@@ -2,7 +2,7 @@ import { Button, Card, Tag } from "@blueprintjs/core";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import type { ActionDefinition, ObjectType, RelationType } from "../../api/knowledge";
-import { urnShortName } from "../ObjectExplorer/objectExplorerUtils";
+import { humanizeApiName, urnShortName } from "../ObjectExplorer/objectExplorerUtils";
 import type { EditableProperty } from "./propertyEditorUtils";
 import { partitionEphemeral } from "./ephemeralResources";
 
@@ -98,13 +98,20 @@ export function ObjectTypeOverview({
   applicationsUsing?: Array<{ name: string }>;
   onNavigateStep: (step: ObjectTypeOverviewStep) => void;
 }) {
-  const edges = relatedEdgesForObjectType(objectType.name, relationTypes);
+  const allEdges = relatedEdgesForObjectType(objectType.name, relationTypes);
+  const { kept: edges, hidden: ephemeralEdges } = partitionEphemeral(allEdges, (edge) => edge.relationName);
+  const neighborGroups = new Map<string, RelatedEdge[]>();
+  for (const edge of edges) {
+    const list = neighborGroups.get(edge.otherType) ?? [];
+    list.push(edge);
+    neighborGroups.set(edge.otherType, list);
+  }
+  const neighborTypes = [...neighborGroups.keys()].sort();
   const relatedActions = actions.filter(
     (a) =>
       a.target_object_type === objectType.name ||
       (a.target_interface != null && (objectType.implements ?? []).includes(a.target_interface)),
   );
-  const neighborTypes = [...new Set(edges.map((e) => e.otherType))].sort();
   const mappedProps = properties.filter((p) => p.name.trim() && p.column.trim());
   const appsPartition = partitionEphemeral(applicationsUsing, (app) => app.name);
 
@@ -281,56 +288,66 @@ export function ObjectTypeOverview({
 
       <OverviewSection title="RelationTypes">
         {edges.length === 0 ? (
-          <p className="hl-text-muted">No RelationTypes touch this ObjectType.</p>
+          <p className="hl-text-muted">
+            {ephemeralEdges.length > 0
+              ? "No durable RelationTypes on this ObjectType."
+              : "No RelationTypes touch this ObjectType."}
+          </p>
         ) : (
-          <>
-            <div className="hl-ot-overview-link-graph" aria-label="RelationType neighborhood">
-              <div className="hl-ot-overview-link-hub">
-                <Tag large intent="primary">
-                  {objectType.name}
-                </Tag>
-              </div>
-              <ul className="hl-ot-overview-link-edges">
-                {edges.map((edge) => (
-                  <li key={`${edge.relationName}-${edge.direction}-${edge.otherType}`}>
-                    <span className="hl-mono hl-text-muted-sm">
-                      {edge.direction === "out" ? "→" : "←"} {edge.apiName}
-                      {edge.cardinality ? ` (${edge.cardinality})` : ""}
-                    </span>
-                    <Link
-                      to="/objects/$type"
-                      params={{ type: edge.otherType }}
-                      className="hl-link-accent"
-                    >
-                      {edge.otherType}
+          <div className="hl-ot-overview-rel-groups">
+            {neighborTypes.map((neighbor) => {
+              const group = neighborGroups.get(neighbor) ?? [];
+              return (
+                <div key={neighbor} className="hl-ot-overview-rel-group">
+                  <div className="hl-flex-between hl-items-center hl-mb-sm">
+                    <Link to="/objects/$type" params={{ type: neighbor }} className="hl-link-accent">
+                      <strong>{neighbor}</strong>
                     </Link>
-                    <Link
-                      to="/ontology/relation-types/$name"
-                      params={{ name: edge.relationName }}
-                      className="hl-mono hl-link-accent"
-                    >
-                      {edge.relationName}
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            {neighborTypes.length > 0 && (
-              <p className="hl-text-muted-sm hl-mt-sm">
-                Neighbor ObjectTypes:{" "}
-                {neighborTypes.map((t, i) => (
-                  <span key={t}>
-                    {i > 0 ? ", " : ""}
-                    <Link to="/objects/$type" params={{ type: t }} className="hl-link-accent">
-                      {t}
-                    </Link>
-                  </span>
-                ))}
-              </p>
-            )}
-          </>
+                    <Tag minimal>
+                      {group.length} {group.length === 1 ? "relation" : "relations"}
+                    </Tag>
+                  </div>
+                  <table className="hl-data-table hl-data-table-compact">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Cardinality</th>
+                        <th>Direction</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.map((edge) => (
+                        <tr key={`${edge.relationName}-${edge.direction}`}>
+                          <td>
+                            <Link
+                              to="/ontology/relation-types/$name"
+                              params={{ name: edge.relationName }}
+                              className="hl-link-accent"
+                              title={edge.relationName}
+                            >
+                              {humanizeApiName(edge.apiName)}
+                            </Link>
+                            {edge.apiName !== humanizeApiName(edge.apiName) && (
+                              <div className="hl-text-muted-sm hl-mono">{edge.apiName}</div>
+                            )}
+                          </td>
+                          <td>{edge.cardinality ? edge.cardinality.replaceAll("_", " ") : "—"}</td>
+                          <td className="hl-text-muted-sm">
+                            {edge.direction === "out" ? `→ ${edge.otherType}` : `← ${edge.otherType}`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
         )}
         <p className="hl-text-muted-sm hl-mt-sm">
+          {ephemeralEdges.length > 0
+            ? `${ephemeralEdges.length} test RelationType${ephemeralEdges.length === 1 ? "" : "s"} hidden. `
+            : ""}
           Manage RelationTypes from the{" "}
           <Link to="/ontology" search={{ tab: "relation-types" }} className="hl-link-accent">
             Ontology → RelationTypes
@@ -397,9 +414,10 @@ export function ObjectTypeOverview({
                     <Link
                       to="/ontology/relation-types/$name"
                       params={{ name: edge.relationName }}
-                      className="hl-link-accent hl-mono"
+                      className="hl-link-accent"
+                      title={edge.relationName}
                     >
-                      {edge.relationName}
+                      {humanizeApiName(edge.apiName)}
                     </Link>
                     <span className="hl-text-muted-sm">
                       {" "}

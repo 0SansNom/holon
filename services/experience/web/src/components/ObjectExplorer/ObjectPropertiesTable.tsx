@@ -9,7 +9,7 @@ import type {
   PropertyFormatRule,
   SharedPropertyType,
 } from "../../api/knowledge";
-import { OBJECT_METADATA_KEYS } from "./objectExplorerUtils";
+import { OBJECT_METADATA_KEYS, humanizeApiName } from "./objectExplorerUtils";
 import { InlineEditableCell } from "./InlineEditableCell";
 import {
   isPropertyHidden,
@@ -148,8 +148,8 @@ export function ObjectPropertiesTable({
             return (
               <tr key={key} className="hl-properties-row">
                 <td className="hl-properties-key">
-                  <span className="hl-flex-row hl-items-center hl-gap-xs">
-                    {key}
+                  <span className="hl-flex-row hl-items-center hl-gap-xs" title={key}>
+                    {humanizeApiName(key)}
                     {lookupSharedPropertyForKey(
                       key,
                       objectType?.property_types,

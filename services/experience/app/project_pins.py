@@ -1,14 +1,4 @@
-"""Project pins — Foundry's Projects-page "Pinned" section equivalent.
-
-Deliberately project-scoped, not global like `resource_tag`'s
-tags/featured: the same resource can be pinned in one project's view and
-not another's (or not be in any project at all and simply not pinnable).
-Authorization is the *project's* own `write` (`main.py`'s
-`pin_resource`/`unpin_resource`) — curating what shows up pinned in a
-project is a project-management action, the same tier that already
-governs everything else about that project, not a property of the
-pinned resource itself.
-"""
+"""Project pins registry for pinning resources to project views."""
 
 from __future__ import annotations
 

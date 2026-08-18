@@ -35,6 +35,8 @@ import type {
   GlossaryTerm,
   DatasetPreviewColumn,
   CatalogDataset,
+  DatasetVersion,
+  DatasetStats,
   HealthCheckFinding,
   ActionApproval,
   ActionApprovalStatus,
@@ -49,6 +51,10 @@ export const knowledgeApi = {
   listDatasets: () => api.get<CatalogDataset[]>(`${holonUrl('/catalog/datasets')}`),
   previewDataset: (datasetName: string) =>
     api.get<{ columns: DatasetPreviewColumn[] }>(`${holonUrl(`/catalog/datasets/${datasetName}/preview`)}`),
+  getDatasetVersions: (datasetName: string) =>
+    api.get<DatasetVersion[]>(`${holonUrl(`/catalog/datasets/${datasetName}/versions`)}`),
+  getDatasetStats: (datasetName: string) =>
+    api.get<DatasetStats>(`${holonUrl(`/catalog/datasets/${datasetName}/stats`)}`),
   createObjectType: (body: {
     name: string;
     source_dataset_urn: string;

@@ -1,5 +1,6 @@
 import { useAuthStore } from "../store/auth";
 import { redirectToLogin } from "./authRedirect";
+import { API_TIMEOUT_MS } from "./config";
 
 export type HolonErrorBody = {
   detail: string;
@@ -71,34 +72,57 @@ function handleUnauthorized() {
   }
 }
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+export interface ApiRequestOptions {
+  /** Cancels the request when its owner unmounts or starts a replacement request. */
+  signal?: AbortSignal;
+  /** Defaults to `VITE_API_TIMEOUT_MS` (15 seconds). Set to 0 to disable. */
+  timeoutMs?: number;
+}
+
+async function request<T>(method: string, url: string, body?: unknown, options: ApiRequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const timeoutMs = options.timeoutMs ?? API_TIMEOUT_MS;
+  const timeoutController = new AbortController();
+  const timeoutId = timeoutMs > 0 ? window.setTimeout(() => timeoutController.abort(), timeoutMs) : undefined;
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutController.signal])
+    : timeoutController.signal;
   // The session lives in an HttpOnly cookie now, not a token this code
   // ever holds — `credentials: "include"` is what makes the browser
   // attach it (and accept `Set-Cookie` from `/login`) across the 5
   // different service ports this SPA calls directly.
-  const response = await fetch(url, {
-    method,
-    headers,
-    credentials: "include",
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const contentType = response.headers.get("content-type") ?? "";
-  const parsed = contentType.includes("application/json") ? await response.json() : await response.text();
-  if (response.status === 401) {
-    handleUnauthorized();
+  try {
+    const response = await fetch(url, {
+      method,
+      headers,
+      credentials: "include",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const parsed = response.status === 204 ? null : contentType.includes("application/json") ? await response.json() : await response.text();
+    if (response.status === 401) {
+      handleUnauthorized();
+    }
+    if (!response.ok) {
+      throw new ApiError(response.status, parsed);
+    }
+    return parsed as T;
+  } catch (error) {
+    if (timeoutController.signal.aborted && !options.signal?.aborted) {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
   }
-  if (!response.ok) {
-    throw new ApiError(response.status, parsed);
-  }
-  return parsed as T;
 }
 
 export const api = {
-  get: <T>(url: string) => request<T>("GET", url),
-  post: <T>(url: string, body?: unknown) => request<T>("POST", url, body),
-  put: <T>(url: string, body?: unknown) => request<T>("PUT", url, body ?? {}),
-  delete: <T>(url: string) => request<T>("DELETE", url),
+  get: <T>(url: string, options?: ApiRequestOptions) => request<T>("GET", url, undefined, options),
+  post: <T>(url: string, body?: unknown, options?: ApiRequestOptions) => request<T>("POST", url, body, options),
+  put: <T>(url: string, body?: unknown, options?: ApiRequestOptions) => request<T>("PUT", url, body ?? {}, options),
+  delete: <T>(url: string, options?: ApiRequestOptions) => request<T>("DELETE", url, undefined, options),
 };
 
 export function getErrorMessage(error: unknown): string {

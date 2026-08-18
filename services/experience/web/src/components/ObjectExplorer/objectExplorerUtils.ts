@@ -1,7 +1,8 @@
 import type { ActionDefinition, ObjectType } from "../../api/knowledge";
+import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 import { camelToSnake } from "../common/propertyFormatUtils";
 
-/** Materialisation metadata keys stripped from user-facing property lists. */
+/** Materialisation / OSDK wire keys stripped from user-facing property lists. */
 export const OBJECT_METADATA_KEYS = new Set([
   "materializedAt",
   "sourceLagSeconds",
@@ -9,6 +10,9 @@ export const OBJECT_METADATA_KEYS = new Set([
   "_maskedFields",
   "title",
   "asOf",
+  "__apiName",
+  "__primaryKey",
+  "__rid",
 ]);
 
 /** Resolve a property/api name to the key present on a materialized instance row. */
@@ -128,6 +132,18 @@ export function urnShortName(urn: string): string {
   return parts[parts.length - 1] ?? urn;
 }
 
+/** Turn an API / column name into a short label (`account_closed` → `Account closed`). */
+export function humanizeApiName(name: string): string {
+  const local = name.includes(".") ? (name.split(".").pop() ?? name) : name;
+  const spaced = local
+    .replace(/_/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!spaced) return name;
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
 /**
  * Search index docs use `{objectType}:{tenantId}:{instanceId}` as `urn`
  * (not a Holon resource URN). Parse that into Explorer route params.
@@ -218,15 +234,60 @@ export function titleOf(
   return String(instance.id ?? "");
 }
 
+/** True when an Action Type targets this ObjectType directly or via an implemented interface. */
+export function actionTargetsObjectType(
+  action: { target_object_type?: string | null; target_interface?: string | null },
+  objectTypeName: string,
+  implementedInterfaces: string[] = [],
+): boolean {
+  return (
+    action.target_object_type === objectTypeName ||
+    (!!action.target_interface && implementedInterfaces.includes(action.target_interface))
+  );
+}
+
+export function actionsForObjectType<T extends { target_object_type?: string | null; target_interface?: string | null }>(
+  actions: T[],
+  objectTypeName: string,
+  implementedInterfaces: string[] = [],
+): T[] {
+  return actions.filter((action) => actionTargetsObjectType(action, objectTypeName, implementedInterfaces));
+}
+
+/** FK source columns on this ObjectType → related ObjectType name. */
+export function fkFieldTargetsFromRelations(
+  relationTypes: Array<{
+    source_object_type_urn: string;
+    source_property: string;
+    target_object_type_urn: string;
+  }>,
+  objectTypeName: string,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const relation of relationTypes) {
+    if (urnShortName(relation.source_object_type_urn) !== objectTypeName) continue;
+    map.set(camelToSnake(relation.source_property), urnShortName(relation.target_object_type_urn));
+  }
+  return map;
+}
+
+export function principalsDisplayByUrn(
+  principals?: Array<{ urn: string; display_name: string }> | null,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const principal of principals ?? []) {
+    map.set(principal.urn, principal.display_name);
+  }
+  return map;
+}
+
 /** One low-risk, single-edit inline action per property — shared by table and detail views. */
 export function computeInlineEditableActions(
   type: string,
   implementedInterfaces: string[],
   allActions: ActionDefinition[],
 ): Map<string, ActionDefinition> {
-  const relevant = allActions.filter(
-    (a) => a.target_object_type === type || (a.target_interface && implementedInterfaces.includes(a.target_interface)),
-  );
+  const relevant = actionsForObjectType(allActions, type, implementedInterfaces);
   const byProperty = new Map<string, ActionDefinition[]>();
   for (const action of relevant) {
     if (action.risk_level !== "low") continue;
@@ -286,6 +347,9 @@ export function buildRelatedLinksForObjectType(
 ): RelatedLink[] {
   const links: RelatedLink[] = [];
   for (const r of relationTypes) {
+    if (isEphemeralTestName(r.name) || isEphemeralTestName(r.source_api_name) || isEphemeralTestName(r.target_api_name)) {
+      continue;
+    }
     const sourceType = urnShortName(r.source_object_type_urn);
     const targetType = urnShortName(r.target_object_type_urn);
     const localName = r.name.includes(".") ? r.name.split(".").slice(1).join(".") : r.name;
@@ -296,12 +360,12 @@ export function buildRelatedLinksForObjectType(
       if (visibility !== "hidden") {
         links.push({
           linkName: fwd,
-          label: `${r.source_display_name || fwd} → ${targetType}`,
+          label: `${r.source_display_name || humanizeApiName(fwd)} → ${targetType}`,
           relatedType: targetType,
           side: "source",
           visibility,
           cardinality: r.cardinality,
-          pluralLabel: r.source_plural_display_name || r.source_display_name || fwd,
+          pluralLabel: r.source_plural_display_name || r.source_display_name || humanizeApiName(fwd),
         });
       }
     }
@@ -310,12 +374,12 @@ export function buildRelatedLinksForObjectType(
       if (visibility !== "hidden") {
         links.push({
           linkName: rev,
-          label: `${r.target_display_name || rev} ← ${sourceType}`,
+          label: `${r.target_display_name || humanizeApiName(rev)} ← ${sourceType}`,
           relatedType: sourceType,
           side: "target",
           visibility,
           cardinality: r.cardinality,
-          pluralLabel: r.target_plural_display_name || r.target_display_name || rev,
+          pluralLabel: r.target_plural_display_name || r.target_display_name || humanizeApiName(rev),
         });
       }
     }

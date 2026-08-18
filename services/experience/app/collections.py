@@ -1,13 +1,4 @@
-"""Collections — a named, curated, cross-project grouping of resources.
-
-Deliberately independent of both `resource_tag` (a resource's own
-attributes, not a container) and `project_urn` (a single-valued
-governance/organization scope): a Collection is many-to-many and can mix
-resources from different projects or none at all, closer to a playlist
-than a folder. Authorization is workspace `write` throughout — same bar
-Applications already use — since a Collection isn't owned by any one
-project or resource for a narrower permission to attach to.
-"""
+"""Collections — Named, cross-project resource groupings."""
 
 from __future__ import annotations
 

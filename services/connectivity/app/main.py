@@ -1,10 +1,6 @@
 """Connectivity Platform — Connector execution and ingestion.
 
-Runs registered connectors (developer plugins, generic REST sources,
-continuous Kafka stream when enabled), lands each in the Iceberg raw
-zone, and announces every new snapshot on the Platform Event Bus via a
-transactional outbox. Everything downstream — cataloguing, ontology
-mapping, dashboards — reacts to that event.
+Executes registered connectors and lands data in the Iceberg raw zone.
 """
 
 from __future__ import annotations
@@ -17,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import asyncpg
 import httpx
@@ -57,6 +53,7 @@ from . import (
     generic_source_registry,
     iceberg_reader,
     iceberg_writer,
+    kafka_stream_registry,
     pipeline,
     plugin_registry,
     stream_connector,
@@ -94,15 +91,22 @@ ICEBERG_CONFIG = dict(
     region=os.environ["AWS_REGION"],
 )
 
-CONNECTOR_URN_STREAM = build_urn(TENANT_ID, "global", "connector", "inventory-kafka-stream")
 CONNECTOR_URN_PIPELINE = build_urn(TENANT_ID, "global", "connector", "pipeline-transform")
 
 STREAM_INGEST_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-stream-ingest")
 SCHEDULER_ACTOR_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-scheduler")
 SCHEDULER_POLL_SECONDS = 60
 
-# Stream connector owns this dataset name; plugins/sources cannot claim it.
-RESERVED_DATASET_NAMES = frozenset({"inventory_levels"})
+
+async def _reserved_dataset_names(pool: asyncpg.Pool) -> frozenset[str]:
+    """Dataset names an active Kafka stream owns — plugins/REST sources
+    can't claim one out from under a running stream. Computed live
+    instead of a hardcoded constant now that streams are registered
+    (any tenant can register one, not just the one built-in inventory
+    stream this used to be).
+    """
+    active = await kafka_stream_registry.list_all_active(pool)
+    return frozenset(source["dataset_name"] for source in active)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS sync_run (
@@ -155,30 +159,21 @@ async def lifespan(app: FastAPI):
     await app.state.producer.start()
     relay_task = asyncio.create_task(outbox.relay_forever(app.state.pool, app.state.producer, dlq_producer=app.state.producer))
 
-    # Opt-in continuous ingest (not demo seed). Default off — operators
-    # register batch plugins/sources; enable when inventory Kafka is wired.
-    stream_task: Optional[asyncio.Task] = None
-    if os.environ.get("HOLON_ENABLE_INVENTORY_STREAM", "").lower() in {"1", "true", "yes"}:
-        stream_task = asyncio.create_task(
-            stream_connector.consume_inventory_stream_forever(
-                kafka_bootstrap=KAFKA_BOOTSTRAP,
-                iceberg_config=ICEBERG_CONFIG,
-                connector_urn=CONNECTOR_URN_STREAM,
-                pool=app.state.pool,
-                record_sync=functools.partial(
-                    _finalize_sync,
-                    actor=EventActor(type="service_account", urn=STREAM_INGEST_URN, on_behalf_of=None),
-                ),
-            )
-        )
+    # One consumer task per active registered Kafka stream — same
+    # enable/disable-without-redeploy lifecycle a connector plugin
+    # already has, hydrated at startup instead of one hardcoded,
+    # env-flag-gated inventory stream.
+    app.state.kafka_stream_tasks = {}
+    for source in await kafka_stream_registry.list_all_active(app.state.pool):
+        _spawn_kafka_stream_task(source)
 
     scheduler_task = asyncio.create_task(run_scheduler_forever(app.state.pool))
 
     yield
 
     scheduler_task.cancel()
-    if stream_task is not None:
-        stream_task.cancel()
+    for task in app.state.kafka_stream_tasks.values():
+        task.cancel()
     relay_task.cancel()
     await app.state.producer.stop()
     await app.state.authz.aclose()
@@ -195,10 +190,7 @@ current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 class SyncRequest(BaseModel):
     dataset: str = "customers"
-    # Target workspace for dataset URNs. Plugins / generic sources use this
-    # (or the source's stored workspace_id) instead of blindly using
-    # HOLON_WORKSPACE_ID — otherwise a filiale tenant writes under the
-    # wrong workspace (ADR 026).
+    # Target workspace for dataset URNs (or source workspace_id)
     workspace_id: Optional[str] = None
 
 
@@ -428,23 +420,27 @@ async def _run_sync_for_dataset(
     Runtime dispatch: active plugin for this tenant → generic REST source.
     No privileged in-process dataset map.
     """
+    write_mode: Literal["overwrite", "append"] = "overwrite"
     plugin = await plugin_registry.load_active_plugin_for_dataset(app.state.pool, dataset_name, tenant_id)
     if plugin is not None:
         local_name = plugin.manifest.connector_local_name or f"plugin-{plugin.manifest.name}"
         connector_urn = build_urn(tenant_id, "global", "connector", local_name)
         read = plugin.fetch
-    elif await generic_source_registry.is_registered(app.state.pool, tenant_id, dataset_name):
-        connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
-        read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
     else:
         source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
-        if source is not None:
+        if source is None:
+            raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
+        if source["status"] != "active":
             raise HolonError.conflict(
                 "SourceDisabled",
                 f"source {dataset_name!r} is disabled — enable it first",
                 dataset_name=dataset_name,
             )
-        raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
+        connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
+        read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
+        # Use append mode for cursor-configured sources, overwrite for full sync
+        if source["cursor_property"]:
+            write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
     try:
@@ -455,7 +451,7 @@ async def _run_sync_for_dataset(
         raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
     except httpx.RequestError as exc:
         raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
-    result = await asyncio.to_thread(iceberg_writer.write_snapshot, rows, dataset_name, **ICEBERG_CONFIG)
+    result = await asyncio.to_thread(iceberg_writer.write_snapshot, rows, dataset_name, mode=write_mode, **ICEBERG_CONFIG)
     finished_at = datetime.now(timezone.utc)
 
     return await _finalize_sync(
@@ -514,6 +510,44 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
     Connectivity pod runs due-source work per tick. Quiesce is read from
     `connectivity_runtime` (shared), not process memory.
     """
+    async def _run_if_due(*, dataset_name: str, tenant_id: str, workspace_id: str, interval: timedelta) -> None:
+        dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
+        last_finished_at = await pool.fetchval(
+            "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
+            "ORDER BY finished_at DESC LIMIT 1",
+            tenant_id, dataset_urn,
+        )
+        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
+        if not due:
+            return
+        try:
+            result = await _run_sync_for_dataset(dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=workspace_id)
+            logger.info("scheduled sync completed for %r (tenant=%s): %d rows", dataset_name, tenant_id, result.row_count)
+        except Exception:
+            logger.exception("scheduled sync failed for %r (tenant=%s) — will retry next poll", dataset_name, tenant_id)
+
+    async def _run_pipeline_if_due(*, name: str, tenant_id: str, interval: timedelta) -> None:
+        # pipeline_run, not sync_run: a pipeline's own run log, not the
+        # dataset-sync log its steps' outputs also land in — a multi-step
+        # pipeline has several output datasets, none of which is "the
+        # pipeline" itself. Only a *succeeded* run counts, same as
+        # sources/plugins (sync_run never records a failed attempt at
+        # all) — a failed run must not push the next retry a full
+        # interval out; it should be picked up on the very next poll.
+        last_finished_at = await pool.fetchval(
+            "SELECT finished_at FROM pipeline_run WHERE pipeline_name = $1 AND status = 'succeeded' "
+            "ORDER BY id DESC LIMIT 1",
+            name,
+        )
+        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
+        if not due:
+            return
+        try:
+            await _run_pipeline(name, actor=actor, tenant_id=tenant_id)
+            logger.info("scheduled pipeline run completed for %r (tenant=%s)", name, tenant_id)
+        except Exception:
+            logger.exception("scheduled pipeline run failed for %r (tenant=%s) — will retry next poll", name, tenant_id)
+
     actor = EventActor(type="service_account", urn=SCHEDULER_ACTOR_URN, on_behalf_of=None)
     while True:
         try:
@@ -528,35 +562,33 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
                         continue
                     sources = await generic_source_registry.list_all_scheduled_sources(pool)
                     for source in sources:
-                        dataset_name = source["name"]
-                        tenant_id = source["tenant_id"]
-                        workspace_id = source.get("workspace_id") or WORKSPACE_ID
-                        interval = timedelta(minutes=source["schedule_interval_minutes"])
-                        dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
-                        last_finished_at = await pool.fetchval(
-                            "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
-                            "ORDER BY finished_at DESC LIMIT 1",
-                            tenant_id, dataset_urn,
+                        await _run_if_due(
+                            dataset_name=source["name"],
+                            tenant_id=source["tenant_id"],
+                            workspace_id=source.get("workspace_id") or WORKSPACE_ID,
+                            interval=timedelta(minutes=source["schedule_interval_minutes"]),
                         )
-                        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
-                        if not due:
+                    # Same due-check, for connector plugins — plugins have
+                    # no workspace_id of their own (see plugin_registration's
+                    # schema), so scheduled plugin syncs always land in the
+                    # default workspace, same as an unscoped manual /sync.
+                    plugins = await plugin_registry.list_all_scheduled_plugins(pool)
+                    for plugin in plugins:
+                        if not plugin["dataset_name"]:
                             continue
-                        try:
-                            result = await _run_sync_for_dataset(
-                                dataset_name, actor=actor, tenant_id=tenant_id, workspace_id=workspace_id
-                            )
-                            logger.info(
-                                "scheduled sync completed for %r (tenant=%s): %d rows",
-                                dataset_name,
-                                tenant_id,
-                                result.row_count,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "scheduled sync failed for %r (tenant=%s) — will retry next poll",
-                                dataset_name,
-                                tenant_id,
-                            )
+                        await _run_if_due(
+                            dataset_name=plugin["dataset_name"],
+                            tenant_id=plugin["tenant_id"],
+                            workspace_id=WORKSPACE_ID,
+                            interval=timedelta(minutes=plugin["schedule_interval_minutes"]),
+                        )
+                    pipelines_due = await pipeline.list_all_scheduled_pipelines(pool)
+                    for scheduled_pipeline in pipelines_due:
+                        await _run_pipeline_if_due(
+                            name=scheduled_pipeline["name"],
+                            tenant_id=scheduled_pipeline["tenant_id"],
+                            interval=timedelta(minutes=scheduled_pipeline["schedule_interval_minutes"]),
+                        )
                 finally:
                     await conn.fetchval("SELECT pg_advisory_unlock($1)", _SCHEDULER_LOCK_KEY)
         except Exception:
@@ -671,9 +703,7 @@ async def list_pipeline_runs(name: str, principal: Principal = Depends(current_p
     return await pipeline.list_runs(app.state.pool, principal.tenant_id, name)
 
 
-@app.post("/pipelines/{name}/run")
-async def run_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "write")
+async def _run_pipeline(name: str, *, actor: EventActor, tenant_id: str) -> dict:
     """Drives a `PipelineDefinition`'s steps strictly in the order
     declared (see `pipeline.py`'s module docstring for the DAG-shape
     scope note): read the input Iceberg table, invoke the named Function
@@ -683,6 +713,9 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
     Catalog picks each step's output up through the existing,
     unmodified `connectivity.sync.completed` consumer, with real
     dataset -> dataset lineage via `source_dataset_version_urn`.
+
+    Factored out of the `/run` route so the scheduler (below) can
+    trigger the identical path, same as `_run_sync_for_dataset`.
     """
     definition = await pipeline.get_pipeline(app.state.pool, name)
     if definition is None:
@@ -690,7 +723,6 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
 
     run_started_at = datetime.now(timezone.utc)
     step_results: list[dict] = []
-    actor = EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of)
 
     try:
         for step in definition["steps"]:
@@ -744,7 +776,7 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
         run_finished_at = datetime.now(timezone.utc)
         await pipeline.record_run(
             app.state.pool,
-            tenant_id=principal.tenant_id,
+            tenant_id=tenant_id,
             pipeline_name=name,
             status="failed",
             started_at=run_started_at,
@@ -757,7 +789,7 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
     run_finished_at = datetime.now(timezone.utc)
     return await pipeline.record_run(
         app.state.pool,
-        tenant_id=principal.tenant_id,
+        tenant_id=tenant_id,
         pipeline_name=name,
         status="succeeded",
         started_at=run_started_at,
@@ -766,8 +798,187 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
     )
 
 
+@app.post("/pipelines/{name}/run")
+async def run_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    actor = EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of)
+    return await _run_pipeline(name, actor=actor, tenant_id=principal.tenant_id)
+
+
+class SetPipelineScheduleRequest(BaseModel):
+    schedule_interval_minutes: Optional[int] = None
+
+
+@app.post("/pipelines/{name}/schedule")
+async def set_pipeline_schedule(name: str, body: SetPipelineScheduleRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """Same scheduling model as `/sources` and `/plugins`."""
+    await _authorize_workspace(principal, "write")
+    if body.schedule_interval_minutes is not None and body.schedule_interval_minutes <= 0:
+        raise HolonError.invalid_argument(
+            "InvalidSchedule", "schedule_interval_minutes must be a positive number of minutes"
+        )
+    if await pipeline.get_pipeline(app.state.pool, name) is None:
+        raise HolonError.not_found('PipelineNotFound', f"unknown pipeline: {name}", name=name)
+    result = await pipeline.set_pipeline_schedule(app.state.pool, name, body.schedule_interval_minutes)
+    emit_audit(
+        category="access",
+        action="connectivity.pipeline.schedule_updated",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="pipeline",
+        resource_urn=build_urn(principal.tenant_id, "global", "pipeline", name),
+        extra={"schedule_interval_minutes": body.schedule_interval_minutes},
+    )
+    return result
+
+
+def _kafka_stream_task_key(tenant_id: str, name: str) -> tuple[str, str]:
+    return (tenant_id, name)
+
+
+def _spawn_kafka_stream_task(source: dict) -> None:
+    """(Re)starts a consumer task for a Kafka stream source — called at
+    lifespan hydration and from the enable/register routes below. A
+    live-swap: cancels any existing task for this (tenant, name) first,
+    so re-registering an already-running stream with new config (topic,
+    key_field, batch interval) restarts it with the new settings rather
+    than leaving a stale consumer running alongside a new one.
+    """
+    key = _kafka_stream_task_key(source["tenant_id"], source["name"])
+    existing = app.state.kafka_stream_tasks.get(key)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    connector_urn = build_urn(source["tenant_id"], "global", "connector", f"kafka-stream-{source['name']}")
+    app.state.kafka_stream_tasks[key] = asyncio.create_task(
+        stream_connector.consume_stream_forever(
+            source=source,
+            kafka_bootstrap=KAFKA_BOOTSTRAP,
+            iceberg_config=ICEBERG_CONFIG,
+            connector_urn=connector_urn,
+            pool=app.state.pool,
+            record_sync=functools.partial(
+                _finalize_sync,
+                actor=EventActor(type="service_account", urn=STREAM_INGEST_URN, on_behalf_of=None),
+            ),
+        )
+    )
+
+
+def _cancel_kafka_stream_task(tenant_id: str, name: str) -> None:
+    key = _kafka_stream_task_key(tenant_id, name)
+    task = app.state.kafka_stream_tasks.pop(key, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+class RegisterKafkaStreamRequest(BaseModel):
+    name: str
+    topic: str
+    key_field: str
+    dataset_name: str
+    batch_interval_seconds: float = 5.0
+
+
+@app.post("/kafka-streams", status_code=201)
+async def register_kafka_stream(body: RegisterKafkaStreamRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """The no-code streaming connector: register a Kafka topic by name
+    alone — which field is the record's key, which dataset it lands in,
+    how often to commit a snapshot. Same authentication tier as
+    `/sources`/`/plugins`. Starts consuming immediately, no restart —
+    same as enabling a plugin.
+    """
+    await _authorize_workspace(principal, "write")
+    if body.batch_interval_seconds <= 0:
+        raise HolonError.invalid_argument("InvalidBatchInterval", "batch_interval_seconds must be positive")
+    try:
+        source = await kafka_stream_registry.register_source(
+            app.state.pool,
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            topic=body.topic,
+            key_field=body.key_field,
+            dataset_name=body.dataset_name,
+            batch_interval_seconds=body.batch_interval_seconds,
+            created_by_urn=principal.urn,
+        )
+    except kafka_stream_registry.KafkaStreamConflictError as exc:
+        raise HolonError.conflict('KafkaStreamConflict', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="connectivity.kafka_stream.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="kafka_stream",
+        resource_urn=build_urn(principal.tenant_id, "global", "kafka-stream", body.name),
+        extra={"topic": body.topic, "dataset_name": body.dataset_name},
+    )
+    _spawn_kafka_stream_task(source)
+    return source
+
+
+@app.get("/kafka-streams")
+async def list_kafka_streams(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await kafka_stream_registry.list_sources(app.state.pool, principal.tenant_id)
+
+
+def _kafka_stream_not_found(name: str) -> HolonError:
+    return HolonError.not_found("KafkaStreamNotFound", f"no Kafka stream registered as {name!r}", name=name)
+
+
+@app.get("/kafka-streams/{name}")
+async def get_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
+    source = await kafka_stream_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _kafka_stream_not_found(name)
+    return source
+
+
+@app.post("/kafka-streams/{name}/disable")
+async def disable_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await kafka_stream_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _kafka_stream_not_found(name)
+    result = await kafka_stream_registry.set_status(app.state.pool, principal.tenant_id, name, "disabled")
+    _cancel_kafka_stream_task(principal.tenant_id, name)
+    return result
+
+
+@app.post("/kafka-streams/{name}/enable")
+async def enable_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await kafka_stream_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _kafka_stream_not_found(name)
+    result = await kafka_stream_registry.set_status(app.state.pool, principal.tenant_id, name, "active")
+    _spawn_kafka_stream_task(result)
+    return result
+
+
+@app.delete("/kafka-streams/{name}")
+async def delete_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    deleted = await kafka_stream_registry.delete_source(app.state.pool, principal.tenant_id, name)
+    if not deleted:
+        raise _kafka_stream_not_found(name)
+    _cancel_kafka_stream_task(principal.tenant_id, name)
+    return {"deleted": name}
+
+
 class RegisterPluginRequest(BaseModel):
     entry_point: str
+
+
+@app.get("/plugins")
+async def list_plugins(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await plugin_registry.list_plugin_registrations(app.state.pool, principal.tenant_id)
 
 
 @app.post("/plugins")
@@ -781,7 +992,7 @@ async def register_plugin(body: RegisterPluginRequest, principal: Principal = De
             app.state.pool,
             entry_point=body.entry_point,
             tenant_id=principal.tenant_id,
-            reserved_dataset_names=RESERVED_DATASET_NAMES,
+            reserved_dataset_names=await _reserved_dataset_names(app.state.pool),
         )
     except plugin_registry.PluginConflictError as exc:
         raise HolonError.conflict('PluginConflict', str(exc)) from exc
@@ -856,14 +1067,43 @@ async def enable_plugin(name: str, principal: Principal = Depends(current_princi
     return result
 
 
+class SetPluginScheduleRequest(BaseModel):
+    schedule_interval_minutes: Optional[int] = None
+
+
+@app.post("/plugins/{name}/schedule")
+async def set_plugin_schedule(name: str, body: SetPluginScheduleRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """Same scheduling model as `/sources` — `run_scheduler_forever` picks
+    this up on its next poll, no restart needed. `null` clears it back to
+    manual-only, same as omitting `schedule_interval_minutes` on a source.
+    """
+    await _authorize_workspace(principal, "write")
+    if body.schedule_interval_minutes is not None and body.schedule_interval_minutes <= 0:
+        raise HolonError.invalid_argument(
+            "InvalidSchedule", "schedule_interval_minutes must be a positive number of minutes"
+        )
+    registration = await plugin_registry.get_plugin_registration(app.state.pool, name)
+    if registration is None:
+        raise _plugin_not_found(name)
+    result = await plugin_registry.set_plugin_schedule(app.state.pool, name, body.schedule_interval_minutes)
+    emit_audit(
+        category="access",
+        action="connectivity.plugin.schedule_updated",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="connector_plugin",
+        resource_urn=build_urn(principal.tenant_id, "global", "connector-plugin", name),
+        extra={"schedule_interval_minutes": body.schedule_interval_minutes},
+    )
+    return result
+
+
 class RegisterConnectionRequest(BaseModel):
     name: str
     auth_header_name: str
-    # Optional so an edit (same `name`, upsert) can omit it to keep the
-    # existing secret — same "never echoed back, COALESCE on update"
-    # convention `RegisterSourceRequest.auth_header_value` already uses.
-    # A brand-new connection still requires one; enforced client-side
-    # the same way the source-edit form already does, not here.
+    # Optional; if omitted on edit, existing secret is retained
     auth_header_value: Optional[str] = None
 
 
@@ -952,7 +1192,7 @@ async def register_source(
             schedule_interval_minutes=body.schedule_interval_minutes,
             cursor_property=body.cursor_property,
             incremental_param=body.incremental_param,
-            reserved_dataset_names=RESERVED_DATASET_NAMES,
+            reserved_dataset_names=await _reserved_dataset_names(app.state.pool),
         )
     except generic_source_registry.SourceConflictError as exc:
         raise HolonError.conflict('PluginConflict', str(exc)) from exc
@@ -1024,14 +1264,7 @@ async def delete_source(name: str, principal: Principal = Depends(current_princi
     return {"deleted": name}
 
 
-# One exception: a connector never writes back to its source, EXCEPT
-# as part of an already-approved, audited ontology Action. This endpoint
-# exists only to be called by Automation's Workflow Engine — the
-# saga orchestrator for `Customer.closeAccount` — never by a connector's
-# own sync path.
-#
-# `current_principal` alone proves a valid tenant-scoped JWT, which any
-# authenticated principal has — it does NOT prove the caller is the workflow engine.
+# Writeback endpoint used by Automation Workflow Engine
 CLOSE_ACCOUNT_FAILURE_SENTINEL = "__simulate_failure__"
 WORKFLOW_ENGINE_LOCAL_NAME = "automation-workflow-engine"
 WORKFLOW_ENGINE_URN = build_urn(TENANT_ID, "global", "service-account", WORKFLOW_ENGINE_LOCAL_NAME)
@@ -1140,6 +1373,25 @@ async def get_write_target(dataset_name: str, principal: Principal = Depends(cur
     if target is None:
         raise HolonError.not_found('DatasetNotFound', f"no write target registered for dataset {dataset_name!r}")
     return target
+
+
+@app.delete("/write-targets/{dataset_name}")
+async def delete_write_target(dataset_name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await write_target_registry.get_write_target(app.state.pool, principal.tenant_id, dataset_name) is None:
+        raise HolonError.not_found('DatasetNotFound', f"no write target registered for dataset {dataset_name!r}")
+    await write_target_registry.delete_write_target(app.state.pool, principal.tenant_id, dataset_name)
+    emit_audit(
+        category="access",
+        action="connectivity.write_target.deleted",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="write_target",
+        resource_urn=build_urn(principal.tenant_id, "global", "write-target", dataset_name),
+    )
+    return {"deleted": dataset_name}
 
 
 class WriteSourceRequest(BaseModel):

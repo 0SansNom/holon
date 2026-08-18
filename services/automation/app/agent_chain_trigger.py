@@ -1,19 +1,6 @@
-"""Automation Platform — the event-triggered agent-session trigger that
-implements loop detection for agent chaining.
+"""Automation Platform — Agent Chain Trigger.
 
-Reacts to Intelligence's `intelligence.agent.session_completed` event and,
-when the completed session opted into `chain_trigger`, spawns a *new* agent
-session on Intelligence — threading `causation_id`/`causation_depth` forward.
-
-Chained hops authenticate as the shared `ingest-bot` agent (same principal
-Intelligence / agentApp use), carrying forward `on_behalf_of` from the
-completed session — not Automation's own service-account identity.
-
-Deliberately opt-in, not automatic for every session: `chain_trigger`
-must be set to `true` by whoever created the *first* session in a
-chain. `agent_runtime.create_session` is the authoritative circuit breaker
-(refuses past `max_chain_depth`); the depth check here avoids a wasted HTTP round trip.
-`max_chain_depth` is threaded hop-to-hop from the very first session.
+Handles event-triggered agent session chaining with depth-limit checks.
 """
 
 from __future__ import annotations
@@ -38,8 +25,7 @@ from holon_common.audit import emit_audit
 logger = logging.getLogger("automation.agent_chain_trigger")
 
 _TIMEOUT_SECONDS = 10.0
-# Local-name of the agent principal used for every chained hop. Override
-# only if an operator provisions a different shared agent URN.
+# Default agent principal local name for chained execution hops
 DEFAULT_CHAIN_AGENT_LOCAL_NAME = "ingest-bot"
 
 
@@ -58,7 +44,7 @@ def chain_agent_local_name() -> str:
 
 
 def chain_agent_principal(tenant_id: str, *, on_behalf_of: Optional[str] = None) -> Principal:
-    """Principal for chained hops — ingest-bot by default, not Automation's SA."""
+    """Return principal for chained agent execution hops."""
     local = chain_agent_local_name()
     return Principal(
         urn=build_urn(tenant_id, "global", "agent", local),
@@ -131,10 +117,7 @@ async def _spawn_next_session(
 
 
 async def consume_events(consumer: EventConsumer, *, intelligence_url: str, jwt_secret: str) -> None:
-    """Consumes Intelligence's bus (topic `intelligence`) — the
-    **Trigger**, same literal meaning as `workflow.consume_events`'s own
-    docstring: "this event starts this [agent session]."
-    """
+    """Consume Intelligence session completion events to spawn chained agent sessions."""
     async with httpx.AsyncClient(
         timeout=_TIMEOUT_SECONDS, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
     ) as client:

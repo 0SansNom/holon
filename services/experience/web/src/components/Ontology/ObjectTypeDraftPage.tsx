@@ -37,15 +37,8 @@ import { ApiError } from "../../api/client";
 import { DetailPage, PageSection } from "../common/PageLayout";
 import { EmptyState, ErrorCallout } from "../common/ListPrimitives";
 import { DerivedPropertiesEditor } from "./DerivedPropertiesEditor";
-import {
-  buildEditableDerived,
-  type EditableDerivedProperty,
-  serializeDerivedProperties,
-} from "./derivedEditorUtils";
 import { ObjectTypePropertyEditor } from "./PropertyEditor";
 import {
-  buildEditableProperties,
-  type EditableProperty,
   serializePropertyEditor,
   suggestSharedApiName,
   stripStructFieldColumns,
@@ -55,15 +48,16 @@ import { effectiveInterfaceContract } from "./interfaceContractUtils";
 import { ObjectTypeOverview } from "./ObjectTypeOverview";
 import { useApplications } from "../../api/hooks/useExperienceHooks";
 import { useOntologyDiscoverStore } from "../../store/ontologyDiscover";
-
-type DraftStep = "overview" | "identity" | "properties" | "derived" | "datasources" | "advanced" | "versions";
-
-function toggle(set: Set<string>, setSet: (s: Set<string>) => void, value: string) {
-  const next = new Set(set);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  setSet(next);
-}
+import {
+  objectTypeDraftFormFromRecord,
+  patchInterfacePropertyBinding,
+  patchNestedBinding,
+  prepareObjectTypePropose,
+  relationTypesTouchingObjectType,
+  toggleSetValue,
+  type ObjectTypeDraftForm,
+  type ObjectTypeDraftStep,
+} from "./objectTypeDraft";
 
 function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
   const monacoTheme = useMonacoEditorTheme();
@@ -104,105 +98,36 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
     [applications, objectType.name],
   );
 
-  const [step, setStep] = useState<DraftStep>("overview");
-  const [description, setDescription] = useState(objectType.description);
-  const [projectUrn, setProjectUrn] = useState(objectType.project_urn ?? "");
-  const [primaryKey, setPrimaryKey] = useState(objectType.primary_key ?? "id");
-  const [titleKey, setTitleKey] = useState(objectType.title_key ?? "");
-  const [pluralDisplayName, setPluralDisplayName] = useState(objectType.plural_display_name ?? "");
-  const [lifecycleStatus, setLifecycleStatus] = useState(objectType.lifecycle_status ?? "experimental");
-  const [deprecationReason, setDeprecationReason] = useState(objectType.deprecation_reason ?? "");
-  const [deprecationDeadline, setDeprecationDeadline] = useState(
-    (objectType.deprecation_deadline ?? "").toString().slice(0, 10),
-  );
-  const [replacementUrn, setReplacementUrn] = useState(objectType.replacement_urn ?? "");
-  const [visibility, setVisibility] = useState(objectType.visibility ?? "normal");
-  const [icon, setIcon] = useState(objectType.icon ?? "");
-  const [implementsSet, setImplementsSet] = useState<Set<string>>(new Set(objectType.implements ?? []));
-  const [linkConstraintBindings, setLinkConstraintBindings] = useState<Record<string, Record<string, string>>>(
-    () => objectType.link_constraint_bindings ?? {},
-  );
-  const [interfacePropertyBindings, setInterfacePropertyBindings] = useState<
-    Record<string, Record<string, string>>
-  >(() => objectType.interface_property_bindings ?? {});
-  const [markingsSet, setMarkingsSet] = useState<Set<string>>(new Set(objectType.markings ?? []));
-  const [properties, setProperties] = useState<EditableProperty[]>(() =>
-    buildEditableProperties(
-      objectType.property_mapping ?? {},
-      objectType.property_types ?? {},
-      objectType.property_formats ?? {},
-    ),
-  );
+  const [step, setStep] = useState<ObjectTypeDraftStep>("overview");
+  const [form, setForm] = useState<ObjectTypeDraftForm>(() => objectTypeDraftFormFromRecord(objectType));
   const [selectedProperty, setSelectedProperty] = useState<string | null>(
     () => Object.keys(objectType.property_mapping ?? {})[0] ?? null,
   );
-  const [derivedProperties, setDerivedProperties] = useState<EditableDerivedProperty[]>(() =>
-    buildEditableDerived(objectType.derived_properties ?? {}),
-  );
   const [selectedDerived, setSelectedDerived] = useState<string | null>(
     () => Object.keys(objectType.derived_properties ?? {})[0] ?? null,
-  );
-  const [conditionalFormatsJson, setConditionalFormatsJson] = useState(
-    JSON.stringify(objectType.conditional_formats ?? {}, null, 2),
   );
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [publishingVersion, setPublishingVersion] = useState<number | null>(null);
 
-  const propertyNames = properties.map((p) => p.name).filter(Boolean);
+  function patchForm(patch: Partial<ObjectTypeDraftForm>) {
+    setForm((prev) => ({ ...prev, ...patch }));
+  }
+
+  const propertyNames = form.properties.map((p) => p.name).filter(Boolean);
   const draftCount = versions.filter((v) => v.status === "draft").length;
 
   async function proposeVersion() {
     setError(null);
     setOk(null);
-    let conditional_formats;
-    try {
-      conditional_formats = JSON.parse(conditionalFormatsJson);
-    } catch {
-      setError("Conditional formats must be valid JSON.");
-      setStep("advanced");
-      return;
-    }
-    const { property_mapping, property_types, property_formats } = serializePropertyEditor(properties);
-    const derived_properties = serializeDerivedProperties(derivedProperties);
-    if (Object.keys(property_mapping).length === 0) {
-      setError("At least one property with an API name and backing column is required.");
-      setStep("properties");
-      return;
-    }
-    if (!property_mapping[primaryKey]) {
-      setError(`Primary key "${primaryKey}" must be one of the mapped properties.`);
-      setStep("identity");
-      return;
-    }
-    if (titleKey && !property_mapping[titleKey]) {
-      setError(`Title key "${titleKey}" must be one of the mapped properties.`);
-      setStep("identity");
+    const prepared = prepareObjectTypePropose(form);
+    if (!prepared.ok) {
+      setError(prepared.error);
+      setStep(prepared.step);
       return;
     }
     try {
-      const draft = await propose.mutateAsync({
-        description,
-        implements: [...implementsSet],
-        link_constraint_bindings: linkConstraintBindings,
-        interface_property_bindings: interfacePropertyBindings,
-        markings: [...markingsSet],
-        property_mapping,
-        property_types,
-        derived_properties,
-        property_formats,
-        conditional_formats,
-        project_urn: projectUrn || undefined,
-        primary_key: primaryKey,
-        title_key: titleKey || null,
-        plural_display_name: pluralDisplayName,
-        lifecycle_status: lifecycleStatus,
-        deprecation_reason: lifecycleStatus === "deprecated" ? deprecationReason : null,
-        deprecation_deadline: lifecycleStatus === "deprecated" ? deprecationDeadline || null : null,
-        replacement_urn: lifecycleStatus === "deprecated" ? replacementUrn || null : null,
-        visibility,
-        icon: icon || null,
-      });
+      const draft = await propose.mutateAsync(prepared.body);
       setOk(`Proposed version ${draft.version} (draft) — publish it from the Versions step when ready.`);
       setStep("versions");
     } catch (err) {
@@ -277,7 +202,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
       <Tabs
         id="object-type-draft-steps"
         selectedTabId={step}
-        onChange={(id: TabId) => setStep(id as DraftStep)}
+        onChange={(id: TabId) => setStep(id as ObjectTypeDraftStep)}
         renderActiveTabPanelOnly
         className="hl-ot-draft-tabs"
       >
@@ -287,8 +212,8 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
           panel={
             <ObjectTypeOverview
               objectType={objectType}
-              properties={properties}
-              derivedCount={derivedProperties.length}
+              properties={form.properties}
+              derivedCount={form.derivedProperties.length}
               relationTypes={relationTypes}
               actions={actions}
               groupsContaining={groupsContaining}
@@ -304,13 +229,16 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
             <PageSection title="Identity & governance">
               <div className="hl-ot-draft-grid">
                 <FormGroup label="Description">
-                  <InputGroup value={description} onChange={(e) => setDescription(e.target.value)} />
+                  <InputGroup value={form.description} onChange={(e) => patchForm({ description: e.target.value })} />
                 </FormGroup>
                 <FormGroup label="Plural display name">
-                  <InputGroup value={pluralDisplayName} onChange={(e) => setPluralDisplayName(e.target.value)} />
+                  <InputGroup
+                    value={form.pluralDisplayName}
+                    onChange={(e) => patchForm({ pluralDisplayName: e.target.value })}
+                  />
                 </FormGroup>
                 <FormGroup label="Primary key">
-                  <HTMLSelect fill value={primaryKey} onChange={(e) => setPrimaryKey(e.target.value)}>
+                  <HTMLSelect fill value={form.primaryKey} onChange={(e) => patchForm({ primaryKey: e.target.value })}>
                     {propertyNames.map((p) => (
                       <option key={p} value={p}>
                         {p}
@@ -319,7 +247,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                   </HTMLSelect>
                 </FormGroup>
                 <FormGroup label="Title key" helperText="Display name property for instances">
-                  <HTMLSelect fill value={titleKey} onChange={(e) => setTitleKey(e.target.value)}>
+                  <HTMLSelect fill value={form.titleKey} onChange={(e) => patchForm({ titleKey: e.target.value })}>
                     <option value="">(fallback to primary key)</option>
                     {propertyNames.map((p) => (
                       <option key={p} value={p}>
@@ -331,10 +259,8 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                 <FormGroup label="Lifecycle status">
                   <HTMLSelect
                     fill
-                    value={lifecycleStatus}
-                    onChange={(e) =>
-                      setLifecycleStatus(e.target.value as "experimental" | "active" | "deprecated")
-                    }
+                    value={form.lifecycleStatus}
+                    onChange={(e) => patchForm({ lifecycleStatus: e.target.value })}
                   >
                     {OBJECT_TYPE_LIFECYCLE_STATUSES.map((s) => (
                       <option key={s} value={s}>
@@ -343,27 +269,27 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                     ))}
                   </HTMLSelect>
                 </FormGroup>
-                {lifecycleStatus === "deprecated" && (
+                {form.lifecycleStatus === "deprecated" && (
                   <>
                     <FormGroup label="Deprecation reason" helperText="Required — why this ObjectType is being retired">
                       <InputGroup
-                        value={deprecationReason}
-                        onChange={(e) => setDeprecationReason(e.target.value)}
+                        value={form.deprecationReason}
+                        onChange={(e) => patchForm({ deprecationReason: e.target.value })}
                         placeholder="Replaced by OrderV2"
                       />
                     </FormGroup>
                     <FormGroup label="Deprecation deadline" helperText="Expected removal date (YYYY-MM-DD)">
                       <InputGroup
                         type="date"
-                        value={deprecationDeadline}
-                        onChange={(e) => setDeprecationDeadline(e.target.value)}
+                        value={form.deprecationDeadline}
+                        onChange={(e) => patchForm({ deprecationDeadline: e.target.value })}
                       />
                     </FormGroup>
                     <FormGroup label="Replacement URN" helperText="Optional — resource that replaces this one">
                       <InputGroup
                         className="hl-mono"
-                        value={replacementUrn}
-                        onChange={(e) => setReplacementUrn(e.target.value)}
+                        value={form.replacementUrn}
+                        onChange={(e) => patchForm({ replacementUrn: e.target.value })}
                         placeholder="hl:…:object-type:OrderV2"
                       />
                     </FormGroup>
@@ -372,8 +298,8 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                 <FormGroup label="ObjectType visibility">
                   <HTMLSelect
                     fill
-                    value={visibility}
-                    onChange={(e) => setVisibility(e.target.value as typeof visibility)}
+                    value={form.visibility}
+                    onChange={(e) => patchForm({ visibility: e.target.value })}
                   >
                     <option value="prominent">prominent</option>
                     <option value="normal">normal</option>
@@ -381,13 +307,17 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                   </HTMLSelect>
                 </FormGroup>
                 <FormGroup label="Icon" helperText="Blueprint icon name">
-                  <InputGroup value={icon} onChange={(e) => setIcon(e.target.value)} placeholder="people" />
+                  <InputGroup
+                    value={form.icon}
+                    onChange={(e) => patchForm({ icon: e.target.value })}
+                    placeholder="people"
+                  />
                 </FormGroup>
                 <FormGroup
                   label="Project"
                   helperText="Narrows access to this project's members, additive on top of workspace access"
                 >
-                  <HTMLSelect fill value={projectUrn} onChange={(e) => setProjectUrn(e.target.value)}>
+                  <HTMLSelect fill value={form.projectUrn} onChange={(e) => patchForm({ projectUrn: e.target.value })}>
                     <option value="">No project</option>
                     {projects.map((p) => (
                       <option key={p.urn} value={p.urn}>
@@ -409,15 +339,20 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                             ? `${iface.name} (extends ${iface.parent_interfaces!.join(", ")})`
                             : iface.name
                         }
-                        checked={implementsSet.has(iface.name)}
-                        onChange={() => toggle(implementsSet, setImplementsSet, iface.name)}
+                        checked={form.implements.has(iface.name)}
+                        onChange={() =>
+                          setForm((prev) => ({
+                            ...prev,
+                            implements: toggleSetValue(prev.implements, iface.name),
+                          }))
+                        }
                       />
                     ))}
                   </div>
                 </FormGroup>
               )}
 
-              {[...implementsSet].some((name) => {
+              {[...form.implements].some((name) => {
                 const iface = interfacesByName.get(name);
                 if (!iface) return false;
                 return effectiveInterfaceContract(iface, interfacesByName).link_constraints.length > 0;
@@ -427,16 +362,12 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                     Map each interface link constraint (including inherited) to a RelationType that touches this
                     ObjectType.
                   </p>
-                  {[...implementsSet].map((ifaceName) => {
+                  {[...form.implements].map((ifaceName) => {
                     const iface = interfacesByName.get(ifaceName);
                     if (!iface) return null;
                     const constraints = effectiveInterfaceContract(iface, interfacesByName).link_constraints;
                     if (constraints.length === 0) return null;
-                    const touching = relationTypes.filter((rt) => {
-                      const source = rt.source_object_type_urn.split(":").at(-1);
-                      const target = rt.target_object_type_urn.split(":").at(-1);
-                      return source === objectType.name || target === objectType.name;
-                    });
+                    const touching = relationTypesTouchingObjectType(relationTypes, objectType.name);
                     return (
                       <div key={ifaceName} className="hl-mt-xs">
                         <div className="hl-text-muted-sm">{ifaceName}</div>
@@ -447,18 +378,18 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                           >
                             <HTMLSelect
                               fill
-                              value={linkConstraintBindings[ifaceName]?.[c.api_name] ?? ""}
+                              value={form.linkConstraintBindings[ifaceName]?.[c.api_name] ?? ""}
                               onChange={(e) => {
                                 const value = e.target.value;
-                                setLinkConstraintBindings((prev) => {
-                                  const nextIface = { ...(prev[ifaceName] ?? {}) };
-                                  if (!value) delete nextIface[c.api_name];
-                                  else nextIface[c.api_name] = value;
-                                  const next = { ...prev };
-                                  if (Object.keys(nextIface).length === 0) delete next[ifaceName];
-                                  else next[ifaceName] = nextIface;
-                                  return next;
-                                });
+                                setForm((prev) => ({
+                                  ...prev,
+                                  linkConstraintBindings: patchNestedBinding(
+                                    prev.linkConstraintBindings,
+                                    ifaceName,
+                                    c.api_name,
+                                    value || undefined,
+                                  ),
+                                }));
                               }}
                             >
                               <option value="">{c.required ? "Select RelationType…" : "None (optional)"}</option>
@@ -476,7 +407,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                 </FormGroup>
               )}
 
-              {[...implementsSet].some((name) => {
+              {[...form.implements].some((name) => {
                 const iface = interfacesByName.get(name);
                 if (!iface) return false;
                 return effectiveInterfaceContract(iface, interfacesByName).required_properties.length > 0;
@@ -486,7 +417,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                     Optional path when a required interface property is satisfied by a struct field (e.g.{" "}
                     <code>address.city</code>). Leave blank to use the same top-level property name.
                   </p>
-                  {[...implementsSet].map((ifaceName) => {
+                  {[...form.implements].map((ifaceName) => {
                     const iface = interfacesByName.get(ifaceName);
                     if (!iface) return null;
                     const props = effectiveInterfaceContract(iface, interfacesByName).required_properties;
@@ -500,18 +431,17 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                               fill
                               className="hl-mono"
                               placeholder={propName}
-                              value={interfacePropertyBindings[ifaceName]?.[propName] ?? ""}
+                              value={form.interfacePropertyBindings[ifaceName]?.[propName] ?? ""}
                               onChange={(e) => {
-                                const value = e.target.value.trim();
-                                setInterfacePropertyBindings((prev) => {
-                                  const nextIface = { ...(prev[ifaceName] ?? {}) };
-                                  if (!value || value === propName) delete nextIface[propName];
-                                  else nextIface[propName] = value;
-                                  const next = { ...prev };
-                                  if (Object.keys(nextIface).length === 0) delete next[ifaceName];
-                                  else next[ifaceName] = nextIface;
-                                  return next;
-                                });
+                                setForm((prev) => ({
+                                  ...prev,
+                                  interfacePropertyBindings: patchInterfacePropertyBinding(
+                                    prev.interfacePropertyBindings,
+                                    ifaceName,
+                                    propName,
+                                    e.target.value,
+                                  ),
+                                }));
                               }}
                             />
                           </FormGroup>
@@ -533,8 +463,13 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                             ? `${m.name} (${m.category_name})`
                             : m.name
                         }
-                        checked={markingsSet.has(m.name)}
-                        onChange={() => toggle(markingsSet, setMarkingsSet, m.name)}
+                        checked={form.markings.has(m.name)}
+                        onChange={() =>
+                          setForm((prev) => ({
+                            ...prev,
+                            markings: toggleSetValue(prev.markings, m.name),
+                          }))
+                        }
                       />
                     ))}
                   </div>
@@ -546,18 +481,18 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
 
         <Tab
           id="properties"
-          title={`Properties (${properties.length})`}
+          title={`Properties (${form.properties.length})`}
           panel={
             <PageSection title="Properties">
               <p className="hl-text-muted-sm hl-mb-md">
                 Edit type, format, visibility, and backing column — then propose a version when ready.
               </p>
               <ObjectTypePropertyEditor
-                properties={properties}
+                properties={form.properties}
                 selectedName={selectedProperty}
                 onSelect={setSelectedProperty}
-                onChange={setProperties}
-                primaryKey={primaryKey}
+                onChange={(properties) => patchForm({ properties })}
+                primaryKey={form.primaryKey}
                 valueTypes={valueTypes}
                 sharedPropertyTypes={sharedPropertyTypes}
                 sampleRows={sampleRows as Array<Record<string, unknown>>}
@@ -585,8 +520,9 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                         description: `Shared from ${objectType.name}.${prop.name}`,
                       });
                     }
-                    setProperties((current) =>
-                      current.map((p) =>
+                    setForm((current) => ({
+                      ...current,
+                      properties: current.properties.map((p) =>
                         p.name === prop.name
                           ? {
                               ...p,
@@ -596,7 +532,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                             }
                           : p,
                       ),
-                    );
+                    }));
                     setOk(`Created shared property "${apiName}" and attached it to ${prop.name}.`);
                   } catch (err) {
                     setError(err instanceof ApiError ? err.message : "Could not convert to shared property");
@@ -609,7 +545,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
 
         <Tab
           id="derived"
-          title={`Derived (${derivedProperties.length})`}
+          title={`Derived (${form.derivedProperties.length})`}
           panel={
             <PageSection title="Derived properties">
               <p className="hl-text-muted-sm hl-mb-md">
@@ -617,10 +553,10 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
               </p>
               <DerivedPropertiesEditor
                 objectType={objectType}
-                properties={derivedProperties}
+                properties={form.derivedProperties}
                 selectedName={selectedDerived}
                 onSelect={setSelectedDerived}
-                onChange={setDerivedProperties}
+                onChange={(derivedProperties) => patchForm({ derivedProperties })}
                 relationTypes={relationTypes}
                 objectTypes={allObjectTypes}
               />
@@ -646,15 +582,15 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                 </div>
                 <div>
                   <dt>Primary key</dt>
-                  <dd className="hl-mono">{primaryKey || "—"}</dd>
+                  <dd className="hl-mono">{form.primaryKey || "—"}</dd>
                 </div>
                 <div>
                   <dt>Title key</dt>
-                  <dd className="hl-mono">{titleKey || primaryKey || "—"}</dd>
+                  <dd className="hl-mono">{form.titleKey || form.primaryKey || "—"}</dd>
                 </div>
                 <div>
                   <dt>Mapped properties</dt>
-                  <dd>{properties.filter((p) => p.name && p.column).length}</dd>
+                  <dd>{form.properties.filter((p) => p.name && p.column).length}</dd>
                 </div>
               </dl>
               <div className="hl-flex-row hl-gap-sm hl-mb-md" style={{ flexWrap: "wrap" }}>
@@ -675,7 +611,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                   Edit identity keys
                 </Button>
               </div>
-              {properties.filter((p) => p.name && p.column).length === 0 ? (
+              {form.properties.filter((p) => p.name && p.column).length === 0 ? (
                 <EmptyState>No property → column mappings yet.</EmptyState>
               ) : (
                 <table className="hl-data-table hl-data-table-compact">
@@ -688,7 +624,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {properties
+                    {form.properties
                       .filter((p) => p.name && p.column)
                       .map((p) => (
                         <tr key={p.name}>
@@ -704,9 +640,9 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                                   : p.valueType || "—"}
                           </td>
                           <td>
-                            {p.name === primaryKey
+                            {p.name === form.primaryKey
                               ? "primary key"
-                              : p.name === titleKey
+                              : p.name === form.titleKey
                                 ? "title key"
                                 : "—"}
                           </td>
@@ -736,8 +672,8 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
                     height="220px"
                     defaultLanguage="json"
                     theme={monacoTheme}
-                    value={conditionalFormatsJson}
-                    onChange={(v) => setConditionalFormatsJson(v ?? "")}
+                    value={form.conditionalFormatsJson}
+                    onChange={(v) => patchForm({ conditionalFormatsJson: v ?? "" })}
                     options={{ minimap: { enabled: false }, fontSize: 12 }}
                   />
                 </div>

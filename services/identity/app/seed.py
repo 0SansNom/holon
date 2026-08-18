@@ -1,6 +1,4 @@
-"""Identity schema, tenant/workspace/project registry, and principal
-provisioning — self-serve only, no demo data seeded automatically.
-"""
+"""Identity database schema, tenant/workspace/project registry, and principal provisioning."""
 
 from __future__ import annotations
 
@@ -45,9 +43,7 @@ ALTER TABLE principal ADD COLUMN IF NOT EXISTS oidc_sub TEXT;
 ALTER TABLE tenant ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 ALTER TABLE workspace ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 
--- Org/Space/Project hierarchy — one tier below Workspace,
--- created at runtime via governance (unlike tenant/workspace, which are
--- fixed at bootstrap in this build).
+-- Org/Space/Project hierarchy — one tier below Workspace
 CREATE TABLE IF NOT EXISTS project (
     urn TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -59,11 +55,7 @@ CREATE TABLE IF NOT EXISTS project (
 CREATE UNIQUE INDEX IF NOT EXISTS principal_oidc_sub_uidx
     ON principal (oidc_sub) WHERE oidc_sub IS NOT NULL;
 
--- OIDC authorization-code + PKCE state, keyed by the `state` param —
--- Postgres instead of in-process memory so `/oidc/login` and
--- `/oidc/callback` can land on different `identity` replicas (ADR 026,
--- multi-replica follow-up). Short-lived (10 min, see oidc.py's cleanup
--- query) and single-use (deleted by exchange_code on first read).
+-- OIDC authorization state table for PKCE authentication
 CREATE TABLE IF NOT EXISTS oidc_pending_state (
     state TEXT PRIMARY KEY,
     verifier TEXT NOT NULL,
@@ -74,15 +66,13 @@ CREATE TABLE IF NOT EXISTS oidc_pending_state (
 
 
 def client_secret_for(local_name: str) -> str:
-    """Deterministic dev-only credential — `POST /token` requires this to
-    verify credentials when HOLON_ALLOW_DEV_LOGIN is enabled.
-    """
+    """Return dev client secret for local testing."""
     return f"{local_name}-dev-secret"
 
 
 def allow_dev_login() -> bool:
     """When false, reject client_secrets that match the *-dev-secret pattern."""
-    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "true").lower() in {"1", "true", "yes"}
+    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "false").lower() in {"1", "true", "yes"}
 
 
 def tenant_urn(tenant_id: str) -> str:
@@ -394,5 +384,4 @@ async def set_principal_status(pool: asyncpg.Pool, urn: str, status: str) -> Opt
     await pool.execute("UPDATE principal SET status = $2 WHERE urn = $1", urn, status)
     row = await pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
     return dict(row) if row else None
-
 
