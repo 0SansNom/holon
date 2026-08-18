@@ -22,6 +22,24 @@ export function useDatasetPreview(datasetName: string) {
   });
 }
 
+export function useDatasetVersions(datasetName: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.datasetVersions(datasetName),
+    queryFn: () => knowledgeApi.getDatasetVersions(datasetName),
+    enabled: enabled && !!datasetName,
+    retry: false,
+  });
+}
+
+export function useDatasetStats(datasetName: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.datasetStats(datasetName),
+    queryFn: () => knowledgeApi.getDatasetStats(datasetName),
+    enabled: enabled && !!datasetName,
+    retry: false,
+  });
+}
+
 export function useCreateObjectType() {
   const queryClient = useQueryClient();
   return useMutation({
