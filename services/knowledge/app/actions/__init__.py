@@ -7,9 +7,7 @@ registry), applied through the one declarative path (`declarative.py`).
 Because a pending high-risk request is not applied, `reject_action` needs
 no compensation. But an Action with a `writeback_dataset` set, once
 approved, also writes back to that dataset's source system in
-Connectivity — a multi-context saga across Knowledge + Connectivity (e.g.
-a `closeAccount`-style Action writing `account_closed` back to
-`source_erp.customers`).
+Connectivity — a multi-context saga across Knowledge + Connectivity.
 
 **Orchestration ownership**: sagas are implemented by the Workflow Engine (the
 Automation platform, `services/automation/`), not by whichever service happens to own Step 1.
@@ -105,26 +103,6 @@ CREATE TABLE IF NOT EXISTS action_invocation (
 ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS edits JSONB;
 ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS prior_values JSONB;
 ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS reverted_at TIMESTAMPTZ;
-
--- Legacy overlay tables retained for existing DBs; new Actions use
--- `object_instance_edit` exclusively.
-CREATE TABLE IF NOT EXISTS customer_credit_hold (
-    customer_id INTEGER PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    on_hold BOOLEAN NOT NULL,
-    reason TEXT NOT NULL,
-    set_by_urn TEXT NOT NULL,
-    set_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS customer_account_status (
-    customer_id INTEGER PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    closed BOOLEAN NOT NULL,
-    reason TEXT NOT NULL,
-    set_by_urn TEXT NOT NULL,
-    set_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 CREATE TABLE IF NOT EXISTS action_approval (
     id BIGSERIAL PRIMARY KEY,

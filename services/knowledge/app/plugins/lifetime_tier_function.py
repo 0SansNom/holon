@@ -3,8 +3,8 @@ customer's loyalty tier from `lifetimeValue`. Used from two call sites
 to prove the mechanism genuinely generalizes, not hardwired to one:
 (1) as a read-time derived property (declared in an ObjectType version's
 `derived_properties`), (2) as an Action side effect (declared via
-`function_side_effect` on the ActionType (e.g. seeded
-`Customer.putOnCreditHold`), invoked after the Action applies).
+`function_side_effect` on an ActionType, invoked after the Action
+applies).
 """
 
 from __future__ import annotations

@@ -60,8 +60,7 @@ _OPERATORS = {
 
 
 def _object_type_and_instance_id_from_instance_urn(instance_urn: str) -> tuple[str, str]:
-    """Generic counterpart to `hardcoded._customer_id_from_instance_urn` —
-    every `instance_urn` this package builds already has the
+    """Every `instance_urn` this package builds already has the
     `{ObjectType}/{id}` shape in its final segment.
     """
     local = instance_urn.rsplit(":", 1)[-1]
@@ -296,8 +295,7 @@ async def _compensate_declarative_action(
     decider: Principal,
     error: str,
 ) -> None:
-    """The generic counterpart to `hardcoded._compensate_close_account` —
-    reverts a declarative Action Type's writeback by deleting the
+    """Reverts a declarative Action Type's writeback by deleting the
     specific `object_instance_edit` rows this approval wrote. Which
     properties those are is read from the `action_invocation` row
     `approve_action` itself inserted (the most recent one matching this
@@ -309,9 +307,7 @@ async def _compensate_declarative_action(
     strictly more precise than recomputing from the definition. Not a
     general undo-stack: `object_instance_edit` is last-write-wins with no
     history, so this reverts to "no edit recorded for these properties,"
-    the same "known, fixed reversion" honesty `_compensate_close_account`
-    already has for its own overlay (that one doesn't restore a prior
-    `customer_account_status` row either — there isn't one to restore).
+    not a restore of whatever value was there before.
     """
     object_type, instance_id = _object_type_and_instance_id_from_instance_urn(instance_urn)
     invocation = await pool.fetchrow(
