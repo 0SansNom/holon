@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { Alert, Button, Callout, Spinner, Tag } from "@blueprintjs/core";
-import { useDeletePipeline, usePipeline, usePipelineRuns, useRunPipeline } from "../../api/hooks";
+import { Alert, Button, Callout, InputGroup, Spinner, Tag } from "@blueprintjs/core";
+import { useDeletePipeline, usePipeline, usePipelineRuns, useRunPipeline, useSetPipelineSchedule } from "../../api/hooks";
 import type { PipelineRun } from "../../api/connectivity";
 import { DetailPage, PageSection } from "../common/PageLayout";
 import { EmptyState } from "../common/ListPrimitives";
@@ -22,6 +22,13 @@ function statusIntent(status: string): "success" | "danger" | "primary" | "none"
   if (status === "succeeded") return "success";
   if (status === "failed") return "danger";
   return "none";
+}
+
+function formatLag(seconds: number): string {
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
 }
 
 function RunCard({ run }: { run: PipelineRun }) {
@@ -99,10 +106,14 @@ export function PipelineDetailPage() {
   const { data: runs, isLoading: runsLoading, refetch } = usePipelineRuns(name);
   const runMutation = useRunPipeline(name);
   const deletePipeline = useDeletePipeline();
+  const setSchedule = useSetPipelineSchedule();
   const [runError, setRunError] = useState<string | null>(null);
   const [lastSucceededId, setLastSucceededId] = useState<number | null>(null);
   const [editing, setEditing] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState<string>(
+    pipeline?.schedule_interval_minutes != null ? String(pipeline.schedule_interval_minutes) : "",
+  );
 
   if (!pipeline) {
     return (
@@ -110,6 +121,16 @@ export function PipelineDetailPage() {
         <EmptyState>Pipeline not found.</EmptyState>
       </DetailPage>
     );
+  }
+
+  async function commitSchedule() {
+    const minutes = scheduleDraft.trim() === "" ? null : Number(scheduleDraft);
+    if (minutes === pipeline.schedule_interval_minutes) return;
+    try {
+      await setSchedule.mutateAsync({ name, scheduleIntervalMinutes: minutes });
+    } catch (err) {
+      setRunError(getErrorMessage(err));
+    }
   }
 
   async function handleRun() {
@@ -176,6 +197,41 @@ export function PipelineDetailPage() {
           Run #{lastSucceededId} succeeded — outputs catalogued with derived_from lineage.
         </Callout>
       )}
+
+      <PageSection title="Health & schedule">
+        <div className="hl-flex-row hl-items-center hl-gap-md hl-mb-sm">
+          {pipeline.last_run ? (
+            <span className="hl-flex-row hl-items-center hl-gap-sm">
+              <Tag minimal intent={statusIntent(pipeline.last_run.status)}>
+                {pipeline.last_run.status}
+              </Tag>
+              <span className="hl-text-muted-sm">{pipeline.last_run.row_count.toLocaleString()} rows</span>
+            </span>
+          ) : (
+            <span className="hl-text-muted-sm">never run</span>
+          )}
+          <span className="hl-text-muted-sm">
+            {pipeline.lag_seconds != null
+              ? `last success ${formatLag(pipeline.lag_seconds)}`
+              : "no successful run yet"}
+          </span>
+        </div>
+        <div className="hl-flex-row hl-items-center hl-gap-sm">
+          <span className="hl-text-muted-sm">Run every</span>
+          <InputGroup
+            type="number"
+            min={1}
+            small
+            placeholder="manual"
+            value={scheduleDraft}
+            onChange={(e) => setScheduleDraft(e.target.value)}
+            onBlur={() => void commitSchedule()}
+            disabled={setSchedule.isPending}
+            style={{ width: 84 }}
+          />
+          <span className="hl-text-muted-sm">minutes — blank for manual only</span>
+        </div>
+      </PageSection>
 
       <PageSection title="Steps">
         <div className="hl-pipeline-steps">

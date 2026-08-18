@@ -1,50 +1,12 @@
-"""Pipeline / Transform DAG.
+"""Pipeline / Transform DAG engine.
 
-Today every connector is one hop: source system -> Iceberg raw,
-catalogued once, done. Foundry's own Python transforms are *derived
-datasets computed from other datasets*, forming a DAG with automatic
-lineage. A `PipelineDefinition` here is a named, versioned (via
-`ON CONFLICT ... DO UPDATE`, same upsert shape `plugin_registry.py`
-already uses) ordered list of `TransformStep`s; each step reads one
-existing Iceberg table (`iceberg_reader.read_table`), applies a
-registered  **Function** to every row via Knowledge's
-`POST /functions/{name}/invoke` — the same registered-computation
-mechanism Interfaces/Actions already use, unified rather than parallel,
-just a third call site with its own row -> row contract (see that
-endpoint's own docstring) — and writes the result as a new Iceberg
-snapshot (`iceberg_writer.write_snapshot`, completely unmodified).
-
-`main.py`'s `POST /pipelines/{name}/run` is what actually drives a step:
-it reads, invokes, writes, then calls the *same* `_finalize_sync` every
-core connector's `/sync` already calls, so Catalog/classification-
-propagation all pick up a pipeline's output through the existing
-`connectivity.sync.completed` consumer path — the one deliberate,
-additive extension to that path is `source_dataset_version_urn` on the
-event payload, letting `catalog._catalogue_sync` record a real
-dataset -> dataset `derived_from` lineage edge, not just the `maps_to`
-edge every synced dataset already got. This module owns the pipeline
-*definition* and DAG-shape validation; the actual read/invoke/write/
-finalize sequence lives in `main.py`, next to `_finalize_sync` and the
-app-level `httpx` client it already has no equivalent of today (a new
-one is created per pipeline run — pipelines are not a hot path).
-
-Honest scope boundary, stated plainly: steps execute strictly in the
-order declared, not via a real topological sort over a general graph —
-`_validate_steps` only rejects a step naming a *later* step's own output
-as its input (a forward reference, structurally impossible to satisfy)
-and duplicate step names. A pipeline whose steps are already listed in
-a valid dependency order runs correctly; nothing here reorders steps
-for you. Also, like `plugin_registry.py`'s own connector plugins, a
-pipeline's output dataset lands in Iceberg with a real snapshot, a real
-event, and now real lineage — but nothing here auto-registers it as a
-queryable ObjectType in Knowledge's ontology; that's still a deliberate,
-separate step, the same gap connector plugins already have and state
-plainly rather than paper over.
+Manages pipeline definitions and step dependency validation for dataset transformations.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -57,6 +19,9 @@ CREATE TABLE IF NOT EXISTS pipeline_definition (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Same scheduling model as generic_rest_source / plugin_registration — NULL = manual only.
+ALTER TABLE pipeline_definition ADD COLUMN IF NOT EXISTS schedule_interval_minutes INTEGER;
 
 CREATE TABLE IF NOT EXISTS pipeline_run (
     id BIGSERIAL PRIMARY KEY,
@@ -106,10 +71,7 @@ def _validate_steps(steps: list[dict]) -> None:
             raise ValueError(f"step {step['step_name']!r} cannot read and write the same dataset")
 
         if step["input_dataset"] in all_outputs and step["input_dataset"] not in outputs_so_far:
-            # input_dataset names a dataset only a *later* step in this
-            # same pipeline produces — a forward reference this linear
-            # executor can never satisfy, caught at definition time
-            # rather than failing mid-run on a missing table.
+            # Forward reference check: input dataset cannot depend on a later step's output
             later_producer = next(s["step_name"] for s in steps if s["output_dataset"] == step["input_dataset"])
             raise ValueError(
                 f"step {step['step_name']!r} reads {step['input_dataset']!r}, "
@@ -132,10 +94,52 @@ def _validate_steps(steps: list[dict]) -> None:
         outputs_so_far.add(step["output_dataset"])
 
 
+_HEALTH_JOIN = """
+    LEFT JOIN LATERAL (
+        SELECT status, started_at, finished_at, step_results, error
+        FROM pipeline_run pr WHERE pr.pipeline_name = d.name ORDER BY pr.id DESC LIMIT 1
+    ) lr ON true
+    LEFT JOIN LATERAL (
+        SELECT finished_at FROM pipeline_run pr2
+        WHERE pr2.pipeline_name = d.name AND pr2.status = 'succeeded' ORDER BY pr2.id DESC LIMIT 1
+    ) ls ON true
+"""
+
+
 def _parse_pipeline_row(row: asyncpg.Record) -> dict:
     result = dict(row)
     if isinstance(result["steps"], str):
         result["steps"] = json.loads(result["steps"])
+    return result
+
+
+def _attach_health(result: dict) -> dict:
+    """Foundry-parity "health" surface: last run's status, the row count
+    it produced, and freshness — measured against the last *successful*
+    run specifically, not merely the last attempt (a failing pipeline
+    should show growing staleness, not a fresh "just now" from its own
+    failed run).
+    """
+    step_results = result.pop("last_run_step_results", None)
+    if isinstance(step_results, str):
+        step_results = json.loads(step_results)
+    last_success_at = result.pop("last_success_at", None)
+    result["last_run"] = None
+    if result.get("last_run_status") is not None:
+        result["last_run"] = {
+            "status": result.pop("last_run_status"),
+            "started_at": result.pop("last_run_started_at"),
+            "finished_at": result.pop("last_run_finished_at"),
+            "error": result.pop("last_run_error"),
+            "row_count": sum(step.get("row_count", 0) for step in (step_results or [])),
+        }
+    else:
+        for key in ("last_run_status", "last_run_started_at", "last_run_finished_at", "last_run_error"):
+            result.pop(key, None)
+    result["last_success_at"] = last_success_at.isoformat() if last_success_at else None
+    result["lag_seconds"] = (
+        int((datetime.now(timezone.utc) - last_success_at).total_seconds()) if last_success_at else None
+    )
     return result
 
 
@@ -153,13 +157,54 @@ async def create_pipeline(pool: asyncpg.Pool, *, tenant_id: str, name: str, step
 
 
 async def get_pipeline(pool: asyncpg.Pool, name: str) -> Optional[dict]:
-    row = await pool.fetchrow("SELECT * FROM pipeline_definition WHERE name = $1", name)
-    return _parse_pipeline_row(row) if row else None
+    row = await pool.fetchrow(
+        f"""
+        SELECT d.*, lr.status AS last_run_status, lr.started_at AS last_run_started_at,
+               lr.finished_at AS last_run_finished_at, lr.error AS last_run_error,
+               lr.step_results AS last_run_step_results, ls.finished_at AS last_success_at
+        FROM pipeline_definition d
+        {_HEALTH_JOIN}
+        WHERE d.name = $1
+        """,
+        name,
+    )
+    return _attach_health(_parse_pipeline_row(row)) if row else None
 
 
 async def list_pipelines(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
-    rows = await pool.fetch("SELECT * FROM pipeline_definition WHERE tenant_id = $1 ORDER BY name", tenant_id)
-    return [_parse_pipeline_row(row) for row in rows]
+    rows = await pool.fetch(
+        f"""
+        SELECT d.*, lr.status AS last_run_status, lr.started_at AS last_run_started_at,
+               lr.finished_at AS last_run_finished_at, lr.error AS last_run_error,
+               lr.step_results AS last_run_step_results, ls.finished_at AS last_success_at
+        FROM pipeline_definition d
+        {_HEALTH_JOIN}
+        WHERE d.tenant_id = $1
+        ORDER BY d.name
+        """,
+        tenant_id,
+    )
+    return [_attach_health(_parse_pipeline_row(row)) for row in rows]
+
+
+async def set_pipeline_schedule(pool: asyncpg.Pool, name: str, schedule_interval_minutes: Optional[int]) -> Optional[dict]:
+    await pool.execute(
+        "UPDATE pipeline_definition SET schedule_interval_minutes = $1 WHERE name = $2",
+        schedule_interval_minutes, name,
+    )
+    return await get_pipeline(pool, name)
+
+
+async def list_all_scheduled_pipelines(pool: asyncpg.Pool) -> list[dict]:
+    """Due-check feed for `main.py`'s scheduler loop — the pipeline
+    counterpart of `generic_source_registry.list_all_scheduled_sources`
+    and `plugin_registry.list_all_scheduled_plugins`.
+    """
+    rows = await pool.fetch(
+        "SELECT tenant_id, name, schedule_interval_minutes FROM pipeline_definition "
+        "WHERE schedule_interval_minutes IS NOT NULL"
+    )
+    return [dict(row) for row in rows]
 
 
 async def delete_pipeline(pool: asyncpg.Pool, *, tenant_id: str, name: str) -> bool:
