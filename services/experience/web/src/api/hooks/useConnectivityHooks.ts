@@ -176,3 +176,15 @@ export function useDeletePipeline() {
     },
   });
 }
+
+export function useSetPipelineSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, scheduleIntervalMinutes }: { name: string; scheduleIntervalMinutes: number | null }) =>
+      connectivityApi.setPipelineSchedule(name, scheduleIntervalMinutes),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.pipelines() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.pipeline(variables.name) });
+    },
+  });
+}

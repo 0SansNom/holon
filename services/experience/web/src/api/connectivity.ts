@@ -95,12 +95,24 @@ export interface TransformStep {
   value_type_casts?: Record<string, string>;
 }
 
+export interface PipelineLastRun {
+  status: "succeeded" | "failed" | string;
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  row_count: number;
+}
+
 export interface PipelineDefinition {
   name: string;
   tenant_id: string;
   steps: TransformStep[];
   created_at: string;
   updated_at: string;
+  schedule_interval_minutes: number | null;
+  last_run: PipelineLastRun | null;
+  last_success_at: string | null;
+  lag_seconds: number | null;
 }
 
 export interface WriteTarget {
@@ -172,4 +184,8 @@ export const connectivityApi = {
   deletePipeline: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/pipelines/${name}`),
   runPipeline: (name: string) => api.post<PipelineRun>(`${CONNECTIVITY_URL}/pipelines/${name}/run`),
   listPipelineRuns: (name: string) => api.get<PipelineRun[]>(`${CONNECTIVITY_URL}/pipelines/${name}/runs`),
+  setPipelineSchedule: (name: string, scheduleIntervalMinutes: number | null) =>
+    api.post<PipelineDefinition>(`${CONNECTIVITY_URL}/pipelines/${name}/schedule`, {
+      schedule_interval_minutes: scheduleIntervalMinutes,
+    }),
 };

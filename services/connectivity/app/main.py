@@ -527,6 +527,28 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
         except Exception:
             logger.exception("scheduled sync failed for %r (tenant=%s) — will retry next poll", dataset_name, tenant_id)
 
+    async def _run_pipeline_if_due(*, name: str, tenant_id: str, interval: timedelta) -> None:
+        # pipeline_run, not sync_run: a pipeline's own run log, not the
+        # dataset-sync log its steps' outputs also land in — a multi-step
+        # pipeline has several output datasets, none of which is "the
+        # pipeline" itself. Only a *succeeded* run counts, same as
+        # sources/plugins (sync_run never records a failed attempt at
+        # all) — a failed run must not push the next retry a full
+        # interval out; it should be picked up on the very next poll.
+        last_finished_at = await pool.fetchval(
+            "SELECT finished_at FROM pipeline_run WHERE pipeline_name = $1 AND status = 'succeeded' "
+            "ORDER BY id DESC LIMIT 1",
+            name,
+        )
+        due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
+        if not due:
+            return
+        try:
+            await _run_pipeline(name, actor=actor, tenant_id=tenant_id)
+            logger.info("scheduled pipeline run completed for %r (tenant=%s)", name, tenant_id)
+        except Exception:
+            logger.exception("scheduled pipeline run failed for %r (tenant=%s) — will retry next poll", name, tenant_id)
+
     actor = EventActor(type="service_account", urn=SCHEDULER_ACTOR_URN, on_behalf_of=None)
     while True:
         try:
@@ -560,6 +582,13 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
                             tenant_id=plugin["tenant_id"],
                             workspace_id=WORKSPACE_ID,
                             interval=timedelta(minutes=plugin["schedule_interval_minutes"]),
+                        )
+                    pipelines_due = await pipeline.list_all_scheduled_pipelines(pool)
+                    for scheduled_pipeline in pipelines_due:
+                        await _run_pipeline_if_due(
+                            name=scheduled_pipeline["name"],
+                            tenant_id=scheduled_pipeline["tenant_id"],
+                            interval=timedelta(minutes=scheduled_pipeline["schedule_interval_minutes"]),
                         )
                 finally:
                     await conn.fetchval("SELECT pg_advisory_unlock($1)", _SCHEDULER_LOCK_KEY)
@@ -675,9 +704,7 @@ async def list_pipeline_runs(name: str, principal: Principal = Depends(current_p
     return await pipeline.list_runs(app.state.pool, principal.tenant_id, name)
 
 
-@app.post("/pipelines/{name}/run")
-async def run_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "write")
+async def _run_pipeline(name: str, *, actor: EventActor, tenant_id: str) -> dict:
     """Drives a `PipelineDefinition`'s steps strictly in the order
     declared (see `pipeline.py`'s module docstring for the DAG-shape
     scope note): read the input Iceberg table, invoke the named Function
@@ -687,6 +714,9 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
     Catalog picks each step's output up through the existing,
     unmodified `connectivity.sync.completed` consumer, with real
     dataset -> dataset lineage via `source_dataset_version_urn`.
+
+    Factored out of the `/run` route so the scheduler (below) can
+    trigger the identical path, same as `_run_sync_for_dataset`.
     """
     definition = await pipeline.get_pipeline(app.state.pool, name)
     if definition is None:
@@ -694,7 +724,6 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
 
     run_started_at = datetime.now(timezone.utc)
     step_results: list[dict] = []
-    actor = EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of)
 
     try:
         for step in definition["steps"]:
@@ -748,7 +777,7 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
         run_finished_at = datetime.now(timezone.utc)
         await pipeline.record_run(
             app.state.pool,
-            tenant_id=principal.tenant_id,
+            tenant_id=tenant_id,
             pipeline_name=name,
             status="failed",
             started_at=run_started_at,
@@ -761,13 +790,49 @@ async def run_pipeline(name: str, principal: Principal = Depends(current_princip
     run_finished_at = datetime.now(timezone.utc)
     return await pipeline.record_run(
         app.state.pool,
-        tenant_id=principal.tenant_id,
+        tenant_id=tenant_id,
         pipeline_name=name,
         status="succeeded",
         started_at=run_started_at,
         finished_at=run_finished_at,
         step_results=step_results,
     )
+
+
+@app.post("/pipelines/{name}/run")
+async def run_pipeline(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    actor = EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of)
+    return await _run_pipeline(name, actor=actor, tenant_id=principal.tenant_id)
+
+
+class SetPipelineScheduleRequest(BaseModel):
+    schedule_interval_minutes: Optional[int] = None
+
+
+@app.post("/pipelines/{name}/schedule")
+async def set_pipeline_schedule(name: str, body: SetPipelineScheduleRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """Same scheduling model as `/sources` and `/plugins`."""
+    await _authorize_workspace(principal, "write")
+    if body.schedule_interval_minutes is not None and body.schedule_interval_minutes <= 0:
+        raise HolonError.invalid_argument(
+            "InvalidSchedule", "schedule_interval_minutes must be a positive number of minutes"
+        )
+    if await pipeline.get_pipeline(app.state.pool, name) is None:
+        raise HolonError.not_found('PipelineNotFound', f"unknown pipeline: {name}", name=name)
+    result = await pipeline.set_pipeline_schedule(app.state.pool, name, body.schedule_interval_minutes)
+    emit_audit(
+        category="access",
+        action="connectivity.pipeline.schedule_updated",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="pipeline",
+        resource_urn=build_urn(principal.tenant_id, "global", "pipeline", name),
+        extra={"schedule_interval_minutes": body.schedule_interval_minutes},
+    )
+    return result
 
 
 class RegisterPluginRequest(BaseModel):
