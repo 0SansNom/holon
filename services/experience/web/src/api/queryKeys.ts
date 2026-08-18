@@ -11,6 +11,8 @@ export const queryKeys = {
   object: (objectType: string, id: string | number) => ["object", objectType, id] as const,
   datasets: () => ["datasets"] as const,
   datasetPreview: (datasetName: string) => ["datasetPreview", datasetName] as const,
+  datasetVersions: (datasetName: string) => ["datasetVersions", datasetName] as const,
+  datasetStats: (datasetName: string) => ["datasetStats", datasetName] as const,
 
   relationTypes: () => ["relationTypes"] as const,
   actions: () => ["actions"] as const,
