@@ -53,6 +53,26 @@ export interface ConnectorPlugin {
   schedule_interval_minutes: number | null;
 }
 
+export interface KafkaStreamSource {
+  tenant_id: string;
+  name: string;
+  topic: string;
+  key_field: string;
+  dataset_name: string;
+  batch_interval_seconds: number;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterKafkaStreamRequest {
+  name: string;
+  topic: string;
+  key_field: string;
+  dataset_name: string;
+  batch_interval_seconds?: number;
+}
+
 export interface GenericConnection {
   tenant_id: string;
   name: string;
@@ -167,6 +187,13 @@ export const connectivityApi = {
     api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/schedule`, {
       schedule_interval_minutes: scheduleIntervalMinutes,
     }),
+  listKafkaStreams: () => api.get<KafkaStreamSource[]>(`${CONNECTIVITY_URL}/kafka-streams`),
+  registerKafkaStream: (body: RegisterKafkaStreamRequest) =>
+    api.post<KafkaStreamSource>(`${CONNECTIVITY_URL}/kafka-streams`, body),
+  disableKafkaStream: (name: string) => api.post<KafkaStreamSource>(`${CONNECTIVITY_URL}/kafka-streams/${name}/disable`),
+  enableKafkaStream: (name: string) => api.post<KafkaStreamSource>(`${CONNECTIVITY_URL}/kafka-streams/${name}/enable`),
+  deleteKafkaStream: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/kafka-streams/${name}`),
+
   listConnections: () => api.get<GenericConnection[]>(`${CONNECTIVITY_URL}/connections`),
   registerConnection: (body: RegisterConnectionRequest) => api.post<GenericConnection>(`${CONNECTIVITY_URL}/connections`, body),
   deleteConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/connections/${name}`),
