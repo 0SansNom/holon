@@ -1,9 +1,4 @@
-"""Interface registry — polymorphism across ObjectTypes: a named,
-checked contract (required properties/actions), not just a label.
-Publish-time validation of `implements` against these lives in
-`publishing.py` (`_validate_implements`), not here — this module only
-owns the interface *registry* itself.
-"""
+"""Interface registry — polymorphic contracts and property/action definitions across ObjectTypes."""
 
 from __future__ import annotations
 

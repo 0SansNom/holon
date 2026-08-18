@@ -676,6 +676,32 @@ export interface CatalogDataset {
   created_at: string;
 }
 
+/** One row from GET /catalog/datasets/{name}/versions — full snapshot history. */
+export interface DatasetVersion {
+  urn: string;
+  dataset_urn: string;
+  snapshot_id: number | string;
+  row_count: number;
+  location: string;
+  created_at: string;
+}
+
+export interface DatasetStatColumn {
+  name: string;
+  type: string;
+  required: boolean;
+  null_count: number | null;
+  distinct_count: number | null;
+  min: string | null;
+  max: string | null;
+}
+
+/** GET /catalog/datasets/{name}/stats — real Iceberg schema + per-column stats. */
+export interface DatasetStats {
+  row_count: number;
+  columns: DatasetStatColumn[];
+}
+
 export interface HealthCheckFinding {
   kind:
     | "action_sprawl"

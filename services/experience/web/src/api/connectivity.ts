@@ -32,6 +32,47 @@ export interface RegisterSourceRequest {
   incremental_param?: string;
 }
 
+export interface ConnectorPluginManifest {
+  name: string;
+  version: string;
+  plugin_type: string;
+  entry_point: string;
+  dataset_name: string | null;
+  connector_local_name: string | null;
+  capabilities: Record<string, unknown>;
+}
+
+export interface ConnectorPlugin {
+  name: string;
+  version: string;
+  manifest: ConnectorPluginManifest;
+  checksum: string;
+  status: "active" | "disabled";
+  tenant_id: string | null;
+  registered_at: string;
+  schedule_interval_minutes: number | null;
+}
+
+export interface KafkaStreamSource {
+  tenant_id: string;
+  name: string;
+  topic: string;
+  key_field: string;
+  dataset_name: string;
+  batch_interval_seconds: number;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterKafkaStreamRequest {
+  name: string;
+  topic: string;
+  key_field: string;
+  dataset_name: string;
+  batch_interval_seconds?: number;
+}
+
 export interface GenericConnection {
   tenant_id: string;
   name: string;
@@ -74,12 +115,41 @@ export interface TransformStep {
   value_type_casts?: Record<string, string>;
 }
 
+export interface PipelineLastRun {
+  status: "succeeded" | "failed" | string;
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  row_count: number;
+}
+
 export interface PipelineDefinition {
   name: string;
   tenant_id: string;
   steps: TransformStep[];
   created_at: string;
   updated_at: string;
+  schedule_interval_minutes: number | null;
+  last_run: PipelineLastRun | null;
+  last_success_at: string | null;
+  lag_seconds: number | null;
+}
+
+export interface WriteTarget {
+  tenant_id: string;
+  dataset_name: string;
+  table_name: string;
+  id_column: string;
+  allowed_properties: Record<string, string>;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterWriteTargetRequest {
+  dataset_name: string;
+  table_name: string;
+  id_column: string;
+  allowed_properties: Record<string, string>;
 }
 
 export interface PipelineStepResult {
@@ -110,9 +180,29 @@ export const connectivityApi = {
   enableSource: (name: string) => api.post<GenericSource>(`${CONNECTIVITY_URL}/sources/${name}/enable`),
   deleteSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sources/${name}`),
   listSyncs: () => api.get<SyncRun[]>(`${CONNECTIVITY_URL}/syncs`),
+  listPlugins: () => api.get<ConnectorPlugin[]>(`${CONNECTIVITY_URL}/plugins`),
+  disablePlugin: (name: string) => api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/disable`),
+  enablePlugin: (name: string) => api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/enable`),
+  setPluginSchedule: (name: string, scheduleIntervalMinutes: number | null) =>
+    api.post<ConnectorPlugin>(`${CONNECTIVITY_URL}/plugins/${name}/schedule`, {
+      schedule_interval_minutes: scheduleIntervalMinutes,
+    }),
+  listKafkaStreams: () => api.get<KafkaStreamSource[]>(`${CONNECTIVITY_URL}/kafka-streams`),
+  registerKafkaStream: (body: RegisterKafkaStreamRequest) =>
+    api.post<KafkaStreamSource>(`${CONNECTIVITY_URL}/kafka-streams`, body),
+  disableKafkaStream: (name: string) => api.post<KafkaStreamSource>(`${CONNECTIVITY_URL}/kafka-streams/${name}/disable`),
+  enableKafkaStream: (name: string) => api.post<KafkaStreamSource>(`${CONNECTIVITY_URL}/kafka-streams/${name}/enable`),
+  deleteKafkaStream: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/kafka-streams/${name}`),
+
   listConnections: () => api.get<GenericConnection[]>(`${CONNECTIVITY_URL}/connections`),
   registerConnection: (body: RegisterConnectionRequest) => api.post<GenericConnection>(`${CONNECTIVITY_URL}/connections`, body),
   deleteConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/connections/${name}`),
+
+  listWriteTargets: () => api.get<WriteTarget[]>(`${CONNECTIVITY_URL}/write-targets`),
+  registerWriteTarget: (body: RegisterWriteTargetRequest) =>
+    api.post<WriteTarget>(`${CONNECTIVITY_URL}/write-targets`, body),
+  deleteWriteTarget: (datasetName: string) =>
+    api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/write-targets/${datasetName}`),
 
   listPipelines: () => api.get<PipelineDefinition[]>(`${CONNECTIVITY_URL}/pipelines`),
   getPipeline: (name: string) => api.get<PipelineDefinition>(`${CONNECTIVITY_URL}/pipelines/${name}`),
@@ -121,4 +211,8 @@ export const connectivityApi = {
   deletePipeline: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/pipelines/${name}`),
   runPipeline: (name: string) => api.post<PipelineRun>(`${CONNECTIVITY_URL}/pipelines/${name}/run`),
   listPipelineRuns: (name: string) => api.get<PipelineRun[]>(`${CONNECTIVITY_URL}/pipelines/${name}/runs`),
+  setPipelineSchedule: (name: string, scheduleIntervalMinutes: number | null) =>
+    api.post<PipelineDefinition>(`${CONNECTIVITY_URL}/pipelines/${name}/schedule`, {
+      schedule_interval_minutes: scheduleIntervalMinutes,
+    }),
 };

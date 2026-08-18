@@ -1,16 +1,4 @@
-"""LLM Gateway — a real call to a real model, not a stubbed-out demo.
-
-The `LLMClient` protocol keeps the Gateway provider-agnostic (same
-reasoning as `holon_common.authz.PermissionClient` not hand-tying itself
-to one vendor's SDK conventions): `AnthropicClient` is the only
-implementation today, but swapping providers later means adding a
-class, not touching every caller.
-
-Resilience matches every other outbound call in this build: explicit
-timeout, retry with backoff+jitter for transient errors, a circuit
-breaker so a struggling provider fails fast instead of piling up slow
-timeouts across concurrent agent turns.
-"""
+"""LLM Gateway — Provider-agnostic client interface for LLM inference."""
 
 from __future__ import annotations
 

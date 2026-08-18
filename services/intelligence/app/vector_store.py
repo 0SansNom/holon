@@ -1,22 +1,4 @@
-"""Vector Store — thin Qdrant wrapper (metadata
-only, never bulk instance vectorization).
-
-Indexed here: ObjectType/Action definitions (their descriptions) and
-glossary terms (with synonyms) — pulled from Knowledge's own **HTTP**
-API, never its database directly, keeping the same platform boundary
-every other cross-service interaction in this build already respects.
-Sources are the public Knowledge surface (`/api/ontologies/…/objectTypes`,
-`/api/holon/actions`, `/api/holon/glossary`) — auth-only, so a bare
-service-account JWT is enough. ObjectTypes are whatever currently exist
-(self-serve; no fixed type list to keep in sync).
-
-Deliberately *not* indexing instance-level free text (e.g. ProductReview
-comments) in this round: doing so correctly would need the indexer to
-carry real ReBAC/ABAC rights on that ObjectType, which raises exactly the
-kind of permission-plumbing this metadata-only scope was chosen to avoid.
-A real per-tenant instance-text index is a further step, not silently
-assumed to already work.
-"""
+"""Vector Store — Qdrant wrapper for ontology metadata and glossary indexing."""
 
 from __future__ import annotations
 

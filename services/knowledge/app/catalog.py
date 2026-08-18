@@ -1,14 +1,4 @@
-"""Catalog module — Dataset / DatasetVersion management.
-
-Maintains the catalog by consuming `connectivity.sync.completed` off the
-Platform Event Bus: the connector never blocks on cataloguing, and
-cataloguing never blocks on the connector. Convergence is asynchronous
-and independent.
-
-Also owns sensitive column definitions: declaring sensitive source columns
-where Dataset itself is owned makes ObjectType
-classification a computed fact instead of a hardcoded one.
-"""
+"""Catalog module — Dataset and DatasetVersion management and classification propagation."""
 
 from __future__ import annotations
 
@@ -81,6 +71,19 @@ async def latest_dataset_version_urn(pool: asyncpg.Pool, dataset_urn: str) -> st
         dataset_urn,
     )
     return row["urn"] if row else None
+
+
+async def list_dataset_versions(pool: asyncpg.Pool, tenant_id: str, dataset_urn: str) -> list[dict]:
+    """Full snapshot history for a dataset — every sync/pipeline-run
+    that ever produced one, newest first. `_catalogue_sync` already
+    inserts one immutable row per snapshot; this was always here, just
+    never queried back out through an endpoint.
+    """
+    rows = await pool.fetch(
+        "SELECT * FROM dataset_version WHERE tenant_id = $1 AND dataset_urn = $2 ORDER BY created_at DESC",
+        tenant_id, dataset_urn,
+    )
+    return [dict(row) for row in rows]
 
 
 async def _catalogue_sync(conn: asyncpg.Connection, tenant_id: str, workspace_id: str, payload: dict) -> None:

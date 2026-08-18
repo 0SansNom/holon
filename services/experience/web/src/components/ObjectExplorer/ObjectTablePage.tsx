@@ -29,19 +29,15 @@ import {
 import { FormattedValue } from "../common/PropertyFormat";
 import { applyConditionalStyle, camelToSnake } from "../common/propertyFormatUtils";
 import { DetailPage } from "../common/PageLayout";
-import type { ConditionalFormatRule } from "../../api/knowledge";
 import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
 import { getErrorMessage } from "../../api/client";
 import {
-  OBJECT_METADATA_KEYS,
-  buildExplorerColumnKeys,
+  actionsForObjectType,
   computeInlineEditableActions,
-  preferTitleColumnFirst,
-  resolveInstanceColumnKey,
+  fkFieldTargetsFromRelations,
+  principalsDisplayByUrn,
   titleOf,
-  urnShortName,
 } from "./objectExplorerUtils";
-import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 import { InlineEditableCell } from "./InlineEditableCell";
 import { SelectionPreviewPanel } from "./SelectionPreviewPanel";
 import { ActionInvokeDialog } from "./ActionInvokeDialog";
@@ -52,7 +48,7 @@ import { SavedViewsBar } from "./SavedViewsBar";
 import { CompareObjectsDialog } from "./CompareObjectsDialog";
 import { resolveVisibleColumnOrder, normalizeColumnLayout } from "./columnLayout";
 import { mergeDrillDownFilters } from "./explorationCharts";
-import { filterRowsByListIds, newViewId } from "./savedViews";
+import { newViewId } from "./savedViews";
 import { downloadCsv, rowsToCsv } from "./csvExport";
 import { prefillActionParameters } from "./actionParameterPrefill";
 import { useAuthStore } from "../../store/auth";
@@ -60,31 +56,33 @@ import { useObjectTableLayoutsStore } from "../../store/objectTableLayouts";
 import { useObjectExplorerViewsStore } from "../../store/objectExplorerViews";
 import {
   buildFormatsBySourceKey,
-  isPropertyHidden,
   resolveDisplayTypeRule,
   resolvePropertyTypeRule,
-  sortPropertiesByVisibility,
 } from "../Ontology/propertyEditorUtils";
 import {
   buildPredicateDefinition,
-  expandFilterPropertyKeys,
   matchesPredicates,
   type PredicateFormRow,
 } from "../Ontology/objectSetPredicates";
+import {
+  BATCH_ACTION_CAP,
+  FROZEN_DATA_COL_WIDTH,
+  FROZEN_SELECT_WIDTH,
+  bulkActionTargets,
+  conditionalFormatsBySourceKey as mapConditionalFormatsBySourceKey,
+  explorerAvailableColumnKeys,
+  explorerPropertyKeys,
+  formatBatchInvokeMessage,
+  formatSingleInvokeMessage,
+  frozenLeftOffset,
+  nextFocusedRowId,
+  resolveInvokeActionName,
+  selectObjectTableBaseRows,
+  shouldUseServerPaging,
+  visibleObjectSetsForType,
+} from "./objectTableModel";
 
 type Row = Record<string, unknown>;
-
-const BATCH_ACTION_CAP = 50;
-const FROZEN_SELECT_WIDTH = 36;
-const FROZEN_DATA_COL_WIDTH = 140;
-
-function resolveInvokeActionName(action: { name: string; parameters?: unknown } | undefined, activeActionName: string) {
-  return action?.parameters !== undefined ? activeActionName : activeActionName.split(".")[1] ?? activeActionName;
-}
-
-function frozenLeftOffset(dataIndex: number): number {
-  return FROZEN_SELECT_WIDTH + dataIndex * FROZEN_DATA_COL_WIDTH;
-}
 
 export function ObjectTablePage() {
   const { type } = useParams({ from: "/shell/objects/$type" });
@@ -143,8 +141,12 @@ export function ObjectTablePage() {
   const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
   const [stackIndex, setStackIndex] = useState(0);
 
-  const useServerPaging =
-    !setName && !listId && filterPredicates.length === 0 && globalFilter.trim() === "";
+  const useServerPaging = shouldUseServerPaging({
+    setName,
+    listId,
+    predicateCount: filterPredicates.length,
+    globalFilter,
+  });
   const serverCursor = cursorStack[stackIndex] ?? null;
 
   const { data: allRows } = useObjects(useServerPaging ? "" : type);
@@ -156,28 +158,26 @@ export function ObjectTablePage() {
   }, [type, serverPageSize, useServerPaging]);
 
   const setsForType = useMemo(
-    () =>
-      objectSets.filter((os) => {
-        if (urnShortName(os.object_type_urn) !== type || os.visibility === "hidden") return false;
-        // Keep the active set visible even if ephemeral (deep link / saved exploration).
-        if (setName && os.name === setName) return true;
-        return !isEphemeralTestName(os.name);
-      }),
+    () => visibleObjectSetsForType(objectSets, type, setName),
     [objectSets, type, setName],
   );
 
   const activeSet = setName && !listId ? objectSets.find((os) => os.name === setName) : undefined;
   const setTypeMismatch = !!setName && !listId && !!evaluated && evaluated.object_type !== type;
 
-  const baseRows = useMemo(() => {
-    if (activeList) {
-      return filterRowsByListIds(allRows ?? [], activeList.instanceIds);
-    }
-    if (useServerPaging) return (serverPage?.data as Row[] | undefined) ?? [];
-    if (!setName) return allRows ?? [];
-    if (setTypeMismatch) return [];
-    return (evaluated?.data as Row[] | undefined) ?? [];
-  }, [activeList, setName, allRows, evaluated, setTypeMismatch, useServerPaging, serverPage]);
+  const baseRows = useMemo(
+    () =>
+      selectObjectTableBaseRows({
+        activeList,
+        useServerPaging,
+        setName,
+        setTypeMismatch,
+        allRows,
+        serverPageData: (serverPage?.data as Row[] | undefined) ?? [],
+        evaluatedData: (evaluated?.data as Row[] | undefined) ?? [],
+      }),
+    [activeList, setName, allRows, evaluated, setTypeMismatch, useServerPaging, serverPage],
+  );
 
   // Apply saved exploration snapshot when URL exploration id changes.
   useEffect(() => {
@@ -213,14 +213,10 @@ export function ObjectTablePage() {
     }
   }, [type, setName, listId, explorationId]);
 
-  const propertyKeys = useMemo(() => {
-    const mapping = objectType?.property_mapping ?? {};
-    const fromMapping = expandFilterPropertyKeys(mapping, objectType?.property_types);
-    if (fromMapping.length > 0) return fromMapping;
-    const first = baseRows[0];
-    if (!first) return [];
-    return Object.keys(first).filter((k) => !OBJECT_METADATA_KEYS.has(k));
-  }, [objectType, baseRows]);
+  const propertyKeys = useMemo(
+    () => explorerPropertyKeys(objectType, baseRows),
+    [objectType, baseRows],
+  );
 
   const activeFilterDefinition = useMemo(
     () => buildPredicateDefinition(filterPredicates),
@@ -234,15 +230,9 @@ export function ObjectTablePage() {
   }, [baseRows, activeFilterDefinition, objectType]);
 
   useEffect(() => {
-    const selectedIds = Object.keys(rowSelection).filter((id) => rowSelection[id]);
-    if (focusedId && !rowSelection[focusedId]) {
-      setFocusedId(selectedIds[0] ?? null);
-      return;
-    }
-    if (!focusedId && selectedIds.length > 0) {
-      setFocusedId(selectedIds[0]);
-      setPreviewOpen(true);
-    }
+    const next = nextFocusedRowId(rowSelection, focusedId);
+    setFocusedId(next.focusedId);
+    if (next.openPreview) setPreviewOpen(true);
   }, [rowSelection, focusedId]);
 
   const inlineEditableBySourceKey = useMemo(
@@ -259,68 +249,27 @@ export function ObjectTablePage() {
     );
   }, [objectType, sharedPropertyTypes]);
 
-  const conditionalFormatsBySourceKey = useMemo(() => {
-    const map = new Map<string, ConditionalFormatRule[]>();
-    Object.entries(objectType?.conditional_formats ?? {}).forEach(([property, rules]) => {
-      map.set(camelToSnake(property), rules);
-    });
-    return map;
-  }, [objectType]);
+  const conditionalFormatsBySourceKey = useMemo(
+    () => mapConditionalFormatsBySourceKey(objectType?.conditional_formats),
+    [objectType],
+  );
 
-  const principalsByUrn = useMemo(() => {
-    const map = new Map<string, string>();
-    (principals ?? []).forEach((p) => map.set(p.urn, p.display_name));
-    return map;
-  }, [principals]);
+  const principalsByUrn = useMemo(() => principalsDisplayByUrn(principals), [principals]);
 
-  const fkFieldTargets = useMemo(() => {
-    const map = new Map<string, string>();
-    relationTypes
-      .filter((r) => urnShortName(r.source_object_type_urn) === type)
-      .forEach((r) => map.set(camelToSnake(r.source_property), urnShortName(r.target_object_type_urn)));
-    return map;
-  }, [relationTypes, type]);
+  const fkFieldTargets = useMemo(
+    () => fkFieldTargetsFromRelations(relationTypes, type),
+    [relationTypes, type],
+  );
 
   const relevantActions = useMemo(
-    () =>
-      allActions.filter(
-        (a) =>
-          a.target_object_type === type ||
-          (a.target_interface && (objectType?.implements ?? []).includes(a.target_interface)),
-      ),
+    () => actionsForObjectType(allActions, type, objectType?.implements ?? []),
     [allActions, type, objectType],
   );
 
-  const availableColumnKeys = useMemo(() => {
-    const first = rows?.[0] ?? null;
-    const ordered = buildExplorerColumnKeys(objectType, first);
-    const mapping = objectType?.property_mapping ?? {};
-    const rowKeys = first ? new Set(Object.keys(first)) : null;
-    const ontology = new Set(
-      [...Object.keys(mapping), ...Object.keys(objectType?.derived_properties ?? {})].map((api) =>
-        resolveInstanceColumnKey(api, mapping, rowKeys),
-      ),
-    );
-    const visible = (keys: string[]) =>
-      sortPropertiesByVisibility(
-        keys,
-        objectType?.property_types,
-        objectType?.property_mapping,
-        sharedPropertyTypes,
-      ).filter(
-        (k) =>
-          !isPropertyHidden(k, objectType?.property_types, objectType?.property_mapping, sharedPropertyTypes),
-      );
-    if (ontology.size === 0) {
-      return preferTitleColumnFirst(visible(ordered), objectType);
-    }
-    const ontologyKeys = preferTitleColumnFirst(
-      visible(ordered.filter((k) => ontology.has(k))),
-      objectType,
-    );
-    const extraKeys = visible(ordered.filter((k) => !ontology.has(k)));
-    return [...ontologyKeys, ...extraKeys];
-  }, [rows, objectType, sharedPropertyTypes]);
+  const availableColumnKeys = useMemo(
+    () => explorerAvailableColumnKeys(objectType, rows?.[0] ?? null, sharedPropertyTypes),
+    [rows, objectType, sharedPropertyTypes],
+  );
 
   const { visibleOrder: visibleColumnKeys, freezeCount } = useMemo(
     () => resolveVisibleColumnOrder(availableColumnKeys, columnLayout),
@@ -486,17 +435,10 @@ export function ObjectTablePage() {
   }, [rows, focusedId]);
 
   const activeAction = relevantActions.find((a) => a.name === activeActionName);
-  const bulkTargetIds = useMemo(() => {
-    if (selectedRows.length > 0) {
-      return selectedRows.map((r) => String(r.id)).slice(0, BATCH_ACTION_CAP);
-    }
-    if (focusedId) return [focusedId];
-    return [];
-  }, [selectedRows, focusedId]);
-  const bulkCapWarning =
-    selectedRows.length > BATCH_ACTION_CAP
-      ? `Selection has ${selectedRows.length} objects; only the first ${BATCH_ACTION_CAP} will be included (API cap).`
-      : null;
+  const { ids: bulkTargetIds, capWarning: bulkCapWarning } = useMemo(
+    () => bulkActionTargets(selectedRows.map((r) => String(r.id)), focusedId),
+    [selectedRows, focusedId],
+  );
 
   function selectSet(next: string) {
     void navigate({
@@ -612,10 +554,7 @@ export function ObjectTablePage() {
         const status = (response as { status?: string }).status;
         setActionResult({
           ok: true,
-          message:
-            status === "pending_approval"
-              ? "Submitted for approval (high-risk Action)."
-              : "Applied immediately.",
+          message: formatSingleInvokeMessage(status),
         });
       } else {
         const response = await invokeActionBatch.mutateAsync({
@@ -624,18 +563,7 @@ export function ObjectTablePage() {
           instanceIds: bulkTargetIds,
           parameters: actionParameters,
         });
-        const pending = response.results.filter(
-          (r) => r.ok && (r.result as { status?: string } | undefined)?.status === "pending_approval",
-        ).length;
-        const parts = [
-          `${response.succeeded} succeeded`,
-          response.failed > 0 ? `${response.failed} failed` : null,
-          pending > 0 ? `${pending} pending approval` : null,
-        ].filter(Boolean);
-        setActionResult({
-          ok: response.failed === 0,
-          message: `Bulk ${actionName}: ${parts.join(", ")} (of ${response.count}).`,
-        });
+        setActionResult(formatBatchInvokeMessage(actionName, response));
       }
     } catch (err) {
       setActionResult({ ok: false, message: getErrorMessage(err) });
@@ -682,139 +610,51 @@ export function ObjectTablePage() {
         )
       }
       actions={
-        <div className="hl-flex-row hl-items-center hl-gap-sm">
-          {setsForType.length > 0 && (
-            <HTMLSelect value={setName ?? ""} onChange={(e) => selectSet(e.target.value)}>
-              <option value="">All {type}</option>
-              {setsForType.map((os) => (
-                <option key={os.name} value={os.name}>
-                  {os.display_name || os.name}
-                </option>
-              ))}
-            </HTMLSelect>
-          )}
-          {selectionCount > 0 && (
-            <Tag minimal intent="primary" icon="selection" onRemove={() => {
-              setRowSelection({});
-              setFocusedId(null);
-            }}>
-              {selectionCount} selected
-            </Tag>
-          )}
-          <Button
-            minimal
-            icon="multi-select"
-            onClick={selectMatchingRows}
-            title={`Select up to ${BATCH_ACTION_CAP} matching rows (filters + search)`}
-          >
-            Select matching
-          </Button>
-          <Button
-            minimal
-            icon="export"
-            disabled={rows.length === 0}
-            onClick={() => exportCsv(selectionCount > 0 ? "selected" : "visible")}
-            title={
-              selectionCount > 0
-                ? `Export ${selectionCount} selected rows as CSV`
-                : "Export visible (filtered) rows as CSV"
-            }
-          >
-            Export CSV
-          </Button>
-          <Button
-            minimal
-            icon="exchange"
-            disabled={selectionCount < 2}
-            onClick={() => setCompareOpen(true)}
-            title="Compare the first two selected objects"
-          >
-            Compare
-          </Button>
-          {!previewOpen && focusedId && (
-            <Button minimal icon="panel-stats" onClick={() => setPreviewOpen(true)}>
-              Show preview
-            </Button>
-          )}
-          <Button minimal icon="th" onClick={() => setColumnsDialogOpen(true)}>
-            Columns
-            {freezeCount > 0 || columnLayout.hidden.length > 0 || columnLayout.order.length > 0 ? (
-              <Tag minimal className="hl-ml-xs">
-                custom
-              </Tag>
-            ) : null}
-          </Button>
-          <Button
-            icon="diagram-tree"
-            onClick={() =>
-              void navigate({
-                to: "/lineage/$urn",
-                params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` },
-              })
-            }
-          >
-            View lineage
-          </Button>
-        </div>
+        <ObjectTableToolbar
+          type={type}
+          setName={setName}
+          setsForType={setsForType}
+          selectionCount={selectionCount}
+          rowCount={rows.length}
+          previewOpen={previewOpen}
+          focusedId={focusedId}
+          columnLayoutCustom={
+            freezeCount > 0 || columnLayout.hidden.length > 0 || columnLayout.order.length > 0
+          }
+          onSelectSet={selectSet}
+          onClearSelection={() => {
+            setRowSelection({});
+            setFocusedId(null);
+          }}
+          onSelectMatching={selectMatchingRows}
+          onExportCsv={() => exportCsv(selectionCount > 0 ? "selected" : "visible")}
+          onCompare={() => setCompareOpen(true)}
+          onShowPreview={() => setPreviewOpen(true)}
+          onOpenColumns={() => setColumnsDialogOpen(true)}
+          onViewLineage={() =>
+            void navigate({
+              to: "/lineage/$urn",
+              params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` },
+            })
+          }
+        />
       }
     >
-      {setName && evaluating && (
-        <Callout className="hl-mb-md" icon="refresh">
-          Evaluating Object Set…
-        </Callout>
-      )}
-      {evaluateError && (
-        <Callout intent="danger" className="hl-mb-md">
-          {(evaluateError as Error).message}
-        </Callout>
-      )}
-      {setTypeMismatch && (
-        <Callout intent="warning" className="hl-mb-md">
-          Object Set “{setName}” targets {evaluated?.object_type}, not {type}.
-        </Callout>
-      )}
-      {listId && !activeList && (
-        <Callout intent="warning" className="hl-mb-md">
-          Saved list not found (deleted or other browser).{" "}
-          <Button minimal small onClick={clearSavedView}>
-            Clear
-          </Button>
-        </Callout>
-      )}
-      {explorationId && !activeExploration && !listId && (
-        <Callout intent="warning" className="hl-mb-md">
-          Saved exploration not found.{" "}
-          <Button minimal small onClick={clearSavedView}>
-            Clear
-          </Button>
-        </Callout>
-      )}
-      {activeList && (
-        <Callout intent="primary" className="hl-mb-md" icon="properties">
-          Static list “{activeList.name}” — {activeList.instanceIds.length} IDs
-          {baseRows.length < activeList.instanceIds.length
-            ? ` (${activeList.instanceIds.length - baseRows.length} missing from current data)`
-            : ""}
-          . Object Sets are ignored while a list is active.
-        </Callout>
-      )}
-      {activeSet && (
-        <div className="hl-tag-row hl-mb-md">
-          <Tag minimal intent="primary" icon="filter">
-            Object Set
-          </Tag>
-          <Tag minimal>{activeSet.lifecycle_status}</Tag>
-          {(activeSet.definition?.all ?? []).map((pred, i) => (
-            <Tag key={i} minimal className="hl-mono">
-              {pred.property} {pred.op} {Array.isArray(pred.value) ? pred.value.join(",") : String(pred.value)}
-            </Tag>
-          ))}
-          {(activeSet.definition?.all ?? []).length === 0 && <Tag minimal>all instances</Tag>}
-          <Button minimal small icon="cross" onClick={() => selectSet("")}>
-            Clear set
-          </Button>
-        </div>
-      )}
+      <ObjectTableStatus
+        type={type}
+        setName={setName}
+        listId={listId}
+        explorationMissing={!!explorationId && !activeExploration && !listId}
+        evaluating={evaluating}
+        evaluateError={evaluateError}
+        setTypeMismatch={setTypeMismatch}
+        evaluatedObjectType={evaluated?.object_type}
+        activeList={activeList}
+        activeSet={activeSet}
+        baseRowCount={baseRows.length}
+        onClearSavedView={clearSavedView}
+        onClearSet={() => selectSet("")}
+      />
 
       <SavedViewsBar
         explorations={explorationsForType}
@@ -1117,5 +957,202 @@ export function ObjectTablePage() {
         right={comparePair?.[1] ?? null}
       />
     </DetailPage>
+  );
+}
+
+function ObjectTableToolbar({
+  type,
+  setName,
+  setsForType,
+  selectionCount,
+  rowCount,
+  previewOpen,
+  focusedId,
+  columnLayoutCustom,
+  onSelectSet,
+  onClearSelection,
+  onSelectMatching,
+  onExportCsv,
+  onCompare,
+  onShowPreview,
+  onOpenColumns,
+  onViewLineage,
+}: {
+  type: string;
+  setName?: string;
+  setsForType: Array<{ name: string; display_name?: string }>;
+  selectionCount: number;
+  rowCount: number;
+  previewOpen: boolean;
+  focusedId: string | null;
+  columnLayoutCustom: boolean;
+  onSelectSet: (next: string) => void;
+  onClearSelection: () => void;
+  onSelectMatching: () => void;
+  onExportCsv: () => void;
+  onCompare: () => void;
+  onShowPreview: () => void;
+  onOpenColumns: () => void;
+  onViewLineage: () => void;
+}) {
+  return (
+    <div className="hl-flex-row hl-items-center hl-gap-sm">
+      {setsForType.length > 0 && (
+        <HTMLSelect value={setName ?? ""} onChange={(e) => onSelectSet(e.target.value)}>
+          <option value="">All {type}</option>
+          {setsForType.map((os) => (
+            <option key={os.name} value={os.name}>
+              {os.display_name || os.name}
+            </option>
+          ))}
+        </HTMLSelect>
+      )}
+      {selectionCount > 0 && (
+        <Tag minimal intent="primary" icon="selection" onRemove={onClearSelection}>
+          {selectionCount} selected
+        </Tag>
+      )}
+      <Button
+        minimal
+        icon="multi-select"
+        onClick={onSelectMatching}
+        title={`Select up to ${BATCH_ACTION_CAP} matching rows (filters + search)`}
+      >
+        Select matching
+      </Button>
+      <Button
+        minimal
+        icon="export"
+        disabled={rowCount === 0}
+        onClick={onExportCsv}
+        title={
+          selectionCount > 0
+            ? `Export ${selectionCount} selected rows as CSV`
+            : "Export visible (filtered) rows as CSV"
+        }
+      >
+        Export CSV
+      </Button>
+      <Button
+        minimal
+        icon="exchange"
+        disabled={selectionCount < 2}
+        onClick={onCompare}
+        title="Compare the first two selected objects"
+      >
+        Compare
+      </Button>
+      {!previewOpen && focusedId && (
+        <Button minimal icon="panel-stats" onClick={onShowPreview}>
+          Show preview
+        </Button>
+      )}
+      <Button minimal icon="th" onClick={onOpenColumns}>
+        Columns
+        {columnLayoutCustom ? (
+          <Tag minimal className="hl-ml-xs">
+            custom
+          </Tag>
+        ) : null}
+      </Button>
+      <Button icon="diagram-tree" onClick={onViewLineage}>
+        View lineage
+      </Button>
+    </div>
+  );
+}
+
+function ObjectTableStatus({
+  type,
+  setName,
+  listId,
+  explorationMissing,
+  evaluating,
+  evaluateError,
+  setTypeMismatch,
+  evaluatedObjectType,
+  activeList,
+  activeSet,
+  baseRowCount,
+  onClearSavedView,
+  onClearSet,
+}: {
+  type: string;
+  setName?: string;
+  listId?: string;
+  explorationMissing: boolean;
+  evaluating: boolean;
+  evaluateError: unknown;
+  setTypeMismatch: boolean;
+  evaluatedObjectType?: string;
+  activeList?: { name: string; instanceIds: string[] };
+  activeSet?: {
+    lifecycle_status?: string;
+    definition?: { all?: Array<{ property: string; op: string; value: unknown }> };
+  };
+  baseRowCount: number;
+  onClearSavedView: () => void;
+  onClearSet: () => void;
+}) {
+  return (
+    <>
+      {setName && evaluating && (
+        <Callout className="hl-mb-md" icon="refresh">
+          Evaluating Object Set…
+        </Callout>
+      )}
+      {evaluateError && (
+        <Callout intent="danger" className="hl-mb-md">
+          {(evaluateError as Error).message}
+        </Callout>
+      )}
+      {setTypeMismatch && (
+        <Callout intent="warning" className="hl-mb-md">
+          Object Set “{setName}” targets {evaluatedObjectType}, not {type}.
+        </Callout>
+      )}
+      {listId && !activeList && (
+        <Callout intent="warning" className="hl-mb-md">
+          Saved list not found (deleted or other browser).{" "}
+          <Button minimal small onClick={onClearSavedView}>
+            Clear
+          </Button>
+        </Callout>
+      )}
+      {explorationMissing && (
+        <Callout intent="warning" className="hl-mb-md">
+          Saved exploration not found.{" "}
+          <Button minimal small onClick={onClearSavedView}>
+            Clear
+          </Button>
+        </Callout>
+      )}
+      {activeList && (
+        <Callout intent="primary" className="hl-mb-md" icon="properties">
+          Static list “{activeList.name}” — {activeList.instanceIds.length} IDs
+          {baseRowCount < activeList.instanceIds.length
+            ? ` (${activeList.instanceIds.length - baseRowCount} missing from current data)`
+            : ""}
+          . Object Sets are ignored while a list is active.
+        </Callout>
+      )}
+      {activeSet && (
+        <div className="hl-tag-row hl-mb-md">
+          <Tag minimal intent="primary" icon="filter">
+            Object Set
+          </Tag>
+          <Tag minimal>{activeSet.lifecycle_status}</Tag>
+          {(activeSet.definition?.all ?? []).map((pred, i) => (
+            <Tag key={i} minimal className="hl-mono">
+              {pred.property} {pred.op} {Array.isArray(pred.value) ? pred.value.join(",") : String(pred.value)}
+            </Tag>
+          ))}
+          {(activeSet.definition?.all ?? []).length === 0 && <Tag minimal>all instances</Tag>}
+          <Button minimal small icon="cross" onClick={onClearSet}>
+            Clear set
+          </Button>
+        </div>
+      )}
+    </>
   );
 }

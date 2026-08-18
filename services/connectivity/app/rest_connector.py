@@ -1,13 +1,4 @@
-"""The generic REST connector: a source reached over
-plain HTTP rather than a database driver.
-
-Unlike `connector.py` (asyncpg, natively async) and `mongo_connector.py`
-(pymongo, synchronous — wrapped in `asyncio.to_thread` at the call site),
-`httpx` is natively async, so this is the first reader that needs neither
-a special driver nor a thread hop. Three connectors, three different
-concurrency shapes, all handled correctly — that variety is the point of
-this increment as much as the new data is.
-"""
+"""REST connector — HTTP REST API source ingestion."""
 
 from __future__ import annotations
 

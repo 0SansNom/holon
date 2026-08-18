@@ -75,6 +75,29 @@ async def preview_dataset(name: str, principal: Principal = Depends(core.current
     return {"columns": [{"name": key, "sample": value} for key, value in rows[0].items()]}
 
 
+@router.get("/catalog/datasets/{name}/versions")
+async def get_dataset_versions(name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+    """Full snapshot history — every sync/pipeline-run that ever
+    produced a version of this dataset, newest first. The data has
+    always been recorded (`catalog._catalogue_sync` inserts one
+    immutable `dataset_version` row per snapshot); this just exposes it.
+    """
+    dataset_urn = build_urn(principal.tenant_id, core.WORKSPACE_ID, "dataset", name)
+    return await catalog.list_dataset_versions(core.pool, principal.tenant_id, dataset_urn)
+
+
+@router.get("/catalog/datasets/{name}/stats")
+async def get_dataset_stats(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
+    """The Iceberg table's real declared schema plus per-column stats
+    (null/distinct counts, min/max) — heavier than `/preview` (a full
+    scan + DuckDB aggregation, not one sample row), so its own endpoint.
+    """
+    try:
+        return await asyncio.to_thread(resolver.dataset_schema_and_stats, name, **core.ICEBERG_CONFIG)
+    except NoSuchTableError:
+        raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced")
+
+
 class GenerateJoinDatasetRequest(BaseModel):
     name: str
     source_column: str

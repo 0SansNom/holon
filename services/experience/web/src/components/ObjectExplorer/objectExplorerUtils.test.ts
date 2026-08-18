@@ -4,6 +4,7 @@ import {
   computeInlineEditableActions,
   buildRelatedLinksForObjectType,
   buildExplorerColumnKeys,
+  humanizeApiName,
   instancePropertyValue,
   parseInstanceUrn,
   parseSearchHitRef,
@@ -13,6 +14,14 @@ import {
   titleOf,
   urnShortName,
 } from "./objectExplorerUtils";
+
+describe("humanizeApiName", () => {
+  it("spaces camelCase and snake_case", () => {
+    expect(humanizeApiName("account_closed")).toBe("Account closed");
+    expect(humanizeApiName("lifetimeValue")).toBe("Lifetime Value");
+    expect(humanizeApiName("Customer.orders")).toBe("Orders");
+  });
+});
 
 describe("urnShortName", () => {
   it("returns the last colon segment", () => {
@@ -96,6 +105,25 @@ describe("buildRelatedLinksForObjectType", () => {
     expect(links[0].visibility).toBe("prominent");
     expect(links[0].pluralLabel).toBe("Order lines");
   });
+
+  it("skips pytest leftover RelationTypes", () => {
+    const links = buildRelatedLinksForObjectType("Customer", [
+      {
+        name: "acme.orders",
+        source_object_type_urn: "hl:t:w:object-type:Customer",
+        target_object_type_urn: "hl:t:w:object-type:Order",
+        source_api_name: "orders",
+        source_display_name: "Orders",
+      },
+      {
+        name: "Customer.ordersViaGenJoin_0118d88c",
+        source_object_type_urn: "hl:t:w:object-type:Customer",
+        target_object_type_urn: "hl:t:w:object-type:Order",
+        source_api_name: "ordersViaGenJoin_0118d88c",
+      },
+    ]);
+    expect(links.map((l) => l.linkName)).toEqual(["orders"]);
+  });
 });
 
 describe("titleOf", () => {
@@ -146,6 +174,18 @@ describe("buildExplorerColumnKeys", () => {
 
   it("falls back to row keys when mapping empty", () => {
     expect(buildExplorerColumnKeys(null, { id: 1, name: "x", degraded: false })).toEqual(["id", "name"]);
+  });
+
+  it("strips OSDK wire keys from fallback columns", () => {
+    expect(
+      buildExplorerColumnKeys(null, {
+        __apiName: "Customer",
+        __primaryKey: 1,
+        __rid: "hl:acme:main:object:Customer/1",
+        id: 1,
+        name: "Acme",
+      }),
+    ).toEqual(["id", "name"]);
   });
 });
 

@@ -2,7 +2,8 @@ import { Tag } from "@blueprintjs/core";
 import { Link } from "@tanstack/react-router";
 import { FormattedValue } from "../common/PropertyFormat";
 import type { ConditionalFormatRule, ObjectType, PropertyFormatRule, SharedPropertyType } from "../../api/knowledge";
-import { OBJECT_METADATA_KEYS } from "./objectExplorerUtils";
+import { OBJECT_METADATA_KEYS, buildExplorerColumnKeys, humanizeApiName, preferTitleColumnFirst } from "./objectExplorerUtils";
+import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 import {
   effectivePropertyVisibility,
   resolveDisplayTypeRule,
@@ -35,15 +36,15 @@ export function ObjectViewOverview({
   sharedPropertyTypes?: SharedPropertyType[];
   maxFallback?: number;
 }) {
+  const visible = (key: string) =>
+    effectivePropertyVisibility(key, objectType?.property_types, objectType?.property_mapping, sharedPropertyTypes) !==
+    "hidden";
+
   const allKeys = sortPropertiesByVisibility(
-    Object.keys(object).filter((k) => !OBJECT_METADATA_KEYS.has(k)),
+    Object.keys(object).filter((k) => !OBJECT_METADATA_KEYS.has(k) && visible(k)),
     objectType?.property_types,
     objectType?.property_mapping,
     sharedPropertyTypes,
-  ).filter(
-    (k) =>
-      effectivePropertyVisibility(k, objectType?.property_types, objectType?.property_mapping, sharedPropertyTypes) !==
-      "hidden",
   );
 
   const prominent = allKeys.filter(
@@ -51,33 +52,37 @@ export function ObjectViewOverview({
       effectivePropertyVisibility(k, objectType?.property_types, objectType?.property_mapping, sharedPropertyTypes) ===
       "prominent",
   );
-  const keys = prominent.length > 0 ? prominent : allKeys.slice(0, maxFallback);
+  const fallbackKeys = preferTitleColumnFirst(
+    buildExplorerColumnKeys(objectType, object).filter((k) => !OBJECT_METADATA_KEYS.has(k) && visible(k)),
+    objectType,
+  ).filter((k) => k !== "id" && k !== objectType?.primary_key);
+  const keys = prominent.length > 0 ? prominent : fallbackKeys.slice(0, maxFallback);
   const usingFallback = prominent.length === 0;
+  const durableImplements = (objectType?.implements ?? []).filter((iface) => !isEphemeralTestName(iface));
+
+  const hasTags = Boolean(objectType?.classification) || durableImplements.length > 0;
 
   return (
     <div className="hl-oe-ov-overview">
-      <div className="hl-tag-row hl-mb-sm">
-        <Tag minimal intent="primary">
-          {objectTypeName}
-        </Tag>
-        {objectType?.classification && <Tag minimal>{objectType.classification}</Tag>}
-        {objectType?.implements?.map((iface) => (
-          <Tag key={iface} minimal className="hl-mono">
-            {iface}
-          </Tag>
-        ))}
-        <Tag minimal className="hl-mono">
-          id:{String(object.id ?? "")}
-        </Tag>
-      </div>
+      {hasTags && (
+        <div className="hl-tag-row hl-mb-sm">
+          {objectType?.classification && <Tag minimal>{objectType.classification}</Tag>}
+          {durableImplements.map((iface) => (
+            <Tag key={iface} minimal>
+              {humanizeApiName(iface)}
+            </Tag>
+          ))}
+        </div>
+      )}
 
       <div className="hl-flex-between hl-items-center hl-mb-sm">
         <h4 className="hl-section-title" style={{ margin: 0 }}>
           {usingFallback ? "Key properties" : "Prominent properties"}
         </h4>
-        {usingFallback && (
-          <span className="hl-text-muted-sm">No prominent properties — showing first {keys.length}</span>
-        )}
+        <span className="hl-text-muted-sm">
+          {objectTypeName}
+          {object.id != null ? ` · ${String(object.id)}` : ""}
+        </span>
       </div>
 
       {keys.length === 0 ? (
@@ -94,7 +99,9 @@ export function ObjectViewOverview({
             const style = applyConditionalStyle(conditionalFormatsBySourceKey.get(key), object, value);
             return (
               <div key={key} className="hl-oe-ov-prominent-item" style={style}>
-                <dt className="hl-mono hl-text-muted-sm">{key}</dt>
+                <dt className="hl-text-muted-sm" title={key}>
+                  {humanizeApiName(key)}
+                </dt>
                 <dd>
                   {maskedFields.includes(key) ? (
                     <span className="hl-masked-field">masked</span>

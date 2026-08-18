@@ -1,15 +1,6 @@
-"""The **UI component** plugin type. See `holon_common.plugin`'s module docstring
-for details.
+"""UI Component plugin registry.
 
-A UI component plugin declares a new bindable component type beyond the
-three built into Application Builder's own object app/dashboard surfaces
-(`table`, `detail`, `kpi`). `application_builder.py`'s binding/widget
-validation is extended to accept a plugin-registered `component_name` in
-addition to the built-ins.
-
-Component-name-ownership guard: a plugin can't register itself under
-`table`/`detail`/`kpi` (the built-ins) or a name another active
-ui_component plugin already owns.
+Registers custom UI component types for Application Builder.
 """
 
 from __future__ import annotations

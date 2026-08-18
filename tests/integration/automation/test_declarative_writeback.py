@@ -111,6 +111,30 @@ def test_direct_write_calls_are_restricted_to_the_workflow_engine(jdoe_token: st
     assert status == 403, result
 
 
+def test_write_targets_list_includes_registered_targets_and_delete_removes_them(jdoe_token: str) -> None:
+    """`GET`/`DELETE /write-targets` — the Data Sources UI's writeback
+    visibility (P0b): the Action-based writeback path already existed,
+    this is just surfacing what's registered instead of API-only.
+    """
+    dataset_name = _register_write_target(jdoe_token)
+
+    status, targets = _request("GET", f"{CONNECTIVITY}/write-targets", token=jdoe_token)
+    assert status == 200, targets
+    registered = next((t for t in targets if t["dataset_name"] == dataset_name), None)
+    assert registered is not None, targets
+    assert registered["table_name"] == "writeback_test_target", registered
+    assert registered["allowed_properties"] == {"processingStatus": "status", "notes": "notes"}, registered
+
+    status, deleted = _request("DELETE", f"{CONNECTIVITY}/write-targets/{dataset_name}", token=jdoe_token)
+    assert status == 200 and deleted == {"deleted": dataset_name}, deleted
+
+    status, gone = _request("GET", f"{CONNECTIVITY}/write-targets/{dataset_name}", token=jdoe_token)
+    assert status == 404, gone
+
+    status, second_delete = _request("DELETE", f"{CONNECTIVITY}/write-targets/{dataset_name}", token=jdoe_token)
+    assert status == 404, second_delete
+
+
 def test_declarative_action_type_requires_high_risk_for_a_writeback_dataset(msmith_token: str, jdoe_token: str) -> None:
     object_type_name = _register_sync_and_create_object_type(msmith_token, jdoe_token)
     dataset_name = _register_write_target(jdoe_token)

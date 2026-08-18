@@ -256,3 +256,120 @@ def test_delete_pipeline_removes_definition_and_runs(jdoe_token: str) -> None:
 
     status, again = _request("DELETE", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
     assert status == 404, again
+
+
+def test_pipeline_health_reflects_the_last_run(registered_function: dict, orders_synced: dict, jdoe_token: str) -> None:
+    """P1a: `GET /pipelines/{name}` surfaces the same "health" Foundry's
+    Data Health page shows — last status, the row count it produced,
+    and freshness — without a separate call per pipeline.
+    """
+    pipeline_name = _unique_name("health-pipeline")
+    status, definition = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token,
+        body={"steps": [{"step_name": "s1", "input_dataset": "orders",
+                          "function_name": "flag_high_value_order", "output_dataset": _unique_name("out")}]},
+    )
+    assert status == 201, definition
+    assert definition["last_run"] is None, definition
+    assert definition["last_success_at"] is None, definition
+    assert definition["lag_seconds"] is None, definition
+    assert definition["schedule_interval_minutes"] is None, definition
+
+    status, run = _request("POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/run", token=jdoe_token)
+    assert status == 200 and run["status"] == "succeeded", run
+
+    status, refetched = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 200, refetched
+    assert refetched["last_run"]["status"] == "succeeded", refetched
+    assert refetched["last_run"]["row_count"] == sum(s["row_count"] for s in run["step_results"]), refetched
+    assert refetched["last_success_at"] is not None, refetched
+    assert isinstance(refetched["lag_seconds"], int) and refetched["lag_seconds"] >= 0, refetched
+
+    # A failed run afterwards must not clear last_success_at/lag — health
+    # should show staleness growing against the last real success, not
+    # reset to "no data" just because the latest attempt failed.
+    status, bad_step = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token,
+        body={"steps": [{"step_name": "s1", "input_dataset": "orders",
+                          "function_name": _unique_name("nonexistent_function"), "output_dataset": _unique_name("out2")}]},
+    )
+    assert status == 201, bad_step
+    status, failed_run = _request("POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/run", token=jdoe_token)
+    assert status == 400, failed_run
+
+    status, after_failure = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 200, after_failure
+    assert after_failure["last_run"]["status"] == "failed", after_failure
+    assert after_failure["last_success_at"] == refetched["last_success_at"], after_failure
+
+
+def test_setting_a_pipeline_schedule_validates_and_persists(
+    registered_function: dict, orders_synced: dict, jdoe_token: str
+) -> None:
+    pipeline_name = _unique_name("scheduled-pipeline")
+    status, _ = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token,
+        body={"steps": [{"step_name": "s1", "input_dataset": "orders",
+                          "function_name": "flag_high_value_order", "output_dataset": _unique_name("out")}]},
+    )
+    assert status == 201
+
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/schedule", token=jdoe_token,
+        body={"schedule_interval_minutes": 0},
+    )
+    assert status == 400, body
+
+    status, scheduled = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/schedule", token=jdoe_token,
+        body={"schedule_interval_minutes": 30},
+    )
+    assert status == 200 and scheduled["schedule_interval_minutes"] == 30, scheduled
+
+    status, refetched = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 200 and refetched["schedule_interval_minutes"] == 30, refetched
+
+    status, cleared = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/schedule", token=jdoe_token,
+        body={"schedule_interval_minutes": None},
+    )
+    assert status == 200 and cleared["schedule_interval_minutes"] is None, cleared
+
+    status, missing = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{_unique_name('never-created')}/schedule", token=jdoe_token,
+        body={"schedule_interval_minutes": 10},
+    )
+    assert status == 404, missing
+
+
+def test_a_scheduled_pipeline_runs_itself_with_no_manual_trigger(
+    registered_function: dict, orders_synced: dict, jdoe_token: str
+) -> None:
+    """Same real, not-mocked end-to-end wait as the scheduled-source and
+    scheduled-plugin equivalents — same scheduler loop, same guarantee.
+    """
+    pipeline_name = _unique_name("auto-scheduled-pipeline")
+    status, _ = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token,
+        body={"steps": [{"step_name": "s1", "input_dataset": "orders",
+                          "function_name": "flag_high_value_order", "output_dataset": _unique_name("out")}]},
+    )
+    assert status == 201
+
+    status, scheduled = _request(
+        "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}/schedule", token=jdoe_token,
+        body={"schedule_interval_minutes": 1},
+    )
+    assert status == 200 and scheduled["schedule_interval_minutes"] == 1, scheduled
+    assert scheduled["last_run"] is None, scheduled  # never run manually — a brand new pipeline
+
+    deadline = time.monotonic() + 100
+    definition: dict = {}
+    while time.monotonic() < deadline:
+        status, definition = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+        assert status == 200, definition
+        if definition["last_run"] is not None:
+            break
+        time.sleep(5)
+    assert definition.get("last_run") is not None, f"scheduler never auto-ran {pipeline_name!r} within 100s"
+    assert definition["last_run"]["status"] == "succeeded", definition

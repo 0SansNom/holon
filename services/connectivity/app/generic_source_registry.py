@@ -1,29 +1,6 @@
-"""Generic REST source registry — the no-code connector: a non-technical
-admin registers a new data source by filling in a URL and an optional
-auth header, entirely as data (one row in Postgres), with zero Python to
-write or deploy. `main.py`'s `run_sync` dispatch checks this registry
-after `plugin_registry` (developer-authored plugins registered via API) — the
-same zero-arg-async-reader shape both share, so `_finalize_sync`
-downstream needs no changes at all.
+"""Generic REST source registry — no-code REST connector registry.
 
-Deliberately narrower than a real ConnectorPlugin: one HTTP GET per page,
-one optional bearer/API-key header, one optional dot-path to the record
-array inside the JSON body, one optional dot-path to a next-page URL.
-That covers a large, genuinely common family of REST APIs — anything
-that hands back its own absolute next-page link in the body (Django REST
-Framework's default `{"results": [...], "next": "https://...", ...}`
-shape, and plenty of others styled the same way) — without asking a
-non-technical admin to configure a page-number/offset scheme by hand.
-APIs that only give you a page number or a `has_more` flag and expect
-*you* to construct the next URL, POST bodies, or multi-step auth are a
-real Python plugin's job, not this one's — the point isn't to replace
-plugins, it's to remove the "write and deploy Python" requirement for
-the common case.
-
-Secret handling: prefer `secret_ref` (`env:…` / `vault:…` / `k8s:…` /
-`aws:…`) resolved at sync-time via `holon_common.secrets`. Inline
-`auth_header_value` remains supported for local demo only — do not store
-production API keys as plaintext.
+Allows registering REST data sources, authentication headers, record extraction paths, and pagination config.
 """
 
 from __future__ import annotations
@@ -240,7 +217,7 @@ async def register_source(
     schedule_interval_minutes: Optional[int] = None,
     cursor_property: Optional[str] = None,
     incremental_param: Optional[str] = None,
-    reserved_dataset_names: frozenset[str] = frozenset({"inventory_levels"}),
+    reserved_dataset_names: frozenset[str] = frozenset(),
 ) -> dict:
     """Same dataset-ownership guard `plugin_registry.register_plugin`
     already enforces (a name can't shadow a reserved stream dataset or an

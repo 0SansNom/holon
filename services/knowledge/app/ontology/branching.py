@@ -1,11 +1,4 @@
-"""Branching + review: the same human-in-the-loop shape Actions already
-use (a `write`-tier request, an `approve`-tier decision — role
-separation, not a same-URN check, same as `action_approval`), applied to
-ontology changes instead of data writes. A branch is a named pointer at
-a specific `object_type_version` row; review approval merges by calling
-`publishing._write_publish` inside the same transaction as the branch
-status update — publish and merge are now fully atomic.
-"""
+"""Branching and review — governance workflow for ontology changes."""
 
 from __future__ import annotations
 

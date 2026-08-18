@@ -1,21 +1,4 @@
-"""Experience Platform — Application Builder.
-
-An Application Builder linked to the ontology:
-all five surfaces are built (**object app**, **dashboard**, **form**,
-**agent app**, **analytics**).
-
-- Applications only declare ObjectTypes/Actions that genuinely exist in Knowledge's ontology.
-- Dependencies are computed automatically from bindings/actionRefs.
-- Applications are versioned resources (draft -> promoted).
-- Forms declare validation field schemas matching declared actions.
-- An `agentApp` surface declares a tool allowlist, a system-prompt
-  template, and budget defaults — a non-engineer's way to configure a
-  bounded agent, compiled into a real Intelligence session by `main.py`'s
-  "run" endpoints.
-- An `analytics` surface scopes ad-hoc pivot/aggregate/join
-  exploration to one declared ObjectType, proxying real `ExecutionRequest`s
-  through to Knowledge's own `/execute` (`resolve_analytics_object_type`).
-"""
+"""Application Builder — Defines and promotes ontology-backed application configurations."""
 
 from __future__ import annotations
 

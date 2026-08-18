@@ -1,44 +1,4 @@
-"""Value Type registry — reusable, named *data* types (not display
-formatting; see `object_types.py`'s `property_formats` for that
-separate, pre-existing concern). A Value Type is a base primitive plus
-optional constraints — the same semantic-type idea Foundry calls Value
-Types.
-
-Base types cover every scalar Holon can genuinely back today (string,
-the numeric-width family, date/timestamp, boolean, geopoint/geoshape as
-plain string/JSON representations, vector as a plain number array).
-Deliberately excludes Foundry base types that would need real
-infrastructure this build doesn't have — attachment/media reference
-(blob storage wiring through Actions), time series/geotemporal series
-(no time-series store), cipher (no field-level encryption feature).
-Adding those as selectable-but-unbacked types would be a decorative gap,
-not a real one closed.
-
-Constraints (`enum`/`range`/`rid`/`uuid`) apply to a single scalar
-value. Foundry's array `uniqueness` lives on Holon's *property-level*
-array rule (`property_types` `unique_elements: true`) because Holon
-declares array-ness there — not as a Value Type base type. Element
-constraints are free via the array's `element` Value Type / SPT ref
-(Foundry's "nested"). String `format_regex` may match full value or
-substring (`format_regex_match`).
-
-Versioning (Foundry parity): `name` is the stable registry key that
-property_types / Action params reference. Metadata (`description`,
-`api_name`, `display_name`, `example_value`, `lifecycle_status`,
-`project_urn`) may change without bumping `version`. Changing
-`format_regex` / `format_regex_match` / `constraints` archives the
-previous snapshot into `value_type_revision` and increments `version` —
-consumers keep resolving by `name` and therefore auto-receive the
-latest constraints (Foundry's non-breaking propagate). `base_type`
-stays immutable.
-
-Two real call sites: (1) `object_types.py`'s `property_types` (a typed
-property references a Value Type by name, validated at publish time —
-see `publishing.py`'s `_validate_property_types`), (2) `action_types.py`'s
-declarative Action parameters (validated at invocation time via
-`validate_value` below) — the same registry, two consumers, one
-vocabulary, not duplicated.
-"""
+"""Value Type registry — reusable primitive and constrained semantic data types."""
 
 from __future__ import annotations
 

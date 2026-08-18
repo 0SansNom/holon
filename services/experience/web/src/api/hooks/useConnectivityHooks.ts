@@ -1,5 +1,11 @@
 import { useSuspenseQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { connectivityApi, type RegisterSourceRequest, type RegisterConnectionRequest } from "../connectivity";
+import {
+  connectivityApi,
+  type RegisterSourceRequest,
+  type RegisterConnectionRequest,
+  type RegisterWriteTargetRequest,
+  type RegisterKafkaStreamRequest,
+} from "../connectivity";
 import { queryKeys } from "../queryKeys";
 import { useOptionalSuspenseQuery } from "../optionalSuspenseQuery";
 
@@ -51,6 +57,71 @@ export function useDeleteSource() {
   });
 }
 
+export function usePlugins() {
+  return useSuspenseQuery({ queryKey: queryKeys.plugins(), queryFn: connectivityApi.listPlugins });
+}
+
+export function useDisablePlugin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disablePlugin(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
+export function useEnablePlugin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enablePlugin(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
+export function useSetPluginSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, scheduleIntervalMinutes }: { name: string; scheduleIntervalMinutes: number | null }) =>
+      connectivityApi.setPluginSchedule(name, scheduleIntervalMinutes),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
+export function useKafkaStreams() {
+  return useSuspenseQuery({ queryKey: queryKeys.kafkaStreams(), queryFn: connectivityApi.listKafkaStreams });
+}
+
+export function useRegisterKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterKafkaStreamRequest) => connectivityApi.registerKafkaStream(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
+export function useDisableKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disableKafkaStream(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
+export function useEnableKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enableKafkaStream(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
+export function useDeleteKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteKafkaStream(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
 export function useConnections() {
   return useSuspenseQuery({ queryKey: queryKeys.connections(), queryFn: connectivityApi.listConnections });
 }
@@ -68,6 +139,26 @@ export function useDeleteConnection() {
   return useMutation({
     mutationFn: (name: string) => connectivityApi.deleteConnection(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.connections() }),
+  });
+}
+
+export function useWriteTargets() {
+  return useSuspenseQuery({ queryKey: queryKeys.writeTargets(), queryFn: connectivityApi.listWriteTargets });
+}
+
+export function useRegisterWriteTarget() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterWriteTargetRequest) => connectivityApi.registerWriteTarget(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.writeTargets() }),
+  });
+}
+
+export function useDeleteWriteTarget() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (datasetName: string) => connectivityApi.deleteWriteTarget(datasetName),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.writeTargets() }),
   });
 }
 
@@ -119,6 +210,18 @@ export function useDeletePipeline() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.pipelines() });
       void queryClient.removeQueries({ queryKey: queryKeys.pipeline(name) });
       void queryClient.removeQueries({ queryKey: queryKeys.pipelineRuns(name) });
+    },
+  });
+}
+
+export function useSetPipelineSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, scheduleIntervalMinutes }: { name: string; scheduleIntervalMinutes: number | null }) =>
+      connectivityApi.setPipelineSchedule(name, scheduleIntervalMinutes),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.pipelines() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.pipeline(variables.name) });
     },
   });
 }

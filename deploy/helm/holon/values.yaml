@@ -31,6 +31,8 @@ bootstrap:
   tenantId: acme
   workspaceId: main
 
+allowDevLogin: false
+
 secretBackend: kubernetes
 # Must include at least:
 #   HOLON_JWT_SECRET (HS256) — or HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS (RS256),

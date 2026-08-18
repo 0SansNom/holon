@@ -1,15 +1,6 @@
-"""The Connector plugin registry. See `holon_common.plugin`'s module docstring
-for details.
+"""Connector plugin registry.
 
-Ecosystem connectors are executed without modifying core dispatch logic:
-`load_active_plugin_for_dataset` dynamically imports whatever `entry_point` the
-manifest declares. `main.py`'s `run_sync` dispatch consults this registry first,
-then falls through to the generic REST source registry.
-
-Dataset-ownership guard: A plugin cannot register itself against a reserved
-stream name (`inventory_levels`), or against a dataset already claimed by
-another active plugin in the same tenant scope (both NULL = global, or equal
-`tenant_id`).
+Dynamically registers and loads developer-authored connector plugins.
 """
 
 from __future__ import annotations
@@ -27,7 +18,7 @@ from holon_common.plugin import ConnectorPlugin
 
 logger = logging.getLogger("connectivity.plugin_registry")
 
-DEFAULT_RESERVED_DATASET_NAMES = frozenset({"inventory_levels"})
+DEFAULT_RESERVED_DATASET_NAMES: frozenset[str] = frozenset()
 
 DDL = """
 CREATE TABLE IF NOT EXISTS plugin_registration (
@@ -41,6 +32,9 @@ CREATE TABLE IF NOT EXISTS plugin_registration (
 
 -- NULL tenant_id = global plugin (e.g. exchange-rate); non-null = tenant-scoped.
 ALTER TABLE plugin_registration ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+
+-- Same scheduling model as `generic_rest_source` — NULL = manual only.
+ALTER TABLE plugin_registration ADD COLUMN IF NOT EXISTS schedule_interval_minutes INTEGER;
 """
 
 
@@ -79,6 +73,18 @@ def _parse_manifest(row: asyncpg.Record) -> dict:
 async def get_plugin_registration(pool: asyncpg.Pool, name: str) -> Optional[dict]:
     row = await pool.fetchrow("SELECT * FROM plugin_registration WHERE name = $1", name)
     return None if row is None else _parse_manifest(row)
+
+
+async def list_plugin_registrations(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
+    """Connector plugins visible to `tenant_id` — global (NULL) plus this
+    tenant's own. Same visibility rule as `load_active_plugin_for_dataset`,
+    surfaced for the Data Sources UI (`GET /sources` counterpart).
+    """
+    rows = await pool.fetch(
+        "SELECT * FROM plugin_registration WHERE tenant_id IS NULL OR tenant_id = $1 ORDER BY name",
+        tenant_id,
+    )
+    return [_parse_manifest(row) for row in rows]
 
 
 async def register_plugin(
@@ -139,6 +145,32 @@ async def set_plugin_status(pool: asyncpg.Pool, name: str, status: str) -> Optio
     """
     await pool.execute("UPDATE plugin_registration SET status = $1 WHERE name = $2", status, name)
     return await get_plugin_registration(pool, name)
+
+
+async def set_plugin_schedule(pool: asyncpg.Pool, name: str, schedule_interval_minutes: Optional[int]) -> Optional[dict]:
+    await pool.execute(
+        "UPDATE plugin_registration SET schedule_interval_minutes = $1 WHERE name = $2",
+        schedule_interval_minutes, name,
+    )
+    return await get_plugin_registration(pool, name)
+
+
+async def list_all_scheduled_plugins(pool: asyncpg.Pool) -> list[dict]:
+    """Due-check feed for `main.py`'s scheduler loop — the plugin
+    counterpart of `generic_source_registry.list_all_scheduled_sources`.
+    Global (NULL tenant_id) plugins are excluded: nothing in this build
+    ever registers one that way (`POST /plugins` always stamps the
+    caller's own `tenant_id`), and there's no well-defined tenant to run
+    a scheduled sync under otherwise.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT tenant_id, manifest->>'dataset_name' AS dataset_name, schedule_interval_minutes
+        FROM plugin_registration
+        WHERE status = 'active' AND schedule_interval_minutes IS NOT NULL AND tenant_id IS NOT NULL
+        """
+    )
+    return [dict(row) for row in rows]
 
 
 async def load_active_plugin_for_dataset(

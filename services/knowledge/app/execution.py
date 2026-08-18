@@ -1,35 +1,6 @@
-"""Execution — the ExecutionPlan / Adapter abstraction.
+"""Execution engine — ExecutionPlan execution via DuckDB and execution adapters.
 
-Deliberately minimal, scoped to what this build's own data actually needs:
-
-- **Four operators**: equality filter, count-by-filter, group-by+aggregate,
-  and join across an existing RelationType ( — Analytics: a
-  lightweight Contour/Code Workbook equivalent). A general multi-operator
-  DAG compiler letting these compose arbitrarily (join *then* group-by in
-  one plan, say) is still a project of its own — out of proportion here,
-  same reasoning the original two-operator scope already gave. Each
-  operator stays independently callable, not chainable.
-- **DuckDB as the built-in adapter**: DuckDB handles interactive queries for
-  datasets in this build. An **execution adapter plugin type** (`execution_adapter_registry.py`)
-  allows an ObjectType with an active adapter registration to route through it
-  instead, proving the interface is genuinely swappable without touching
-  `get_or_execute`'s caching/audit logic at all — scoped to `filter`/`count`
-  only, the two operations the adapter Protocol's `execute()` signature
-  already covers; `group_by`/`join` always run through the built-in DuckDB
-  path (extending the Protocol itself to the two new operators is real,
-  additional work not attempted in this slice, stated plainly rather than
-  silently narrowing what "swappable" means).
-- **Knowledge-owned, not a separate container**: wrapping DuckDB directly in Knowledge
-  avoids adding unnecessary containers while maintaining a clear execution interface.
-
-Plan-hash caching: A plan's hash
-is computed over its inputs *including the exact DatasetVersion it
-reads* (both DatasetVersions, for `join`) *and* the operator itself, so
-an identical query against unchanged data is never re-executed, two
-different operators over the same inputs get distinct cache entries, and
-a genuinely new sync on *either* side changes the hash and correctly
-forces re-execution — content-addressed caching with no explicit
-invalidation logic.
+Handles point filtering, counting, group-by aggregation, and joins with plan-hash caching.
 """
 
 from __future__ import annotations
