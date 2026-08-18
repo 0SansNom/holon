@@ -1,15 +1,6 @@
-"""The Connector plugin registry. See `holon_common.plugin`'s module docstring
-for details.
+"""Connector plugin registry.
 
-Ecosystem connectors are executed without modifying core dispatch logic:
-`load_active_plugin_for_dataset` dynamically imports whatever `entry_point` the
-manifest declares. `main.py`'s `run_sync` dispatch consults this registry first,
-then falls through to the generic REST source registry.
-
-Dataset-ownership guard: A plugin cannot register itself against a reserved
-stream name (`inventory_levels`), or against a dataset already claimed by
-another active plugin in the same tenant scope (both NULL = global, or equal
-`tenant_id`).
+Dynamically registers and loads developer-authored connector plugins.
 """
 
 from __future__ import annotations
@@ -27,7 +18,7 @@ from holon_common.plugin import ConnectorPlugin
 
 logger = logging.getLogger("connectivity.plugin_registry")
 
-DEFAULT_RESERVED_DATASET_NAMES = frozenset({"inventory_levels"})
+DEFAULT_RESERVED_DATASET_NAMES: frozenset[str] = frozenset()
 
 DDL = """
 CREATE TABLE IF NOT EXISTS plugin_registration (

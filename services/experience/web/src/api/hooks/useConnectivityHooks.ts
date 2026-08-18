@@ -4,6 +4,7 @@ import {
   type RegisterSourceRequest,
   type RegisterConnectionRequest,
   type RegisterWriteTargetRequest,
+  type RegisterKafkaStreamRequest,
 } from "../connectivity";
 import { queryKeys } from "../queryKeys";
 import { useOptionalSuspenseQuery } from "../optionalSuspenseQuery";
@@ -82,6 +83,42 @@ export function useSetPluginSchedule() {
     mutationFn: ({ name, scheduleIntervalMinutes }: { name: string; scheduleIntervalMinutes: number | null }) =>
       connectivityApi.setPluginSchedule(name, scheduleIntervalMinutes),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.plugins() }),
+  });
+}
+
+export function useKafkaStreams() {
+  return useSuspenseQuery({ queryKey: queryKeys.kafkaStreams(), queryFn: connectivityApi.listKafkaStreams });
+}
+
+export function useRegisterKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterKafkaStreamRequest) => connectivityApi.registerKafkaStream(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
+export function useDisableKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disableKafkaStream(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
+export function useEnableKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enableKafkaStream(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
+  });
+}
+
+export function useDeleteKafkaStream() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteKafkaStream(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.kafkaStreams() }),
   });
 }
 

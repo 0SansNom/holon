@@ -53,6 +53,7 @@ from . import (
     generic_source_registry,
     iceberg_reader,
     iceberg_writer,
+    kafka_stream_registry,
     pipeline,
     plugin_registry,
     stream_connector,
@@ -90,15 +91,22 @@ ICEBERG_CONFIG = dict(
     region=os.environ["AWS_REGION"],
 )
 
-CONNECTOR_URN_STREAM = build_urn(TENANT_ID, "global", "connector", "inventory-kafka-stream")
 CONNECTOR_URN_PIPELINE = build_urn(TENANT_ID, "global", "connector", "pipeline-transform")
 
 STREAM_INGEST_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-stream-ingest")
 SCHEDULER_ACTOR_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-scheduler")
 SCHEDULER_POLL_SECONDS = 60
 
-# Stream connector owns this dataset name; plugins/sources cannot claim it.
-RESERVED_DATASET_NAMES = frozenset({"inventory_levels"})
+
+async def _reserved_dataset_names(pool: asyncpg.Pool) -> frozenset[str]:
+    """Dataset names an active Kafka stream owns — plugins/REST sources
+    can't claim one out from under a running stream. Computed live
+    instead of a hardcoded constant now that streams are registered
+    (any tenant can register one, not just the one built-in inventory
+    stream this used to be).
+    """
+    active = await kafka_stream_registry.list_all_active(pool)
+    return frozenset(source["dataset_name"] for source in active)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS sync_run (
@@ -151,30 +159,21 @@ async def lifespan(app: FastAPI):
     await app.state.producer.start()
     relay_task = asyncio.create_task(outbox.relay_forever(app.state.pool, app.state.producer, dlq_producer=app.state.producer))
 
-    # Opt-in continuous ingest (not demo seed). Default off — operators
-    # register batch plugins/sources; enable when inventory Kafka is wired.
-    stream_task: Optional[asyncio.Task] = None
-    if os.environ.get("HOLON_ENABLE_INVENTORY_STREAM", "").lower() in {"1", "true", "yes"}:
-        stream_task = asyncio.create_task(
-            stream_connector.consume_inventory_stream_forever(
-                kafka_bootstrap=KAFKA_BOOTSTRAP,
-                iceberg_config=ICEBERG_CONFIG,
-                connector_urn=CONNECTOR_URN_STREAM,
-                pool=app.state.pool,
-                record_sync=functools.partial(
-                    _finalize_sync,
-                    actor=EventActor(type="service_account", urn=STREAM_INGEST_URN, on_behalf_of=None),
-                ),
-            )
-        )
+    # One consumer task per active registered Kafka stream — same
+    # enable/disable-without-redeploy lifecycle a connector plugin
+    # already has, hydrated at startup instead of one hardcoded,
+    # env-flag-gated inventory stream.
+    app.state.kafka_stream_tasks = {}
+    for source in await kafka_stream_registry.list_all_active(app.state.pool):
+        _spawn_kafka_stream_task(source)
 
     scheduler_task = asyncio.create_task(run_scheduler_forever(app.state.pool))
 
     yield
 
     scheduler_task.cancel()
-    if stream_task is not None:
-        stream_task.cancel()
+    for task in app.state.kafka_stream_tasks.values():
+        task.cancel()
     relay_task.cancel()
     await app.state.producer.stop()
     await app.state.authz.aclose()
@@ -835,6 +834,143 @@ async def set_pipeline_schedule(name: str, body: SetPipelineScheduleRequest, pri
     return result
 
 
+def _kafka_stream_task_key(tenant_id: str, name: str) -> tuple[str, str]:
+    return (tenant_id, name)
+
+
+def _spawn_kafka_stream_task(source: dict) -> None:
+    """(Re)starts a consumer task for a Kafka stream source — called at
+    lifespan hydration and from the enable/register routes below. A
+    live-swap: cancels any existing task for this (tenant, name) first,
+    so re-registering an already-running stream with new config (topic,
+    key_field, batch interval) restarts it with the new settings rather
+    than leaving a stale consumer running alongside a new one.
+    """
+    key = _kafka_stream_task_key(source["tenant_id"], source["name"])
+    existing = app.state.kafka_stream_tasks.get(key)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    connector_urn = build_urn(source["tenant_id"], "global", "connector", f"kafka-stream-{source['name']}")
+    app.state.kafka_stream_tasks[key] = asyncio.create_task(
+        stream_connector.consume_stream_forever(
+            source=source,
+            kafka_bootstrap=KAFKA_BOOTSTRAP,
+            iceberg_config=ICEBERG_CONFIG,
+            connector_urn=connector_urn,
+            pool=app.state.pool,
+            record_sync=functools.partial(
+                _finalize_sync,
+                actor=EventActor(type="service_account", urn=STREAM_INGEST_URN, on_behalf_of=None),
+            ),
+        )
+    )
+
+
+def _cancel_kafka_stream_task(tenant_id: str, name: str) -> None:
+    key = _kafka_stream_task_key(tenant_id, name)
+    task = app.state.kafka_stream_tasks.pop(key, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+class RegisterKafkaStreamRequest(BaseModel):
+    name: str
+    topic: str
+    key_field: str
+    dataset_name: str
+    batch_interval_seconds: float = 5.0
+
+
+@app.post("/kafka-streams", status_code=201)
+async def register_kafka_stream(body: RegisterKafkaStreamRequest, principal: Principal = Depends(current_principal)) -> dict:
+    """The no-code streaming connector: register a Kafka topic by name
+    alone — which field is the record's key, which dataset it lands in,
+    how often to commit a snapshot. Same authentication tier as
+    `/sources`/`/plugins`. Starts consuming immediately, no restart —
+    same as enabling a plugin.
+    """
+    await _authorize_workspace(principal, "write")
+    if body.batch_interval_seconds <= 0:
+        raise HolonError.invalid_argument("InvalidBatchInterval", "batch_interval_seconds must be positive")
+    try:
+        source = await kafka_stream_registry.register_source(
+            app.state.pool,
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            topic=body.topic,
+            key_field=body.key_field,
+            dataset_name=body.dataset_name,
+            batch_interval_seconds=body.batch_interval_seconds,
+            created_by_urn=principal.urn,
+        )
+    except kafka_stream_registry.KafkaStreamConflictError as exc:
+        raise HolonError.conflict('KafkaStreamConflict', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="connectivity.kafka_stream.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="kafka_stream",
+        resource_urn=build_urn(principal.tenant_id, "global", "kafka-stream", body.name),
+        extra={"topic": body.topic, "dataset_name": body.dataset_name},
+    )
+    _spawn_kafka_stream_task(source)
+    return source
+
+
+@app.get("/kafka-streams")
+async def list_kafka_streams(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await kafka_stream_registry.list_sources(app.state.pool, principal.tenant_id)
+
+
+def _kafka_stream_not_found(name: str) -> HolonError:
+    return HolonError.not_found("KafkaStreamNotFound", f"no Kafka stream registered as {name!r}", name=name)
+
+
+@app.get("/kafka-streams/{name}")
+async def get_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "read")
+    source = await kafka_stream_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _kafka_stream_not_found(name)
+    return source
+
+
+@app.post("/kafka-streams/{name}/disable")
+async def disable_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await kafka_stream_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _kafka_stream_not_found(name)
+    result = await kafka_stream_registry.set_status(app.state.pool, principal.tenant_id, name, "disabled")
+    _cancel_kafka_stream_task(principal.tenant_id, name)
+    return result
+
+
+@app.post("/kafka-streams/{name}/enable")
+async def enable_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await kafka_stream_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _kafka_stream_not_found(name)
+    result = await kafka_stream_registry.set_status(app.state.pool, principal.tenant_id, name, "active")
+    _spawn_kafka_stream_task(result)
+    return result
+
+
+@app.delete("/kafka-streams/{name}")
+async def delete_kafka_stream(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    deleted = await kafka_stream_registry.delete_source(app.state.pool, principal.tenant_id, name)
+    if not deleted:
+        raise _kafka_stream_not_found(name)
+    _cancel_kafka_stream_task(principal.tenant_id, name)
+    return {"deleted": name}
+
+
 class RegisterPluginRequest(BaseModel):
     entry_point: str
 
@@ -856,7 +992,7 @@ async def register_plugin(body: RegisterPluginRequest, principal: Principal = De
             app.state.pool,
             entry_point=body.entry_point,
             tenant_id=principal.tenant_id,
-            reserved_dataset_names=RESERVED_DATASET_NAMES,
+            reserved_dataset_names=await _reserved_dataset_names(app.state.pool),
         )
     except plugin_registry.PluginConflictError as exc:
         raise HolonError.conflict('PluginConflict', str(exc)) from exc
@@ -1056,7 +1192,7 @@ async def register_source(
             schedule_interval_minutes=body.schedule_interval_minutes,
             cursor_property=body.cursor_property,
             incremental_param=body.incremental_param,
-            reserved_dataset_names=RESERVED_DATASET_NAMES,
+            reserved_dataset_names=await _reserved_dataset_names(app.state.pool),
         )
     except generic_source_registry.SourceConflictError as exc:
         raise HolonError.conflict('PluginConflict', str(exc)) from exc
