@@ -64,9 +64,6 @@ jobs:
           echo "HOLON_EMBEDDING_PROVIDER=local" >> .env
           echo "HOLON_INTELLIGENCE_RUNTIME=runc" >> .env
           echo "HOLON_LLM_PROVIDER=fake" >> .env
-          # test_streaming_connector.py needs the background inventory
-          # consumer actually running — off by default everywhere else.
-          echo "HOLON_ENABLE_INVENTORY_STREAM=true" >> .env
           # A handful of white-box test files (test_dlq.py,
           # test_bitemporal_history.py, etc.) connect to Postgres/OpenSearch
           # directly, reading these two credentials from os.environ (falling

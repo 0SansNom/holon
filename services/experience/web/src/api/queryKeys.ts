@@ -79,6 +79,7 @@ export const queryKeys = {
 
   sources: () => ["sources"] as const,
   plugins: () => ["plugins"] as const,
+  kafkaStreams: () => ["kafkaStreams"] as const,
   syncs: () => ["syncs"] as const,
   connections: () => ["connections"] as const,
   writeTargets: () => ["writeTargets"] as const,
