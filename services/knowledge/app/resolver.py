@@ -1,18 +1,4 @@
-"""Iceberg / DuckDB instance resolution with push-down filters.
-
-`serving_store.py` materializes every row into Postgres once per sync, and
-`main.py`'s `_resolve_one`/`_resolve_many` read from there. This module's
-two remaining jobs are (1) feeding that materialization from
-`catalog._catalogue_sync`, once per sync, and (2) the federated
-fallback when the serving store has no entry yet for a key — a live,
-query-on-read scan is still the right thing to do in both cases, just no
-longer on every request.
-
-When a point/filter lookup is requested, Iceberg `row_filter` is applied
-so Arrow never materializes the whole table into memory.
-
-Every ObjectType resolves through `fetch_generic`.
-"""
+"""Iceberg and DuckDB instance resolution with push-down filters."""
 
 from __future__ import annotations
 
@@ -102,3 +88,46 @@ def fetch_generic(
     if order_col:
         return _duck_select(arrow_table, f'SELECT * FROM t ORDER BY "{order_col}"')
     return _duck_select(arrow_table, "SELECT * FROM t")
+
+
+def dataset_schema_and_stats(dataset_name: str, **iceberg_config) -> dict:
+    """The Iceberg table's own declared schema (field name/type/required —
+    not inferred from one sample row, the actual committed schema) plus
+    per-column stats computed over every row currently in the table.
+    Heavier than `fetch_generic`'s single-row preview (a full scan), so
+    this is its own call, not folded into `preview_dataset` — callers
+    fetch it only when they actually want to look, not on every render.
+
+    One column's stats failing (MIN/MAX on a struct/list-typed column,
+    which DuckDB can't order) degrades that column to `null`s rather
+    than failing the whole response — every other column's stats are
+    still real numbers, not "unavailable" because of one odd one.
+    """
+    table = _load_table(dataset_name, **iceberg_config)
+    fields = [
+        {"name": f.name, "type": str(f.field_type), "required": bool(f.required)}
+        for f in table.schema().fields
+    ]
+    arrow_table = _scan_arrow(table)
+    con = duckdb.connect()
+    con.register("t", arrow_table)
+    row_count = con.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+
+    columns = []
+    for field in fields:
+        name = field["name"]
+        non_null_count = distinct_count = min_value = max_value = None
+        try:
+            non_null_count, distinct_count, min_value, max_value = con.execute(
+                f'SELECT COUNT("{name}"), COUNT(DISTINCT "{name}"), MIN("{name}")::VARCHAR, MAX("{name}")::VARCHAR FROM t'
+            ).fetchone()
+        except duckdb.Error:
+            pass
+        columns.append({
+            **field,
+            "null_count": (row_count - non_null_count) if non_null_count is not None else None,
+            "distinct_count": distinct_count,
+            "min": min_value,
+            "max": max_value,
+        })
+    return {"row_count": row_count, "columns": columns}

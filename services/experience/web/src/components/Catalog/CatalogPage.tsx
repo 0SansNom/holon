@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Button, Callout, Spinner, Tag } from "@blueprintjs/core";
-import { useDatasetPreview, useDatasets, useObjectTypes } from "../../api/hooks";
+import { useDatasetPreview, useDatasetStats, useDatasetVersions, useDatasets, useObjectTypes } from "../../api/hooks";
 import type { CatalogDataset, ObjectType } from "../../api/knowledge";
 import { EmptyState } from "../common/ListPrimitives";
 import { RegistryPage } from "../common/PageLayout";
@@ -24,6 +24,10 @@ function DatasetDetail({
 }) {
   const navigate = useNavigate();
   const { data: preview, isLoading, error } = useDatasetPreview(dataset.display_name);
+  const [showStats, setShowStats] = useState(false);
+  const [showVersions, setShowVersions] = useState(false);
+  const { data: stats, isLoading: statsLoading } = useDatasetStats(dataset.display_name, showStats);
+  const { data: versions, isLoading: versionsLoading } = useDatasetVersions(dataset.display_name, showVersions);
 
   return (
     <div className="hl-panel hl-mt-md">
@@ -107,6 +111,96 @@ function DatasetDetail({
       )}
       {preview && preview.columns.length === 0 && (
         <p className="hl-text-muted-sm">Dataset has no rows to preview.</p>
+      )}
+
+      <div className="hl-flex-between hl-mt-md hl-mb-sm">
+        <div className="hl-section-title">Schema & stats</div>
+        <Button small minimal icon={showStats ? "chevron-up" : "chevron-down"} onClick={() => setShowStats((s) => !s)}>
+          {showStats ? "Hide" : "Show"}
+        </Button>
+      </div>
+      {showStats && (
+        <>
+          {statsLoading && (
+            <div className="hl-flex-row hl-items-center hl-gap-sm">
+              <Spinner size={16} />
+              <span className="hl-text-muted-sm">Scanning {dataset.row_count.toLocaleString()} rows…</span>
+            </div>
+          )}
+          {stats && stats.columns.length > 0 && (
+            <div className="hl-table-scroll">
+              <table className="hl-data-table hl-data-table-compact">
+                <thead>
+                  <tr>
+                    <th>Column</th>
+                    <th>Type</th>
+                    <th>Nulls</th>
+                    <th>Distinct</th>
+                    <th>Min</th>
+                    <th>Max</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.columns.map((col) => (
+                    <tr key={col.name} className="hl-data-table-row">
+                      <td className="hl-mono">{col.name}</td>
+                      <td className="hl-mono hl-text-muted-sm">{col.type}</td>
+                      <td>{col.null_count ?? "—"}</td>
+                      <td>{col.distinct_count ?? "—"}</td>
+                      <td className="hl-mono hl-text-muted-sm">{col.min ?? "—"}</td>
+                      <td className="hl-mono hl-text-muted-sm">{col.max ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="hl-flex-between hl-mt-md hl-mb-sm">
+        <div className="hl-section-title">Snapshot history</div>
+        <Button
+          small
+          minimal
+          icon={showVersions ? "chevron-up" : "chevron-down"}
+          onClick={() => setShowVersions((s) => !s)}
+        >
+          {showVersions ? "Hide" : "Show"}
+        </Button>
+      </div>
+      {showVersions && (
+        <>
+          {versionsLoading && (
+            <div className="hl-flex-row hl-items-center hl-gap-sm">
+              <Spinner size={16} />
+              <span className="hl-text-muted-sm">Loading history…</span>
+            </div>
+          )}
+          {versions && versions.length > 0 && (
+            <div className="hl-table-scroll">
+              <table className="hl-data-table hl-data-table-compact">
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>Snapshot</th>
+                    <th>Rows</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {versions.map((v) => (
+                    <tr key={v.urn} className="hl-data-table-row">
+                      <td className="hl-text-muted-sm">{formatWhen(v.created_at)}</td>
+                      <td className="hl-mono hl-text-muted-sm">{String(v.snapshot_id)}</td>
+                      <td>{v.row_count.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {versions && versions.length === 0 && <p className="hl-text-muted-sm">No history recorded.</p>}
+        </>
       )}
 
       <p className="hl-text-muted-sm hl-mt-md hl-mono" style={{ wordBreak: "break-all" }}>
@@ -233,7 +327,7 @@ export function CatalogPage() {
             </table>
           </div>
 
-          {selected && <DatasetDetail dataset={selected} mappedTypes={mappedForSelected} />}
+          {selected && <DatasetDetail key={selected.urn} dataset={selected} mappedTypes={mappedForSelected} />}
         </>
       )}
     </RegistryPage>
