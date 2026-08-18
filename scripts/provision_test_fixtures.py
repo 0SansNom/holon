@@ -242,6 +242,22 @@ def main() -> None:
 
     status, body = client.request(
         "POST",
+        f"{CONNECTIVITY}/kafka-streams",
+        token=editor_token,
+        body={
+            "name": "inventory-levels-stream",
+            "topic": "external-inventory-stream",
+            "key_field": "sku",
+            "dataset_name": "inventory_levels",
+            "batch_interval_seconds": 5,
+        },
+    )
+    if status not in (201, 409):
+        raise SystemExit(f"kafka-stream inventory-levels-stream: {status} {body}")
+    print(f"  kafka-stream inventory-levels-stream: {status}")
+
+    status, body = client.request(
+        "POST",
         f"{CONNECTIVITY}/write-targets",
         token=editor_token,
         body={
