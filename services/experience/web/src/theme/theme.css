@@ -53,6 +53,16 @@
   /* elevation */
   --hl-shadow-sm: 0 1px 2px rgba(16, 22, 34, 0.06);
   --hl-shadow-md: 0 1px 3px rgba(16, 22, 34, 0.08);
+
+  /* aliases used by object/ontology chrome (must resolve — transparent
+     fallbacks made cards indistinguishable from the app canvas) */
+  --hl-bg: var(--hl-bg-app);
+  --hl-panel-bg: var(--hl-bg-panel);
+  --hl-surface: var(--hl-bg-panel);
+  /* White card on the gray app canvas — not panel-raised (that recedes). */
+  --hl-surface-raised: var(--hl-bg-panel);
+  --hl-hover: var(--hl-bg-panel-raised);
+  --hl-radius: var(--hl-radius-md);
 }
 
 /* Blueprint ships its own CSS-custom-property design-token system
@@ -899,6 +909,15 @@ body,
   gap: var(--hl-space-2);
 }
 
+.hl-ot-overview-section {
+  margin-top: var(--hl-space-4);
+  padding: var(--hl-space-4);
+  background: var(--hl-bg-panel);
+  border: 1px solid var(--hl-border);
+  border-radius: var(--hl-radius-lg);
+  box-shadow: var(--hl-shadow-sm);
+}
+
 .hl-ot-overview-section .hl-page-section-title {
   margin-bottom: 0;
 }
@@ -934,31 +953,17 @@ body,
   margin: 0;
 }
 
-.hl-ot-overview-link-graph {
+.hl-ot-overview-rel-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hl-space-4);
+}
+
+.hl-ot-overview-rel-group {
   border: 1px solid var(--hl-border);
   border-radius: var(--hl-radius);
   padding: var(--hl-space-3);
-  background: var(--hl-surface-raised, transparent);
-}
-
-.hl-ot-overview-link-hub {
-  margin-bottom: var(--hl-space-2);
-}
-
-.hl-ot-overview-link-edges {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.hl-ot-overview-link-edges li {
-  display: grid;
-  grid-template-columns: minmax(140px, 1.2fr) minmax(100px, 1fr) minmax(120px, 1.4fr);
-  gap: var(--hl-space-2);
-  align-items: center;
+  background: var(--hl-bg-panel-raised);
 }
 
 .hl-ot-overview-deps {
@@ -1225,20 +1230,28 @@ body,
 
 .hl-oe-ov-overview {
   margin-bottom: var(--hl-space-4);
+  padding: var(--hl-space-4);
+  background: var(--hl-bg-panel);
+  border: 1px solid var(--hl-border);
+  border-radius: var(--hl-radius-lg);
+  box-shadow: var(--hl-shadow-sm);
 }
 
 .hl-oe-ov-prominent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: var(--hl-space-3);
   margin: 0;
 }
 
 .hl-oe-ov-prominent-item {
   margin: 0;
-  padding: var(--hl-space-2);
+  min-width: 0;
+  padding: var(--hl-space-2) var(--hl-space-3);
   border: 1px solid var(--hl-border);
   border-radius: var(--hl-radius);
+  overflow: hidden;
+  background: var(--hl-bg-panel-raised);
 }
 
 .hl-oe-ov-prominent-item dt {
@@ -1248,6 +1261,9 @@ body,
 .hl-oe-ov-prominent-item dd {
   margin: 0;
   font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .hl-oe-ov-configured-stack {
@@ -1334,13 +1350,18 @@ body,
 .hl-oe-link-card {
   border: 1px solid var(--hl-border);
   border-radius: var(--hl-radius);
-  padding: var(--hl-space-2);
+  padding: var(--hl-space-2) var(--hl-space-3);
   margin-bottom: var(--hl-space-2);
-  background: var(--hl-surface-raised, transparent);
+  background: var(--hl-bg-panel);
+  box-shadow: var(--hl-shadow-sm);
 }
 
 .hl-oe-link-card--prominent {
   border-color: color-mix(in srgb, var(--hl-accent, #2d72d2) 45%, var(--hl-border));
+}
+
+.hl-oe-link-card--empty {
+  opacity: 0.72;
 }
 
 .hl-oe-link-card-toggle {

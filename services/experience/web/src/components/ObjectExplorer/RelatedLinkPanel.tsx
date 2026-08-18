@@ -54,8 +54,14 @@ export function RelatedLinkPanel({
     }
   }
 
+  const empty = count === 0;
+
   return (
-    <div className={`hl-oe-link-card${link.visibility === "prominent" ? " hl-oe-link-card--prominent" : ""}`}>
+    <div
+      className={`hl-oe-link-card${link.visibility === "prominent" ? " hl-oe-link-card--prominent" : ""}${
+        empty ? " hl-oe-link-card--empty" : ""
+      }`}
+    >
       <div className="hl-flex-between hl-items-center">
         <Button
           minimal
@@ -65,14 +71,9 @@ export function RelatedLinkPanel({
           className="hl-oe-link-card-toggle"
         >
           <span className="hl-oe-link-card-title">{link.pluralLabel || link.label}</span>
-          {link.visibility === "prominent" && (
-            <Tag minimal intent="primary" className="hl-ml-xs">
-              prominent
-            </Tag>
-          )}
           {link.cardinality && (
-            <Tag minimal className="hl-ml-xs hl-mono">
-              {link.cardinality}
+            <Tag minimal className="hl-ml-xs">
+              {link.cardinality.replaceAll("_", " ")}
             </Tag>
           )}
           {(isLoading || isFetching) && count === undefined ? (
@@ -83,9 +84,9 @@ export function RelatedLinkPanel({
             </Tag>
           )}
         </Button>
-        <Tag minimal className="hl-mono">
-          → {link.relatedType}
-        </Tag>
+        <Link to="/objects/$type" params={{ type: link.relatedType }} className="hl-link-accent">
+          {link.relatedType}
+        </Link>
       </div>
 
       {expanded && (
@@ -128,8 +129,10 @@ export function RelatedLinkPanel({
               <tbody>
                 {data.data.map((item) => {
                   const itemId = String(item.id);
+                  const rawTitle =
+                    (item.title as string | undefined) ?? (item.name as string | undefined) ?? "";
                   const itemLabel =
-                    (item.title as string | undefined) ?? (item.name as string | undefined) ?? itemId;
+                    rawTitle && rawTitle !== itemId ? rawTitle : `${link.relatedType} ${itemId}`;
                   return (
                     <tr key={itemId} className="hl-data-table-row">
                       <td>
@@ -163,7 +166,7 @@ export function RelatedLinkPanel({
           )}
           {midLinks.length > 0 && (
             <div className="hl-mt-sm">
-              <div className="hl-text-muted-sm hl-mb-xs">Link objects (mid)</div>
+              <div className="hl-text-muted-sm hl-mb-xs">Via</div>
               <div className="hl-tag-row">
                 {midLinks.map((mid, i) => {
                   const midType = mid.object_type;
@@ -172,12 +175,12 @@ export function RelatedLinkPanel({
                     (mid.object?.title as string | undefined) ??
                     (mid.object?.name as string | undefined) ??
                     midId ??
-                    `mid-${i}`;
+                    `link-${i}`;
                   if (midType && midId) {
                     return (
                       <Link key={`${midType}-${midId}-${i}`} to="/objects/$type/$id" params={{ type: midType, id: midId }}>
                         <Tag minimal interactive icon="diagram-tree">
-                          {midType}/{midTitle}
+                          {midTitle}
                         </Tag>
                       </Link>
                     );
@@ -190,12 +193,6 @@ export function RelatedLinkPanel({
                 })}
               </div>
             </div>
-          )}
-          {data?.direction && (
-            <p className="hl-text-muted-sm hl-mt-xs">
-              Direction: {data.direction}
-              {data.storage_kind ? ` · ${data.storage_kind}` : ""}
-            </p>
           )}
         </div>
       )}

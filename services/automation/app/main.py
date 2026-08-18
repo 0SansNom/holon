@@ -1,12 +1,6 @@
 """Automation Platform — Workflow Engine.
 
-The Workflow Engine: owns saga orchestration and its
-persisted execution record for Actions whose approval needs a step
-outside Knowledge. See `workflow.py`'s module docstring for details.
-
-Service-to-service only in this build — no end-user reads go through
-Automation directly, so there's no PDP integration here, just JWT auth
-(`make_principal_dependency`), same as Connectivity's internal endpoints.
+Orchestrates saga execution and persisted execution records for actions.
 """
 
 from __future__ import annotations
@@ -142,11 +136,7 @@ async def list_automation_audit_events(
     pageSize: int | None = None,
     pageToken: str | None = None,
 ) -> dict:
-    """Durable Automation audit (workflows, agent-chain triggers).
-
-    Service-to-service surface: scoped to the caller's JWT tenant. No
-    SpiceDB gate (Automation has no PDP); operators use SA tokens.
-    """
+    """Durable Automation audit (workflows, agent-chain triggers)."""
     return await list_events_page(
         app.state.pool,
         principal.tenant_id,
@@ -161,9 +151,7 @@ async def list_automation_audit_events(
 
 @app.get("/workflows/{approval_id}")
 async def get_workflow_execution(approval_id: int, principal: Principal = Depends(current_principal)) -> dict:
-    """Automation's own execution record — proof that Automation, not Knowledge,
-    tracks saga orchestration state.
-    """
+    """Fetch workflow execution record by approval ID."""
     execution = await workflow.get_workflow_execution(app.state.pool, approval_id)
     if execution is None or execution.get("tenant_id") != principal.tenant_id:
         raise HolonError.not_found(

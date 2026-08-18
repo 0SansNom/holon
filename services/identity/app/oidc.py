@@ -1,10 +1,4 @@
-"""OIDC authorization-code + PKCE client (ADR 026 Phase 2).
-
-Enabled when HOLON_OIDC_ISSUER is set. The deployer brings the IdP;
-we only implement the client. Claim → tenant mapping via
-HOLON_OIDC_TENANT_CLAIM (default `tenant_id`) or group prefix
-HOLON_OIDC_TENANT_GROUP_PREFIX (e.g. `tenant:` → group `tenant:filiale-a`).
-"""
+"""OIDC authorization code + PKCE authentication client."""
 
 from __future__ import annotations
 
@@ -77,13 +71,7 @@ async def build_authorize_url(pool: asyncpg.Pool, *, redirect_uri: str) -> dict[
 
 
 async def exchange_code(pool: asyncpg.Pool, *, code: str, state: str) -> dict[str, Any]:
-    """Exchange code for tokens and return **userinfo claims only**.
-
-    We never decode an unverified `id_token`. Trust comes from the token
-    endpoint (TLS + client_secret + PKCE) then the userinfo endpoint with
-    the access_token. Providers without userinfo are rejected — configure
-    JWKS verification separately if you need id_token-only IdPs later.
-    """
+    """Exchange authorization code for tokens and fetch userinfo claims."""
     import httpx
 
     pending = await pool.fetchrow("DELETE FROM oidc_pending_state WHERE state = $1 RETURNING verifier, redirect_uri", state)
@@ -153,16 +141,7 @@ _ROLE_RANK = {"viewer": 1, "editor": 2, "admin": 3}
 
 
 def workspace_roles_from_claims(claims: dict[str, Any]) -> dict[str, str]:
-    """Map IdP groups → ``{workspace_id: relation}`` (highest privilege wins).
-
-    Prefixes (env, defaults):
-    - ``HOLON_OIDC_WORKSPACE_ADMIN_GROUP_PREFIX`` → ``workspace-admin:``
-    - ``HOLON_OIDC_WORKSPACE_EDITOR_GROUP_PREFIX`` → ``workspace-editor:``
-    - ``HOLON_OIDC_WORKSPACE_GROUP_PREFIX`` → ``workspace:`` (viewer)
-
-    This is Holon's day-1 provisioning path without SCIM (ADR 026: SCIM/SAML/MFA
-    stay on the IdP).
-    """
+    """Map IdP groups to workspace roles."""
     prefixes = (
         ("admin", os.environ.get("HOLON_OIDC_WORKSPACE_ADMIN_GROUP_PREFIX", "workspace-admin:")),
         ("editor", os.environ.get("HOLON_OIDC_WORKSPACE_EDITOR_GROUP_PREFIX", "workspace-editor:")),

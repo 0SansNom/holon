@@ -21,6 +21,9 @@ describe("isEphemeralTestName", () => {
     expect(isEphemeralTestName("Supplier.flag292d5b7f")).toBe(true);
     expect(isEphemeralTestName("iface_reviews0181ae13")).toBe(true);
     expect(isEphemeralTestName("TestInOperator_1786547170")).toBe(true);
+    expect(isEphemeralTestName("ordersViaGenJoin_0118d88c")).toBe(true);
+    expect(isEphemeralTestName("Customer.ordersViaMidOv_0a5b311e")).toBe(true);
+    expect(isEphemeralTestName("productsViaJoinExec_1786916091265")).toBe(true);
   });
 });
 
