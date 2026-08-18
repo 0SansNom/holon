@@ -1,13 +1,4 @@
-"""RelationType registry — FK, join-dataset (M:N), and object-backed links.
-
-Unlike ObjectType, a workspace admin can register a RelationType at runtime
-directly (no draft step); cardinality/endpoint/storage validation is
-enforced synchronously here. Traversal reads this registry live.
-
-Foundry Link Type metadata lives here too: each side has its own
-display/plural/API name + visibility; the type itself carries
-lifecycle_status and type_classes.
-"""
+"""RelationType registry — link definitions across foreign keys, join datasets, and object-backed links."""
 
 from __future__ import annotations
 

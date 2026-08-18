@@ -1,30 +1,10 @@
-import React, { type ComponentType, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
 import { Shell } from "./components/Shell/Shell";
 import { LoginScreen } from "./components/Auth/LoginScreen";
-import { RouteBoundary } from "./components/common/RouteBoundary";
-import { DetailPageSkeleton, RegistryPageSkeleton, TablePageSkeleton } from "./components/common/Skeleton";
+import { DetailPageSkeleton, TablePageSkeleton } from "./components/common/Skeleton";
 import { useAuthStore } from "./store/auth";
 import { parseOntologyTab } from "./components/Ontology/ontologyTabs";
-
-function lazyPage(
-  factory: () => Promise<Record<string, ComponentType<object>>>,
-  exportName: string,
-  fallback: ReactNode = <RegistryPageSkeleton />,
-): () => React.JSX.Element {
-  const LazyComp = React.lazy(async () => {
-    const mod = await factory();
-    return { default: mod[exportName] };
-  });
-
-  return function LazyWrapper() {
-    return (
-      <RouteBoundary fallback={fallback}>
-        <LazyComp />
-      </RouteBoundary>
-    );
-  };
-}
+import { lazyPage } from "./lib/lazyPage";
 
 const ObjectTypeListPage = lazyPage(() => import("./components/ObjectExplorer/ObjectTypeListPage"), "ObjectTypeListPage");
 const ObjectTablePage = lazyPage(

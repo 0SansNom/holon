@@ -1,10 +1,4 @@
-"""Basic spend controls for Intelligence — RPM per principal + daily token quota per tenant.
-
-Postgres-backed so multiple replicas share the same counters. Env:
-
-  HOLON_INTELLIGENCE_RPM                 default 30 (0 = unlimited)
-  HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA   default 200000 (0 = unlimited)
-"""
+"""Rate limiting and token spend controls for Intelligence service."""
 
 from __future__ import annotations
 

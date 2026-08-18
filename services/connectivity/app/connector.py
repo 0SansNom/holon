@@ -1,14 +1,4 @@
-"""PostgreSQL connector — core-circle PostgreSQL source.
-
-Read-only, always. A connector MUST NEVER write back to its source;
-the only mutation path into a source system is a governed ontology
-Action — Knowledge's own operational state, not this connector.
-
-Two tables from the same source system, two explicit functions rather
-than one generic "read a table" abstraction — there are exactly two of
-them, and a real connector's field list per table is never actually
-uniform enough to templatize cheaply.
-"""
+"""PostgreSQL connector — core PostgreSQL source ingestion."""
 
 from __future__ import annotations
 

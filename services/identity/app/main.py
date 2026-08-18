@@ -1,9 +1,6 @@
 """Identity Platform — Tenant, Workspace, and Principal management.
 
-Owns Tenant, Workspace and Principal, issues bearer tokens, and loads the
-shared SpiceDB schema plus the relationships it owns (tenant
-membership, workspace access). The actual authorization decisions are
-made where the resources being read live — see `holon_common.authz`.
+Manages authentication, tenant/workspace/principal registration, and token issuance.
 """
 
 from __future__ import annotations
@@ -644,11 +641,7 @@ async def tenants_list(principal: Principal = Depends(current_principal)) -> lis
 
 @app.post("/tenants", status_code=201)
 async def tenants_create(request: CreateTenantRequest, principal: Principal = Depends(current_principal)) -> dict:
-    """Create a filiale tenant row only. No SpiceDB membership for the
-    caller — instance admins must not become cross-tenant subjects
-    (ADR 026). First same-tenant principal / workspace admin is granted
-    via `POST /principals` and `POST /workspaces` (`initial_admin_urn`).
-    """
+    """Create a new tenant."""
     await _authorize_bootstrap_governance(principal)
     if await get_tenant(app.state.pool, request.tenant_id) is not None:
         raise HolonError.conflict('TenantAlreadyExists', f"tenant already exists: {request.tenant_id}")

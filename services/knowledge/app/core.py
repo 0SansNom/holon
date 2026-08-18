@@ -1,21 +1,6 @@
-"""Shared read/authorization core, extracted out of `main.py`.
+"""Shared data access and authorization core for Knowledge service.
 
-Every router module (`routers/*.py`) imports from here rather than from
-`main.py` — this is the one piece every route group needs regardless of
-domain: `_authorize_object_type` (28 call sites across every route group
-that touches an ObjectType), `_resolve_one`/`_resolve_many` (the single
-read choke point every object-read/action/export endpoint goes through),
-and the masking/derived-property machinery those two call internally.
-
-State (`pool`/`authz`/`allowed_countries`/`producer`) is a plain module
-singleton, not threaded through `Request` — this service runs as one
-process with one `lifespan()` (tests are black-box HTTP only, never
-multiple in-process app instances), so there is nothing a `Request`-based
-approach would guard against that a module-level assignment in
-`lifespan()` doesn't already handle just as safely, at a fraction of the
-diff. `main.py`'s `lifespan()` sets these once at startup, mirroring the
-same values it already assigns to `app.state.*` for its own internal use
-(background-task wiring, etc.).
+Provides object resolution, authorization checks, masking, and derived property evaluation.
 """
 
 from __future__ import annotations
