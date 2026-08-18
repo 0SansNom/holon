@@ -1,10 +1,6 @@
 """Connectivity Platform — Connector execution and ingestion.
 
-Runs registered connectors (developer plugins, generic REST sources,
-continuous Kafka stream when enabled), lands each in the Iceberg raw
-zone, and announces every new snapshot on the Platform Event Bus via a
-transactional outbox. Everything downstream — cataloguing, ontology
-mapping, dashboards — reacts to that event.
+Executes registered connectors and lands data in the Iceberg raw zone.
 """
 
 from __future__ import annotations
@@ -17,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import asyncpg
 import httpx
@@ -195,10 +191,7 @@ current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 class SyncRequest(BaseModel):
     dataset: str = "customers"
-    # Target workspace for dataset URNs. Plugins / generic sources use this
-    # (or the source's stored workspace_id) instead of blindly using
-    # HOLON_WORKSPACE_ID — otherwise a filiale tenant writes under the
-    # wrong workspace (ADR 026).
+    # Target workspace for dataset URNs (or source workspace_id)
     workspace_id: Optional[str] = None
 
 
@@ -428,23 +421,27 @@ async def _run_sync_for_dataset(
     Runtime dispatch: active plugin for this tenant → generic REST source.
     No privileged in-process dataset map.
     """
+    write_mode: Literal["overwrite", "append"] = "overwrite"
     plugin = await plugin_registry.load_active_plugin_for_dataset(app.state.pool, dataset_name, tenant_id)
     if plugin is not None:
         local_name = plugin.manifest.connector_local_name or f"plugin-{plugin.manifest.name}"
         connector_urn = build_urn(tenant_id, "global", "connector", local_name)
         read = plugin.fetch
-    elif await generic_source_registry.is_registered(app.state.pool, tenant_id, dataset_name):
-        connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
-        read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
     else:
         source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
-        if source is not None:
+        if source is None:
+            raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
+        if source["status"] != "active":
             raise HolonError.conflict(
                 "SourceDisabled",
                 f"source {dataset_name!r} is disabled — enable it first",
                 dataset_name=dataset_name,
             )
-        raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
+        connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
+        read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
+        # Use append mode for cursor-configured sources, overwrite for full sync
+        if source["cursor_property"]:
+            write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
     try:
@@ -455,7 +452,7 @@ async def _run_sync_for_dataset(
         raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
     except httpx.RequestError as exc:
         raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
-    result = await asyncio.to_thread(iceberg_writer.write_snapshot, rows, dataset_name, **ICEBERG_CONFIG)
+    result = await asyncio.to_thread(iceberg_writer.write_snapshot, rows, dataset_name, mode=write_mode, **ICEBERG_CONFIG)
     finished_at = datetime.now(timezone.utc)
 
     return await _finalize_sync(
@@ -905,11 +902,7 @@ async def set_plugin_schedule(name: str, body: SetPluginScheduleRequest, princip
 class RegisterConnectionRequest(BaseModel):
     name: str
     auth_header_name: str
-    # Optional so an edit (same `name`, upsert) can omit it to keep the
-    # existing secret — same "never echoed back, COALESCE on update"
-    # convention `RegisterSourceRequest.auth_header_value` already uses.
-    # A brand-new connection still requires one; enforced client-side
-    # the same way the source-edit form already does, not here.
+    # Optional; if omitted on edit, existing secret is retained
     auth_header_value: Optional[str] = None
 
 
@@ -1070,14 +1063,7 @@ async def delete_source(name: str, principal: Principal = Depends(current_princi
     return {"deleted": name}
 
 
-# One exception: a connector never writes back to its source, EXCEPT
-# as part of an already-approved, audited ontology Action. This endpoint
-# exists only to be called by Automation's Workflow Engine — the
-# saga orchestrator for `Customer.closeAccount` — never by a connector's
-# own sync path.
-#
-# `current_principal` alone proves a valid tenant-scoped JWT, which any
-# authenticated principal has — it does NOT prove the caller is the workflow engine.
+# Writeback endpoint used by Automation Workflow Engine
 CLOSE_ACCOUNT_FAILURE_SENTINEL = "__simulate_failure__"
 WORKFLOW_ENGINE_LOCAL_NAME = "automation-workflow-engine"
 WORKFLOW_ENGINE_URN = build_urn(TENANT_ID, "global", "service-account", WORKFLOW_ENGINE_LOCAL_NAME)

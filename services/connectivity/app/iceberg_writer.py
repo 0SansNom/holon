@@ -1,28 +1,17 @@
-"""Raw zone writer — Apache Iceberg via a REST catalog.
+"""Raw zone writer — Apache Iceberg via REST catalog.
 
-Each sync fully overwrites the table, producing one new immutable,
-content-addressed snapshot (DatasetVersion = immutable snapshot).
-
-Since the serving store started reading this same catalog from
-Knowledge's Kafka consumer — asynchronously, decoupled from a sync's
-request/response cycle — a commit here can now genuinely overlap with a
-Knowledge's Kafka consumer — asynchronously, decoupled from a sync's
-request/response cycle — a commit here can now genuinely overlap with a
-concurrent materialization read on iceberg-rest's demo catalog backend
-(SQLite, single-writer). That surfaces as a transient
-`SQLITE_BUSY`/`CommitStateUnknownException`, not a real conflict (the
-overwrite is idempotent — retrying just re-applies the same rows), so
-`table.overwrite()` gets a small bounded retry rather than a bare 500.
+Supports table overwrite (full refresh) and append (incremental batch) write modes.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog
-from pyiceberg.exceptions import NamespaceAlreadyExistsError
+from pyiceberg.exceptions import CommitStateUnknownException, NamespaceAlreadyExistsError, NoSuchTableError
 
 NAMESPACE = "raw"
 _OVERWRITE_RETRIES = 4
@@ -64,6 +53,7 @@ def write_snapshot(
     access_key: str,
     secret_key: str,
     region: str,
+    mode: Literal["overwrite", "append"] = "overwrite",
 ) -> IcebergWriteResult:
     catalog = _load_catalog(catalog_uri, warehouse, s3_endpoint, access_key, secret_key, region)
 
@@ -72,14 +62,38 @@ def write_snapshot(
     except NamespaceAlreadyExistsError:
         pass
 
-    arrow_table = pa.Table.from_pylist(rows)
     identifier = (NAMESPACE, table_name)
+
+    if not rows and mode == "append":
+        # Empty batch with append mode: return current table snapshot state unchanged
+        try:
+            table = catalog.load_table(identifier)
+        except NoSuchTableError:
+            raise ValueError(
+                f"table {table_name!r} doesn't exist yet and this incremental batch is empty — "
+                "nothing to create it from"
+            ) from None
+        snapshot = table.current_snapshot()
+        return IcebergWriteResult(
+            namespace=NAMESPACE, table=table_name, snapshot_id=snapshot.snapshot_id,
+            row_count=_total_records(snapshot, fallback=0), location=table.location(),
+        )
+
+    arrow_table = pa.Table.from_pylist(rows)
     table = catalog.create_table_if_not_exists(identifier, schema=arrow_table.schema)
+    commit = table.overwrite if mode == "overwrite" else table.append
 
     for attempt in range(1, _OVERWRITE_RETRIES + 1):
         try:
-            table.overwrite(arrow_table)
+            commit(arrow_table)
             break
+        except CommitStateUnknownException:
+            # Append mode: do not retry CommitStateUnknownException to avoid duplicate rows
+            if mode == "append":
+                raise
+            if attempt == _OVERWRITE_RETRIES:
+                raise
+            time.sleep(_OVERWRITE_RETRY_DELAY_SECONDS)
         except Exception:
             if attempt == _OVERWRITE_RETRIES:
                 raise
@@ -91,6 +105,12 @@ def write_snapshot(
         namespace=NAMESPACE,
         table=table_name,
         snapshot_id=snapshot.snapshot_id,
-        row_count=len(rows),
+        # Total row count of current snapshot
+        row_count=_total_records(snapshot, fallback=len(rows)),
         location=table.location(),
     )
+
+
+def _total_records(snapshot, *, fallback: int) -> int:
+    total = snapshot.summary.get("total-records") if snapshot.summary is not None else None
+    return int(total) if total is not None else fallback

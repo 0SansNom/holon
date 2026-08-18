@@ -423,6 +423,51 @@ def test_incremental_cursor_is_computed_and_persisted_after_a_sync(jdoe_token: s
     assert updated2["last_cursor_value"] == "8", updated2
 
 
+def test_a_cursor_configured_source_appends_instead_of_overwriting(jdoe_token: str) -> None:
+    """The bug this exists to catch: a source with `cursor_property` set
+    fetches only what's new each time — overwriting the Iceberg table
+    with just that batch would silently discard every row synced
+    before it. `reviews-api` doesn't actually filter by the cursor (see
+    the previous test), which is exactly what makes this provable here:
+    each of these three syncs writes the *same* 8 rows again, so the
+    table's total only grows (8, 16, 24) if they're genuinely being
+    appended rather than replacing one another.
+    """
+    name = _unique_name("append_accumulates")
+    status, registration = _request(
+        "POST", f"{CONNECTIVITY}/sources", token=jdoe_token,
+        body={"name": name, "base_url": REVIEWS_API, "cursor_property": "id", "incremental_param": "since_id"},
+    )
+    assert status == 200, registration
+
+    status, first = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
+    assert status == 200 and first["row_count"] == 8, first
+
+    status, second = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
+    assert status == 200 and second["row_count"] == 16, second
+    assert second["snapshot_id"] != first["snapshot_id"], second
+
+    status, third = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
+    assert status == 200 and third["row_count"] == 24, third
+
+
+def test_a_non_cursor_source_still_overwrites_like_before(jdoe_token: str) -> None:
+    """No `cursor_property` means every sync re-fetches the full dataset —
+    overwrite (the default, unchanged) is still correct there; append
+    would wrongly keep growing a table that's supposed to be a full
+    refresh each time.
+    """
+    name = _unique_name("full_refresh")
+    status, registration = _request("POST", f"{CONNECTIVITY}/sources", token=jdoe_token, body={"name": name, "base_url": REVIEWS_API})
+    assert status == 200, registration
+
+    status, first = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
+    assert status == 200 and first["row_count"] == 8, first
+
+    status, second = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
+    assert status == 200 and second["row_count"] == 8, second
+
+
 def test_registering_a_source_with_only_one_of_the_incremental_fields_is_accepted(jdoe_token: str) -> None:
     """Neither field requires the other at registration time."""
     name = _unique_name("cursor_only")
