@@ -1,21 +1,6 @@
-"""Write Target registry — the declarative counterpart, on the write
-side, to `generic_source_registry.py`'s no-code REST connector on the
-read side. Scoped deliberately narrower: a write target names a real
-Postgres table (in the upstream *source* database, `SOURCE_DB_URL`, not
-this service's own `app.state.pool`) and an explicit allow-list of
-`{property: column}` pairs a governed Action is permitted to write —
-never an arbitrary REST API. Writing back to a third-party REST API
-generically isn't a solvable problem the same way reading from one is:
-there's no consistent PATCH/PUT convention across vendors the way there
-is a consistent "GET + optional pagination" shape, so this is bounded to
-the one real writeback mechanism this build already has (direct
-Postgres), not extended to the no-code REST connector.
+"""Write Target registry — declarative writeback registry to target databases.
 
-The only mutation path into a source system remains a governed ontology
-Action — see `connector.py`'s module docstring ("a connector MUST NEVER
-write back to its source") and `main.py`'s `POST /source/{dataset_name}
-/{instance_id}/write`, gated to Automation's Workflow Engine exactly
-like the pre-existing `POST /source/customers/{id}/close-account`.
+Registers Postgres write targets and allowed property-to-column mappings for writeback actions.
 """
 
 from __future__ import annotations
@@ -109,23 +94,13 @@ async def delete_write_target(pool: asyncpg.Pool, tenant_id: str, dataset_name: 
 async def apply_write(
     pool: asyncpg.Pool, source_db_url: str, *, tenant_id: str, dataset_name: str, instance_id: str, edits: dict[str, Any]
 ) -> dict:
-    """The generic counterpart to `close_source_customer_account`'s
-    inline raw SQL — resolves the declarative `write_target` config,
-    validates every edited property is actually allow-listed (never
-    write a column an admin didn't explicitly name), then builds one
-    parameterized `UPDATE` statement. A fresh `asyncpg.connect` per call
-    against `source_db_url`, same as the pre-existing closeAccount/
-    get-source-customer endpoints — this is a rare, human-approval-gated
-    path, not a hot one, so a per-call connection is the same acceptable
-    trade-off it already was there.
-    """
+    """Apply allow-listed edits to a registered write target in source database."""
     target = await get_write_target(pool, tenant_id, dataset_name)
     if target is None:
         raise UnknownWriteTargetError(f"no write target registered for dataset {dataset_name!r}")
 
     unknown = set(edits) - set(target["allowed_properties"])
-    # Knowledge-side-only properties (e.g. account_closed_reason) may ride
-    # along on the event payload — drop them rather than rejecting the write.
+    # Filter out properties not in allowed_properties
     filtered = {k: v for k, v in edits.items() if k in target["allowed_properties"]}
     if not filtered:
         raise WriteTargetConfigError(

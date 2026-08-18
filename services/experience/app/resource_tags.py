@@ -1,19 +1,4 @@
-"""Resource tags + featured status.
-
-Lightweight, unversioned metadata attachable to any URN-addressable
-resource (ObjectTypes, Applications today — more resource kinds as their
-own ReBAC hardening lands, see `main.py`'s `_RESOURCE_AUTHZ_TYPE`). Same
-"side table keyed by resource identity, not a column on the resource's
-own table" shape Knowledge's `instance_marking` already uses
-(`knowledge/app/ontology/markings.py`) for a conceptually similar
-lightweight-metadata case.
-
-Deliberately named `featured`, not `promoted` — Applications already have
-a *different*, pre-existing `/api/applications/{name}/promote` (the
-draft->promoted version-publish gate, `application.status`). Reusing the
-word here for Foundry's Projects-page "mark as broadly useful" flag would
-collide with that unrelated meaning.
-"""
+"""Resource tags and featured status registry."""
 
 from __future__ import annotations
 

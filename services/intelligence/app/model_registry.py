@@ -1,29 +1,4 @@
-"""Model Integration —
-deliberately bounded, stated plainly up front rather than silently
-narrowed later: this registers and serves already-trained model
-artifacts (scikit-learn — no GPU story this environment can't support,
-and no second inference runtime like ONNX for no added value at this
-scale). It does **not** provide training infrastructure, experiment
-tracking, or GPU orchestration — a model is trained *externally* (this
-module has no `fit()` call anywhere) and registered here purely as an
-artifact to serve, the same split Foundry's own docs draw between its
-training/experimentation tooling and a model's deployed serving
-endpoint.
-
-Artifacts live in MinIO (the same S3-compatible object store the
-Iceberg warehouse already uses — `models/` instead of `raw/`, a second
-prefix in the *same* `holon-warehouse` bucket, not a new one) rather
-than a Postgres column: a large binary blob doesn't belong in a
-relational row, the same reasoning that already keeps Dataset content
-in Iceberg instead of JSONB.
-
-Deliberately no in-process artifact cache: every `predict` call
-re-fetches and re-deserializes the artifact fresh, the same "no
-explicit invalidation logic needed" trade-off `function_registry.py`
-already makes for Function plugins — correctness (a re-registered model
-takes effect on the very next call) over micro-optimizing a code path
-this build's data volume never stresses.
-"""
+"""Model Registry — Artifact registration and prediction serving for ML models."""
 
 from __future__ import annotations
 

@@ -1,17 +1,4 @@
-"""Context Builder: the retrieval pipeline that assembles cited,
-permission-filtered context for the LLM Gateway to answer from.
-
-Structural resolution first, semantic fallback only:
-entity resolution and intent classification run before any vector
-search; a question that resolves structurally never touches Qdrant.
-Every structural/lexical channel call goes through Knowledge's existing
-PDP-gated HTTP endpoints (the caller's own bearer token is forwarded
-as-is) — permissions are enforced at the source, never post-filtered
-here.
-
-Entity resolution and intent classification use heuristics against
-glossary terms and a controlled vocabulary of known property/status values.
-"""
+"""Context Builder — Retrieval pipeline for assembling permission-filtered LLM context."""
 
 from __future__ import annotations
 

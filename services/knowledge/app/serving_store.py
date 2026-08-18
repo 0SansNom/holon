@@ -1,20 +1,4 @@
-"""Serving Store — materialized instance caching and history.
-
-Classifies key-based instance reads as **materialized** (low latency) — not
-federated on every request, which is what live scanning alone provided.
-Materialization happens once per sync, inside
-`catalog._catalogue_sync`'s transaction, not once per read.
-
-Every returned row carries `materializedAt`/`sourceLagSeconds` metadata.
-A miss here does not mean the object doesn't exist — it means nothing has been
-materialized for that key yet. Callers degrade to a live federated
-read via `resolver.py` in that case — see `main._resolve_one`/`_resolve_many`.
-
-`object_instance_history`/`get_instance_as_of` add **transaction-time**
-bi-temporal history — "what did the system believe, and when did it record believing it."
-This answers "what did we think Customer/4's email was as of March 3rd," not "what was Customer/4's
-email valid *for* between two real-world dates."
-"""
+"""Serving Store — materialized instance caching and bi-temporal history."""
 
 from __future__ import annotations
 

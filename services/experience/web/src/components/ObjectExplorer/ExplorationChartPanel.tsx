@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import ReactECharts from "echarts-for-react";
+import { ECharts } from "../common/ECharts";
 import { Button, HTMLSelect, Tag } from "@blueprintjs/core";
 import { useThemeStore } from "../../store/theme";
 import {
@@ -136,7 +136,7 @@ export function ExplorationChartPanel({
           {propertyKeys.length === 0 || !series || !option ? (
             <p className="hl-text-muted-sm">No data to chart for this property.</p>
           ) : (
-            <ReactECharts
+            <ECharts
               option={option}
               className="hl-oe-chart"
               onEvents={{ click: handleChartClick }}

@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import { ECharts } from "../common/ECharts";
 import { Card, Tag } from "@blueprintjs/core";
 import type { DashboardWidget } from "../../api/experience";
 import { useThemeStore } from "../../store/theme";
@@ -57,7 +57,7 @@ function KpiWidget({ value }: { value: number }) {
       },
     ],
   };
-  return <ReactECharts option={option} className="hl-chart-sm" />;
+  return <ECharts option={option} className="hl-chart-sm" />;
 }
 
 function TableWidget({ rows }: { rows: Array<Record<string, unknown>> }) {

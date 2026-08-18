@@ -1,20 +1,6 @@
-"""The **external agent tool** plugin type. See `holon_common.plugin`'s module
-docstring for details.
+"""External agent tool plugin registry.
 
-Every tool the Agent Runtime exposes comes from Knowledge's own `/actions` —
-genuine ontology Actions, audited, approval-gated. An agent-tool plugin is
-different: it's a synthetic Action not backed by any ObjectType or Knowledge
-endpoint at all, just a capability registered directly for the model to call.
-
-A plugin must not get more permission than the invoking principal: a plugin
-can't register itself under a name Knowledge's real Actions would produce
-or a name another active agent-tool plugin already owns.
-
-Isolation ("sandbox, outbound only via Gateway"): a plugin's own
-`invoke()` is application code running in this same process. Every plugin
-invocation goes through the same budget/audit machinery every other tool call
-already does — a plugin tool is not a side-channel that escapes budgets,
-TTL, or the transcript just because it isn't a Knowledge Action.
+Registers and resolves synthetic agent tools exposed to the Agent Runtime.
 """
 
 from __future__ import annotations

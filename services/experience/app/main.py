@@ -1,9 +1,4 @@
-"""Experience Platform — serves the Holon React SPA and its Application
-Builder API. It calls Identity and Knowledge over HTTP like any other client.
-Application Builder JSON endpoints live under `/api/*` so they never collide with the
-SPA's client-side routes (`/applications`, `/objects`, etc.) — the catch-all
-serves `index.html` for any other path and lets the SPA's router take over.
-"""
+"""Experience Platform — Serves the React SPA and Application Builder API."""
 
 from __future__ import annotations
 
@@ -73,7 +68,7 @@ AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
 
 
 def _allow_dev_login() -> bool:
-    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "true").lower() in {"1", "true", "yes"}
+    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "false").lower() in {"1", "true", "yes"}
 
 
 def _intelligence_enabled() -> bool:
@@ -432,16 +427,7 @@ async def create_or_update_application(
     if existing is not None:
         await _authorize_application(principal, urn, "write")
     else:
-        # Creating a brand-new Application: there's no `parent_workspace`
-        # relation yet for `_authorize_application` to check *against* (it
-        # doesn't exist until right after this), so the gate has to be the
-        # workspace's own `write` instead — same "check the container
-        # before the thing inside it exists" shape `knowledge`'s self-serve
-        # ObjectType creation already uses (`_authorize_ontology_governance`).
-        # Without this, any authenticated principal — including one with
-        # zero workspace grants — could mint a new Application, since the
-        # relation-write below would happily grant *that* URN to the
-        # workspace regardless of who asked.
+        # Check container workspace permission before creating application
         decision = await app.state.authz.authorize(
             principal, resource_type="workspace", resource_urn=WORKSPACE_URN, permission="write",
         )

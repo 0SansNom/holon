@@ -2,16 +2,6 @@
 
 Sagas are implemented by the Workflow Engine (Automation), with persisted state
 and declared compensation steps.
-Automation owns orchestration and the persisted execution record;
-each step's actual business mutation still lives in its owning service
-(Knowledge's local overlay, Connectivity's source-system write).
-
-Scoping:
-
-- **Workflow**: any approved Action whose event carries `edits` and whose
-  Action Type declares a `writeback_dataset` — looked up via Knowledge
-  `GET /actions/{name}` at trigger time.
-- **Trigger**: `consume_events`'s filter is the trigger — "this event starts this workflow".
 """
 
 from __future__ import annotations
@@ -41,14 +31,11 @@ logger = logging.getLogger("automation.workflow")
 
 _TIMEOUT_SECONDS = 10.0
 
-# Documented test-only failure hook (mirrors Connectivity's close-account sentinel).
 WRITEBACK_FAILURE_SENTINEL = "__simulate_failure__"
 
 
 def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> str:
-    """Prefer `active_jwt()` so rotation kids are stamped; fall back to the
-    call-site secret when env is unset (unit tests).
-    """
+    """Mint JWT token for internal service calls."""
     try:
         secret, kid, secrets_map = active_jwt()
         return issue_token(principal, secret, ttl_seconds=ttl_seconds, kid=kid, secrets=secrets_map)
@@ -93,9 +80,7 @@ async def get_workflow_execution(pool: asyncpg.Pool, approval_id: int) -> Option
 async def _fetch_writeback_dataset(
     client: httpx.AsyncClient, *, tenant_id: str, action_name: str, knowledge_url: str, jwt_secret: str
 ) -> Optional[str]:
-    """Look up a declarative Action Type's `writeback_dataset` via the same
-    already-public `GET /actions/{name}` every other Action-metadata reader uses.
-    """
+    """Fetch writeback dataset name for an action type from Knowledge."""
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
     response = await client.get(f"{knowledge_url}/api/holon/actions/{action_name}", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
@@ -113,9 +98,7 @@ async def _notify_generic_write_target(
     connectivity_url: str,
     jwt_secret: str,
 ) -> None:
-    """Any Action Type with a `writeback_dataset` goes through Connectivity's
-    generic `POST /source/{dataset_name}/{instance_id}/write`.
-    """
+    """Send writeback payload to Connectivity service."""
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
     async def _do() -> httpx.Response:
@@ -140,9 +123,7 @@ async def _request_compensation(
     knowledge_url: str,
     jwt_secret: str,
 ) -> None:
-    """Automation can't touch Knowledge's own tables directly — compensating
-    Step 1 is Knowledge's own concern, so Automation just tells it to.
-    """
+    """Request approval compensation in Knowledge service."""
     token = _mint(_workflow_engine_principal(tenant_id), jwt_secret, ttl_seconds=60)
 
     async def _do() -> httpx.Response:
@@ -200,9 +181,7 @@ async def _run_workflow(
     )
 
     try:
-        # Test hook: fail before Connectivity so Knowledge-side-only reason
-        # (e.g. account_closed_reason) can still trigger compensation without
-        # being allow-listed on the write target.
+        # Test failure sentinel hook
         if reason == WRITEBACK_FAILURE_SENTINEL:
             raise httpx.HTTPError("simulated downstream failure")
         await _notify_generic_write_target(
@@ -271,10 +250,7 @@ async def consume_events(
     knowledge_url: str,
     jwt_secret: str,
 ) -> None:
-    """Consumes Knowledge's bus (topic `knowledge`), triggered by
-    `knowledge.action.invoked` events whose action has a writeback target
-    and an `approval_id` (i.e. went through human-in-the-loop approval).
-    """
+    """Consume Knowledge events to execute writeback workflows for approved actions."""
     async with httpx.AsyncClient(
         timeout=_TIMEOUT_SECONDS, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
     ) as client:

@@ -1,22 +1,4 @@
-"""Shared Property Type registry — a canonical, reusable *property*
-definition (API name + display name + description).
-
-Two shapes (Foundry parity):
-- **Value-typed**: wraps a `value_types.py` Value Type for its
-  underlying data-type constraint (`value_type` set, `struct_properties`
-  null).
-- **Struct-typed**: carries a one-level struct field map in
-  `struct_properties` (each leaf is `value_type` or nested SPT
-  reference); `value_type` is null.
-
-Foundry-style control metadata may also live on the SPT itself
-(`visibility`, `render_hints`, `type_classes`, `property_format`) and is
-inherited by local ObjectType properties that reference it when those
-locals don't override — centralised metadata, local data.
-
-Referenced from `object_types.py`'s `property_types` via
-`{"kind": "shared_property_type", "shared_property_type": "email"}`.
-"""
+"""Shared Property Type registry — canonical, reusable property definitions."""
 
 from __future__ import annotations
 

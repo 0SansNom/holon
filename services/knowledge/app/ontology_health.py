@@ -1,18 +1,4 @@
-"""Ontology health check — structural anti-pattern detection, from
-Foundry's own "Ontology Design: Anti-patterns" documentation read in
-full. Foundry documents these as a human checklist; nothing evidences
-Ontology Manager detecting them automatically. Only the anti-patterns
-with an honest, non-fuzzy signal get a real check here — System Silos,
-Department Silos, Kitchen Sink, and Golden Hammer are deliberately
-skipped (they need cross-system domain knowledge or runtime invocation
-telemetry Holon doesn't collect; a guessed heuristic there would just
-produce noise).
-
-Lives here, not under `ontology/`, because the God Object check needs
-real instance sampling via `core._type_handle`/`_resolve_many` — the
-app layer, which `ontology/` never depends on (the same boundary
-`core.py`'s own `_resolve_relation_neighbors` already respects).
-"""
+"""Ontology health check — structural anti-pattern detection and validation."""
 
 from __future__ import annotations
 

@@ -15,9 +15,8 @@ import { EmptyState } from "../common/ListPrimitives";
 import { ActionParameterFields } from "../common/ActionParameterFields";
 import { SkeletonBlock } from "../common/Skeleton";
 import type { Application } from "../../api/experience";
-import { isObjectAppSurface } from "../../api/experience";
-import type { ActionDefinition, PropertyFormatRule, ConditionalFormatRule, RelationType, SharedPropertyType } from "../../api/knowledge";
-import { objectSetBrowsePath, titleOf, urnShortName, type RelatedLink } from "../ObjectExplorer/objectExplorerUtils";
+import type { ActionDefinition, PropertyFormatRule, ConditionalFormatRule, SharedPropertyType } from "../../api/knowledge";
+import { objectSetBrowsePath, titleOf, urnShortName, type RelatedLink, OBJECT_METADATA_KEYS } from "../ObjectExplorer/objectExplorerUtils";
 import { RelatedLinkPanel } from "../ObjectExplorer/RelatedLinkPanel";
 import { ObjectPropertiesTable } from "../ObjectExplorer/ObjectPropertiesTable";
 import {
@@ -30,58 +29,15 @@ import { FormattedValue } from "../common/PropertyFormat";
 import { useAuthStore } from "../../store/auth";
 import { prefillActionParameters } from "../ObjectExplorer/actionParameterPrefill";
 import { hasTypeClass } from "../Ontology/typeClassUtils";
+import { declaredRelatedLinks, EMPTY_OBJECT_APP_LINKS, resolveObjectAppSurface } from "./objectAppSurface";
 
-const METADATA_KEYS = new Set(["materializedAt", "sourceLagSeconds", "degraded", "_maskedFields"]);
-
-function resolveObjectAppSurface(application: Application): {
-  objectType: string;
-  objectSet?: string;
-  links: string[];
-} | null {
-  const surface = application.definition.surfaces.find(isObjectAppSurface);
-  if (!surface?.objectType) return null;
-  return {
-    objectType: surface.objectType,
-    objectSet: surface.objectSet || undefined,
-    links: surface.links ?? [],
-  };
-}
-
-function declaredRelatedLinks(objectType: string, declared: string[], relationTypes: RelationType[]): RelatedLink[] {
-  const want = new Set(declared);
-  if (want.size === 0) return [];
-  const links: RelatedLink[] = [];
-  for (const r of relationTypes) {
-    const sourceType = urnShortName(r.source_object_type_urn);
-    const targetType = urnShortName(r.target_object_type_urn);
-    const local = r.name.includes(".") ? r.name.split(".").slice(1).join(".") : r.name;
-    const fwd = (r.source_api_name || local).trim() || local;
-    const rev = ((r.target_api_name || r.target_property || "") as string).trim();
-    if (sourceType === objectType && (want.has(fwd) || want.has(local))) {
-      const linkName = want.has(fwd) ? fwd : local;
-      links.push({
-        linkName,
-        label: `${r.source_display_name || linkName} → ${targetType}`,
-        relatedType: targetType,
-      });
-    }
-    if (targetType === objectType && rev && (want.has(rev) || want.has(r.target_property || ""))) {
-      const linkName = want.has(rev) ? rev : (r.target_property || rev);
-      links.push({
-        linkName,
-        label: `${r.target_display_name || linkName} ← ${sourceType}`,
-        relatedType: sourceType,
-      });
-    }
-  }
-  return links;
-}
+const METADATA_KEYS = OBJECT_METADATA_KEYS;
 
 export function ObjectAppView({ application }: { application: Application }) {
-  const resolvedSurface = resolveObjectAppSurface(application);
+  const resolvedSurface = useMemo(() => resolveObjectAppSurface(application), [application]);
   const surfaceObjectType = resolvedSurface?.objectType ?? null;
   const surfaceObjectSet = resolvedSurface?.objectSet;
-  const surfaceLinks = resolvedSurface?.links ?? [];
+  const surfaceLinks = useMemo(() => resolvedSurface?.links ?? EMPTY_OBJECT_APP_LINKS, [resolvedSurface]);
   const [selectedId, setSelectedId] = useState<string | number | undefined>(undefined);
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [reason, setReason] = useState("");

@@ -1,12 +1,6 @@
-"""The **Function** plugin type — the sixth extension point, part of
- ("Functions": named,
-registered computed logic, usable from a read as a derived property or
-from an Action as a side effect).
+"""Function plugin registry.
 
-A Function is invoked exactly like an agent-tool plugin already is
-(`load_entry_point`, same process, same sandbox level — no new isolation
-model to invent). Namespace safety: a plugin can't register itself under
-a `function_name` another active function plugin already owns.
+Registers and resolves computed logic functions used by derived properties and action side effects.
 """
 
 from __future__ import annotations
