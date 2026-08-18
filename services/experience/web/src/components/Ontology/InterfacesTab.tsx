@@ -18,11 +18,10 @@ import { useAsyncAction } from "../../hooks/useAsyncAction";
 import { BranchesDialog } from "./BranchesDialog";
 import { InterfaceImplementationsDialog } from "./InterfaceImplementationsDialog";
 import {
-  formatPropertyTypeBinding,
   InterfacePropertyTypesFields,
-  prunePropertyTypes,
   type InterfacePropertyTypes,
 } from "./InterfacePropertyTypesFields";
+import { formatPropertyTypeBinding, prunePropertyTypes } from "./interfacePropertyUtils";
 import { InterfaceLinkConstraintsFields } from "./InterfaceLinkConstraintsFields";
 import { OntologyTabHeader, RegistryCard } from "./OntologyTabLayout";
 import type { InterfaceLinkConstraint } from "../../api/knowledge";

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Card, FormGroup, H4, InputGroup } from "@blueprintjs/core";
 import { EXPERIENCE_URL, TENANT_ID } from "../../api/config";
+import { api } from "../../api/client";
 import { identityApi, login } from "../../api/identity";
 import { useAuthStore } from "../../store/auth";
 
@@ -9,7 +10,7 @@ export function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [ssoAvailable, setSsoAvailable] = useState(false);
-  const [allowDevLogin, setAllowDevLogin] = useState(true);
+  const [allowDevLogin, setAllowDevLogin] = useState(false);
   const [manualUrn, setManualUrn] = useState(`hl:${TENANT_ID}:global:user:admin`);
   const [manualSecret, setManualSecret] = useState("");
   const setSession = useAuthStore((s) => s.setSession);
@@ -26,19 +27,18 @@ export function LoginScreen() {
       .catch(() => {
         if (!cancelled) setSsoAvailable(false);
       });
-    void fetch(`${EXPERIENCE_URL}/api/config`)
-      .then((r) => r.json())
+    void api
+      .get<{ allow_dev_login?: boolean }>(`${EXPERIENCE_URL}/api/config`)
       .then((cfg: { allow_dev_login?: boolean }) => {
         if (!cancelled) {
-          const allow = cfg.allow_dev_login !== false;
-          setAllowDevLogin(allow);
-          if (allow) setManualSecret("admin-dev-secret");
+          setAllowDevLogin(cfg.allow_dev_login === true);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setAllowDevLogin(true);
-          setManualSecret("admin-dev-secret");
+          // Fail closed: a configuration outage must never reveal or enable
+          // the known local development credential in a deployed client.
+          setAllowDevLogin(false);
         }
       });
     return () => {
@@ -68,7 +68,7 @@ export function LoginScreen() {
         <H4>Holon</H4>
         <p className="hl-login-desc">
           {allowDevLogin
-            ? "Sign in with a principal URN and client secret. Empty-instance default is admin / admin-dev-secret."
+            ? "Local development login is enabled. Enter the principal URN and client secret provided by Identity."
             : "Sign in with SSO, or with a principal URN and client secret from Identity."}
         </p>
         <FormGroup label="Principal URN" labelFor="login-urn">

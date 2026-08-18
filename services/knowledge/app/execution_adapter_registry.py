@@ -1,25 +1,6 @@
-"""The **execution adapter** plugin type. See `holon_common.plugin`'s
-module docstring for how this fits alongside the other plugin extension points.
+"""Execution adapter plugin registry.
 
-`execution.py`'s own docstring states this build initially used one
-adapter (DuckDB) — this proves the interface genuinely supports extension: an
-ObjectType with an active adapter registration routes through the
-plugin's own `execute()` instead of `_execute_duckdb_operation`, with
-zero changes to `get_or_execute`'s plan-hash computation, caching, or
-`execution_run` audit trail — ensuring plans are executed reliably.
-
-Enforced **ObjectType-ownership guard**: only one active adapter may claim a given
-`adapter_object_type` at a time — an adapter can't silently intercept
-queries meant for a different registered engine.
-
-Isolation scope: the adapter still only ever reads
-through this same process's connection pool (`pool`), passed in
-explicitly — it doesn't get its own unaudited storage access, and the
-example adapter (`plugins/serving_store_adapter_plugin.py`) queries
-Knowledge's own already-materialized `object_instance` table, the exact
-same data DuckDB's adapter scans from Iceberg, proving the *interface*
-swap without needing a genuinely separate storage backend to make the
-point real.
+Registers and resolves custom execution engine adapters for ObjectTypes.
 """
 
 from __future__ import annotations

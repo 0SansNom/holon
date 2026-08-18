@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Callout, Checkbox, FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
 import {
@@ -21,15 +21,33 @@ import { BranchesDialog } from "./BranchesDialog";
 import { isEphemeralTestName } from "./ephemeralResources";
 import { OntologyTabHeader, RegistryCard } from "./OntologyTabLayout";
 import { REGISTRY_LIFECYCLE_STATUSES } from "./lifecycleUtils";
-import { parseTypeClassesInput } from "./typeClassUtils";
 import { urnShortName } from "../ObjectExplorer/objectExplorerUtils";
+import { CARDINALITIES, STORAGE_KINDS, VISIBILITIES } from "./relationTypeConstants";
+import { RelationTypeFormFields } from "./RelationTypeFormFields";
+import {
+  CREATE_STEPS,
+  DEFAULT_RELATION_TYPE_FORM,
+  defaultJoinDatasetName,
+  defaultJoinSourceColumn,
+  defaultJoinTargetColumn,
+  isRelationTypeCreateStepValid,
+  relationTypeBranchDefinition,
+  relationTypeCreateBody,
+  relationTypeFormFromRecord,
+  relationTypeUpdateBody,
+  type RelationTypeFormState,
+} from "./relationTypeForm";
 
-// Exported: RelationTypeDetailPage.tsx shares these instead of redeclaring them.
-export const CARDINALITIES = ["many_to_one", "one_to_many", "one_to_one", "many_to_many"] as const;
-export const STORAGE_KINDS = ["foreign_key", "join_dataset", "object_backed"] as const;
-export const VISIBILITIES = ["prominent", "normal", "hidden"] as const;
 const LIFECYCLE_STATUSES = REGISTRY_LIFECYCLE_STATUSES;
-const CREATE_STEPS = ["Ends", "Storage", "Side names", "Governance"] as const;
+
+function bindFormField(
+  setForm: Dispatch<SetStateAction<RelationTypeFormState>>,
+  key: keyof RelationTypeFormState,
+) {
+  return (event: { target: { value: string } }) => {
+    setForm((prev) => ({ ...prev, [key]: event.target.value }));
+  };
+}
 
 export function RelationPermissionsPanel({ name }: { name: string }) {
   const { data, isLoading, error } = useRelationTypePermissions(name, !!name);
@@ -98,97 +116,19 @@ export function RelationTypesTab() {
   const visibleRelations = showEphemeral
     ? (data ?? [])
     : (data ?? []).filter((rt) => !isEphemeralTestName(rt.name));
-  const [name, setName] = useState("");
-  const [sourceObjectType, setSourceObjectType] = useState("");
-  const [targetObjectType, setTargetObjectType] = useState("");
-  const [sourceProperty, setSourceProperty] = useState("");
-  const [targetProperty, setTargetProperty] = useState("");
-  const [cardinality, setCardinality] = useState<string>("many_to_one");
-  const [storageKind, setStorageKind] = useState<string>("foreign_key");
-  const [joinDatasetUrn, setJoinDatasetUrn] = useState("");
-  const [joinSourceColumn, setJoinSourceColumn] = useState("");
-  const [joinTargetColumn, setJoinTargetColumn] = useState("");
-  const [midObjectType, setMidObjectType] = useState("");
-  const [midSourceProperty, setMidSourceProperty] = useState("");
-  const [midTargetProperty, setMidTargetProperty] = useState("");
-  const [sourceDisplayName, setSourceDisplayName] = useState("");
-  const [sourcePluralDisplayName, setSourcePluralDisplayName] = useState("");
-  const [sourceApiName, setSourceApiName] = useState("");
-  const [sourceVisibility, setSourceVisibility] = useState<string>("normal");
-  const [targetDisplayName, setTargetDisplayName] = useState("");
-  const [targetPluralDisplayName, setTargetPluralDisplayName] = useState("");
-  const [targetApiName, setTargetApiName] = useState("");
-  const [targetVisibility, setTargetVisibility] = useState<string>("normal");
-  const [lifecycleStatus, setLifecycleStatus] = useState<string>("experimental");
-  const [deprecationReason, setDeprecationReason] = useState("");
-  const [deprecationDeadline, setDeprecationDeadline] = useState("");
-  const [replacementUrn, setReplacementUrn] = useState("");
-  const [typeClasses, setTypeClasses] = useState("");
-  const [createProjectUrn, setCreateProjectUrn] = useState("");
+  const [createForm, setCreateForm] = useState<RelationTypeFormState>(DEFAULT_RELATION_TYPE_FORM);
   const [createStep, setCreateStep] = useState(0);
   const [editing, setEditing] = useState<RelationType | null>(null);
-  const [editTargetProperty, setEditTargetProperty] = useState("");
-  const [editCardinality, setEditCardinality] = useState<string>("many_to_one");
-  const [editStorageKind, setEditStorageKind] = useState<string>("foreign_key");
-  const [editJoinDatasetUrn, setEditJoinDatasetUrn] = useState("");
-  const [editJoinSourceColumn, setEditJoinSourceColumn] = useState("");
-  const [editJoinTargetColumn, setEditJoinTargetColumn] = useState("");
-  const [editMidObjectType, setEditMidObjectType] = useState("");
-  const [editMidSourceProperty, setEditMidSourceProperty] = useState("");
-  const [editMidTargetProperty, setEditMidTargetProperty] = useState("");
-  const [editSourceDisplayName, setEditSourceDisplayName] = useState("");
-  const [editSourcePluralDisplayName, setEditSourcePluralDisplayName] = useState("");
-  const [editSourceApiName, setEditSourceApiName] = useState("");
-  const [editSourceVisibility, setEditSourceVisibility] = useState<string>("normal");
-  const [editTargetDisplayName, setEditTargetDisplayName] = useState("");
-  const [editTargetPluralDisplayName, setEditTargetPluralDisplayName] = useState("");
-  const [editTargetApiName, setEditTargetApiName] = useState("");
-  const [editTargetVisibility, setEditTargetVisibility] = useState<string>("normal");
-  const [editLifecycleStatus, setEditLifecycleStatus] = useState<string>("experimental");
-  const [editDeprecationReason, setEditDeprecationReason] = useState("");
-  const [editDeprecationDeadline, setEditDeprecationDeadline] = useState("");
-  const [editReplacementUrn, setEditReplacementUrn] = useState("");
-  const [editTypeClasses, setEditTypeClasses] = useState("");
-  const [editProjectUrn, setEditProjectUrn] = useState("");
+  const [editForm, setEditForm] = useState<RelationTypeFormState>(DEFAULT_RELATION_TYPE_FORM);
   const [deleting, setDeleting] = useState<RelationType | null>(null);
   const [branching, setBranching] = useState<RelationType | null>(null);
 
   usePaletteCreateIntent("create-relation-type", setCreating);
 
-  function resetCreate() {
-    setName("");
-    setSourceObjectType("");
-    setTargetObjectType("");
-    setSourceProperty("");
-    setTargetProperty("");
-    setCardinality("many_to_one");
-    setStorageKind("foreign_key");
-    setJoinDatasetUrn("");
-    setJoinSourceColumn("");
-    setJoinTargetColumn("");
-    setMidObjectType("");
-    setMidSourceProperty("");
-    setMidTargetProperty("");
-    setSourceDisplayName("");
-    setSourcePluralDisplayName("");
-    setSourceApiName("");
-    setSourceVisibility("normal");
-    setTargetDisplayName("");
-    setTargetPluralDisplayName("");
-    setTargetApiName("");
-    setTargetVisibility("normal");
-    setLifecycleStatus("experimental");
-    setDeprecationReason("");
-    setDeprecationDeadline("");
-    setReplacementUrn("");
-    setTypeClasses("");
-    setCreateProjectUrn("");
-    setCreateStep(0);
-  }
-
   function closeCreate() {
     setCreating(false);
-    resetCreate();
+    setCreateForm(DEFAULT_RELATION_TYPE_FORM);
+    setCreateStep(0);
   }
 
   const {
@@ -196,63 +136,13 @@ export function RelationTypesTab() {
     error: createError,
     isPending: createPending,
   } = useAsyncAction(async () => {
-    await createRelationType.mutateAsync({
-      name,
-      source_object_type: sourceObjectType,
-      target_object_type: targetObjectType,
-      source_property: sourceProperty,
-      target_property: targetProperty,
-      cardinality,
-      storage_kind: storageKind,
-      join_dataset_urn: joinDatasetUrn || undefined,
-      join_source_column: joinSourceColumn || undefined,
-      join_target_column: joinTargetColumn || undefined,
-      mid_object_type: midObjectType || undefined,
-      mid_source_property: midSourceProperty || undefined,
-      mid_target_property: midTargetProperty || undefined,
-      source_display_name: sourceDisplayName || undefined,
-      source_plural_display_name: sourcePluralDisplayName || undefined,
-      source_api_name: sourceApiName || undefined,
-      source_visibility: sourceVisibility,
-      target_display_name: targetDisplayName || undefined,
-      target_plural_display_name: targetPluralDisplayName || undefined,
-      target_api_name: targetApiName || undefined,
-      target_visibility: targetVisibility,
-      lifecycle_status: lifecycleStatus,
-      deprecation_reason: lifecycleStatus === "deprecated" ? deprecationReason : undefined,
-      deprecation_deadline: lifecycleStatus === "deprecated" ? deprecationDeadline || undefined : undefined,
-      replacement_urn: lifecycleStatus === "deprecated" ? replacementUrn || undefined : undefined,
-      type_classes: parseTypeClassesInput(typeClasses),
-      project_urn: createProjectUrn || undefined,
-    });
+    await createRelationType.mutateAsync(relationTypeCreateBody(createForm));
     closeCreate();
-  }, { successMessage: `Relation type "${name}" created` });
+  }, { successMessage: `Relation type "${createForm.name}" created` });
 
   function openEdit(rt: RelationType) {
     setEditing(rt);
-    setEditTargetProperty(rt.target_property ?? "");
-    setEditCardinality(rt.cardinality);
-    setEditStorageKind(rt.storage_kind ?? "foreign_key");
-    setEditJoinDatasetUrn(rt.join_dataset_urn ?? "");
-    setEditJoinSourceColumn(rt.join_source_column ?? "");
-    setEditJoinTargetColumn(rt.join_target_column ?? "");
-    setEditMidObjectType(rt.mid_object_type_urn ? urnShortName(rt.mid_object_type_urn) : "");
-    setEditMidSourceProperty(rt.mid_source_property ?? "");
-    setEditMidTargetProperty(rt.mid_target_property ?? "");
-    setEditSourceDisplayName(rt.source_display_name ?? "");
-    setEditSourcePluralDisplayName(rt.source_plural_display_name ?? "");
-    setEditSourceApiName(rt.source_api_name || rt.name.split(".").at(-1) || "");
-    setEditSourceVisibility(rt.source_visibility ?? "normal");
-    setEditTargetDisplayName(rt.target_display_name ?? "");
-    setEditTargetPluralDisplayName(rt.target_plural_display_name ?? "");
-    setEditTargetApiName(rt.target_api_name || rt.target_property || "");
-    setEditTargetVisibility(rt.target_visibility ?? "normal");
-    setEditLifecycleStatus(rt.lifecycle_status ?? "experimental");
-    setEditDeprecationReason(rt.deprecation_reason ?? "");
-    setEditDeprecationDeadline((rt.deprecation_deadline ?? "").toString().slice(0, 10));
-    setEditReplacementUrn(rt.replacement_urn ?? "");
-    setEditTypeClasses((rt.type_classes ?? []).join(", "));
-    setEditProjectUrn(rt.project_urn ?? "");
+    setEditForm(relationTypeFormFromRecord(rt));
   }
 
   const {
@@ -261,35 +151,9 @@ export function RelationTypesTab() {
     isPending: editPending,
   } = useAsyncAction(async () => {
     if (!editing) return;
-    const previousProject = editing.project_urn ?? "";
     await updateRelationType.mutateAsync({
       name: editing.name,
-      body: {
-        target_property: editTargetProperty,
-        cardinality: editCardinality,
-        storage_kind: editStorageKind,
-        join_dataset_urn: editJoinDatasetUrn || undefined,
-        join_source_column: editJoinSourceColumn || undefined,
-        join_target_column: editJoinTargetColumn || undefined,
-        mid_object_type: editMidObjectType || undefined,
-        mid_source_property: editMidSourceProperty || undefined,
-        mid_target_property: editMidTargetProperty || undefined,
-        source_display_name: editSourceDisplayName,
-        source_plural_display_name: editSourcePluralDisplayName,
-        source_api_name: editSourceApiName,
-        source_visibility: editSourceVisibility,
-        target_display_name: editTargetDisplayName,
-        target_plural_display_name: editTargetPluralDisplayName,
-        target_api_name: editTargetApiName,
-        target_visibility: editTargetVisibility,
-        lifecycle_status: editLifecycleStatus,
-        deprecation_reason: editLifecycleStatus === "deprecated" ? editDeprecationReason : undefined,
-        deprecation_deadline: editLifecycleStatus === "deprecated" ? editDeprecationDeadline || undefined : undefined,
-        replacement_urn: editLifecycleStatus === "deprecated" ? editReplacementUrn || undefined : undefined,
-        type_classes: parseTypeClassesInput(editTypeClasses),
-        project_urn: editProjectUrn || undefined,
-        clear_project_urn: !editProjectUrn && !!previousProject,
-      },
+      body: relationTypeUpdateBody(editForm, editing.project_urn ?? ""),
     });
     setEditing(null);
   }, { successMessage: `"${editing?.name ?? "Relation type"}" saved` });
@@ -306,9 +170,9 @@ export function RelationTypesTab() {
   }, { successMessage: `Deleted "${deleting?.name ?? "relation type"}"` });
 
   async function handleGenerateJoinTable() {
-    const defaultName = `${sourceObjectType || "source"}_${targetObjectType || "target"}_bridge`;
-    const srcCol = joinSourceColumn || `${(sourceObjectType || "source").toLowerCase()}_id`;
-    const tgtCol = joinTargetColumn || `${(targetObjectType || "target").toLowerCase()}_id`;
+    const defaultName = defaultJoinDatasetName(createForm.sourceObjectType, createForm.targetObjectType);
+    const srcCol = createForm.joinSourceColumn || defaultJoinSourceColumn(createForm.sourceObjectType);
+    const tgtCol = createForm.joinTargetColumn || defaultJoinTargetColumn(createForm.targetObjectType);
     setGeneratingJoin(true);
     try {
       const created = await generateJoinDataset.mutateAsync({
@@ -316,27 +180,18 @@ export function RelationTypesTab() {
         source_column: srcCol,
         target_column: tgtCol,
       });
-      setJoinDatasetUrn(created.dataset_urn);
-      setJoinSourceColumn(created.source_column);
-      setJoinTargetColumn(created.target_column);
+      setCreateForm((form) => ({
+        ...form,
+        joinDatasetUrn: created.dataset_urn,
+        joinSourceColumn: created.source_column,
+        joinTargetColumn: created.target_column,
+      }));
     } finally {
       setGeneratingJoin(false);
     }
   }
 
   const otOptions = (objectTypes ?? []).map((ot) => ot.name);
-
-  function createStepValid(step: number): boolean {
-    if (step === 0) return !!name.trim() && !!sourceObjectType && !!targetObjectType;
-    if (step === 1) {
-      if (storageKind === "foreign_key") return !!sourceProperty.trim();
-      if (storageKind === "join_dataset") {
-        return !!joinDatasetUrn.trim() && !!joinSourceColumn.trim() && !!joinTargetColumn.trim();
-      }
-      return !!midObjectType && !!midSourceProperty.trim() && !!midTargetProperty.trim();
-    }
-    return true;
-  }
 
   function advanceCreate() {
     if (createStep < CREATE_STEPS.length - 1) {
@@ -418,7 +273,7 @@ export function RelationTypesTab() {
         onClose={closeCreate}
         onSubmit={advanceCreate}
         submitLabel={createStep === CREATE_STEPS.length - 1 ? "Create" : "Next"}
-        submitDisabled={!createStepValid(createStep)}
+        submitDisabled={!isRelationTypeCreateStepValid(createForm, createStep)}
         isPending={createPending}
         error={createError}
         footerStart={
@@ -439,10 +294,14 @@ export function RelationTypesTab() {
         {createStep === 0 && (
           <>
             <FormGroup label="Name">
-              <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="Order.customer" />
+              <InputGroup
+                value={createForm.name}
+                onChange={bindFormField(setCreateForm, "name")}
+                placeholder="Order.customer"
+              />
             </FormGroup>
             <FormGroup label="Source ObjectType">
-              <HTMLSelect fill value={sourceObjectType} onChange={(e) => setSourceObjectType(e.target.value)}>
+              <HTMLSelect fill value={createForm.sourceObjectType} onChange={bindFormField(setCreateForm, "sourceObjectType")}>
                 <option value="">Select…</option>
                 {otOptions.map((n) => (
                   <option key={n} value={n}>
@@ -452,7 +311,7 @@ export function RelationTypesTab() {
               </HTMLSelect>
             </FormGroup>
             <FormGroup label="Target ObjectType">
-              <HTMLSelect fill value={targetObjectType} onChange={(e) => setTargetObjectType(e.target.value)}>
+              <HTMLSelect fill value={createForm.targetObjectType} onChange={bindFormField(setCreateForm, "targetObjectType")}>
                 <option value="">Select…</option>
                 {otOptions.map((n) => (
                   <option key={n} value={n}>
@@ -462,7 +321,7 @@ export function RelationTypesTab() {
               </HTMLSelect>
             </FormGroup>
             <FormGroup label="Cardinality">
-              <HTMLSelect fill value={cardinality} onChange={(e) => setCardinality(e.target.value)}>
+              <HTMLSelect fill value={createForm.cardinality} onChange={bindFormField(setCreateForm, "cardinality")}>
                 {CARDINALITIES.map((c) => (
                   <option key={c} value={c}>
                     {c}
@@ -475,7 +334,7 @@ export function RelationTypesTab() {
         {createStep === 1 && (
           <>
             <FormGroup label="Storage kind">
-              <HTMLSelect fill value={storageKind} onChange={(e) => setStorageKind(e.target.value)}>
+              <HTMLSelect fill value={createForm.storageKind} onChange={bindFormField(setCreateForm, "storageKind")}>
                 {STORAGE_KINDS.map((k) => (
                   <option key={k} value={k}>
                     {k}
@@ -483,12 +342,15 @@ export function RelationTypesTab() {
                 ))}
               </HTMLSelect>
             </FormGroup>
-            {storageKind === "foreign_key" && (
+            {createForm.storageKind === "foreign_key" && (
               <FormGroup label="Source property (FK)">
-                <InputGroup value={sourceProperty} onChange={(e) => setSourceProperty(e.target.value)} />
+                <InputGroup
+                  value={createForm.sourceProperty}
+                  onChange={bindFormField(setCreateForm, "sourceProperty")}
+                />
               </FormGroup>
             )}
-            {storageKind === "join_dataset" && (
+            {createForm.storageKind === "join_dataset" && (
               <>
                 <Callout intent="primary" className="hl-mb-sm">
                   Generate an empty 2-column Iceberg join table, or paste an existing dataset URN.
@@ -497,7 +359,7 @@ export function RelationTypesTab() {
                   icon="new-grid-item"
                   className="hl-mb-sm"
                   loading={generatingJoin || generateJoinDataset.isPending}
-                  disabled={!sourceObjectType || !targetObjectType}
+                  disabled={!createForm.sourceObjectType || !createForm.targetObjectType}
                   onClick={() => void handleGenerateJoinTable()}
                 >
                   Generate join table
@@ -508,20 +370,33 @@ export function RelationTypesTab() {
                   </Callout>
                 )}
                 <FormGroup label="Join dataset URN">
-                  <InputGroup value={joinDatasetUrn} onChange={(e) => setJoinDatasetUrn(e.target.value)} />
+                  <InputGroup
+                    value={createForm.joinDatasetUrn}
+                    onChange={bindFormField(setCreateForm, "joinDatasetUrn")}
+                  />
                 </FormGroup>
                 <FormGroup label="Join source column">
-                  <InputGroup value={joinSourceColumn} onChange={(e) => setJoinSourceColumn(e.target.value)} />
+                  <InputGroup
+                    value={createForm.joinSourceColumn}
+                    onChange={bindFormField(setCreateForm, "joinSourceColumn")}
+                  />
                 </FormGroup>
                 <FormGroup label="Join target column">
-                  <InputGroup value={joinTargetColumn} onChange={(e) => setJoinTargetColumn(e.target.value)} />
+                  <InputGroup
+                    value={createForm.joinTargetColumn}
+                    onChange={bindFormField(setCreateForm, "joinTargetColumn")}
+                  />
                 </FormGroup>
               </>
             )}
-            {storageKind === "object_backed" && (
+            {createForm.storageKind === "object_backed" && (
               <>
                 <FormGroup label="Mid ObjectType">
-                  <HTMLSelect fill value={midObjectType} onChange={(e) => setMidObjectType(e.target.value)}>
+                  <HTMLSelect
+                    fill
+                    value={createForm.midObjectType}
+                    onChange={bindFormField(setCreateForm, "midObjectType")}
+                  >
                     <option value="">Select…</option>
                     {otOptions.map((n) => (
                       <option key={n} value={n}>
@@ -531,31 +406,54 @@ export function RelationTypesTab() {
                   </HTMLSelect>
                 </FormGroup>
                 <FormGroup label="Mid → source property">
-                  <InputGroup value={midSourceProperty} onChange={(e) => setMidSourceProperty(e.target.value)} />
+                  <InputGroup
+                    value={createForm.midSourceProperty}
+                    onChange={bindFormField(setCreateForm, "midSourceProperty")}
+                  />
                 </FormGroup>
                 <FormGroup label="Mid → target property">
-                  <InputGroup value={midTargetProperty} onChange={(e) => setMidTargetProperty(e.target.value)} />
+                  <InputGroup
+                    value={createForm.midTargetProperty}
+                    onChange={bindFormField(setCreateForm, "midTargetProperty")}
+                  />
                 </FormGroup>
               </>
             )}
             <FormGroup label="Target property (reverse accessor)">
-              <InputGroup value={targetProperty} onChange={(e) => setTargetProperty(e.target.value)} />
+              <InputGroup
+                value={createForm.targetProperty}
+                onChange={bindFormField(setCreateForm, "targetProperty")}
+              />
             </FormGroup>
           </>
         )}
         {createStep === 2 && (
           <>
             <FormGroup label="Source display name">
-              <InputGroup value={sourceDisplayName} onChange={(e) => setSourceDisplayName(e.target.value)} />
+              <InputGroup
+                value={createForm.sourceDisplayName}
+                onChange={bindFormField(setCreateForm, "sourceDisplayName")}
+              />
             </FormGroup>
             <FormGroup label="Source plural display name">
-              <InputGroup value={sourcePluralDisplayName} onChange={(e) => setSourcePluralDisplayName(e.target.value)} />
+              <InputGroup
+                value={createForm.sourcePluralDisplayName}
+                onChange={bindFormField(setCreateForm, "sourcePluralDisplayName")}
+              />
             </FormGroup>
             <FormGroup label="Source API name">
-              <InputGroup value={sourceApiName} onChange={(e) => setSourceApiName(e.target.value)} placeholder="defaults to local name" />
+              <InputGroup
+                value={createForm.sourceApiName}
+                onChange={bindFormField(setCreateForm, "sourceApiName")}
+                placeholder="defaults to local name"
+              />
             </FormGroup>
             <FormGroup label="Source visibility">
-              <HTMLSelect fill value={sourceVisibility} onChange={(e) => setSourceVisibility(e.target.value)}>
+              <HTMLSelect
+                fill
+                value={createForm.sourceVisibility}
+                onChange={bindFormField(setCreateForm, "sourceVisibility")}
+              >
                 {VISIBILITIES.map((v) => (
                   <option key={v} value={v}>
                     {v}
@@ -564,16 +462,30 @@ export function RelationTypesTab() {
               </HTMLSelect>
             </FormGroup>
             <FormGroup label="Target display name">
-              <InputGroup value={targetDisplayName} onChange={(e) => setTargetDisplayName(e.target.value)} />
+              <InputGroup
+                value={createForm.targetDisplayName}
+                onChange={bindFormField(setCreateForm, "targetDisplayName")}
+              />
             </FormGroup>
             <FormGroup label="Target plural display name">
-              <InputGroup value={targetPluralDisplayName} onChange={(e) => setTargetPluralDisplayName(e.target.value)} />
+              <InputGroup
+                value={createForm.targetPluralDisplayName}
+                onChange={bindFormField(setCreateForm, "targetPluralDisplayName")}
+              />
             </FormGroup>
             <FormGroup label="Target API name">
-              <InputGroup value={targetApiName} onChange={(e) => setTargetApiName(e.target.value)} placeholder="defaults to target property" />
+              <InputGroup
+                value={createForm.targetApiName}
+                onChange={bindFormField(setCreateForm, "targetApiName")}
+                placeholder="defaults to target property"
+              />
             </FormGroup>
             <FormGroup label="Target visibility">
-              <HTMLSelect fill value={targetVisibility} onChange={(e) => setTargetVisibility(e.target.value)}>
+              <HTMLSelect
+                fill
+                value={createForm.targetVisibility}
+                onChange={bindFormField(setCreateForm, "targetVisibility")}
+              >
                 {VISIBILITIES.map((v) => (
                   <option key={v} value={v}>
                     {v}
@@ -586,7 +498,11 @@ export function RelationTypesTab() {
         {createStep === 3 && (
           <>
             <FormGroup label="Status">
-              <HTMLSelect fill value={lifecycleStatus} onChange={(e) => setLifecycleStatus(e.target.value)}>
+              <HTMLSelect
+                fill
+                value={createForm.lifecycleStatus}
+                onChange={bindFormField(setCreateForm, "lifecycleStatus")}
+              >
                 {LIFECYCLE_STATUSES.map((s) => (
                   <option key={s} value={s}>
                     {s}
@@ -594,28 +510,39 @@ export function RelationTypesTab() {
                 ))}
               </HTMLSelect>
             </FormGroup>
-            {lifecycleStatus === "deprecated" && (
+            {createForm.lifecycleStatus === "deprecated" && (
               <>
                 <FormGroup label="Deprecation reason">
-                  <InputGroup value={deprecationReason} onChange={(e) => setDeprecationReason(e.target.value)} />
+                  <InputGroup
+                    value={createForm.deprecationReason}
+                    onChange={bindFormField(setCreateForm, "deprecationReason")}
+                  />
                 </FormGroup>
                 <FormGroup label="Deprecation deadline">
-                  <InputGroup type="date" value={deprecationDeadline} onChange={(e) => setDeprecationDeadline(e.target.value)} />
+                  <InputGroup
+                    type="date"
+                    value={createForm.deprecationDeadline}
+                    onChange={bindFormField(setCreateForm, "deprecationDeadline")}
+                  />
                 </FormGroup>
                 <FormGroup label="Replacement URN">
-                  <InputGroup className="hl-mono" value={replacementUrn} onChange={(e) => setReplacementUrn(e.target.value)} />
+                  <InputGroup
+                    className="hl-mono"
+                    value={createForm.replacementUrn}
+                    onChange={bindFormField(setCreateForm, "replacementUrn")}
+                  />
                 </FormGroup>
               </>
             )}
             <FormGroup label="Type classes (comma-separated)">
               <InputGroup
-                value={typeClasses}
-                onChange={(e) => setTypeClasses(e.target.value)}
+                value={createForm.typeClasses}
+                onChange={bindFormField(setCreateForm, "typeClasses")}
                 placeholder="hierarchy:parent, core"
               />
             </FormGroup>
             <FormGroup label="Project (optional)">
-              <HTMLSelect fill value={createProjectUrn} onChange={(e) => setCreateProjectUrn(e.target.value)}>
+              <HTMLSelect fill value={createForm.projectUrn} onChange={bindFormField(setCreateForm, "projectUrn")}>
                 <option value="">Workspace only</option>
                 {projects.map((p) => (
                   <option key={p.urn} value={p.urn}>
@@ -638,135 +565,12 @@ export function RelationTypesTab() {
         error={editError}
       >
         {editing && <RelationWritebackWarning name={editing.name} />}
-        <FormGroup label="Target property">
-          <InputGroup value={editTargetProperty} onChange={(e) => setEditTargetProperty(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Cardinality">
-          <HTMLSelect fill value={editCardinality} onChange={(e) => setEditCardinality(e.target.value)}>
-            {CARDINALITIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
-        <FormGroup label="Storage kind">
-          <HTMLSelect fill value={editStorageKind} onChange={(e) => setEditStorageKind(e.target.value)}>
-            {STORAGE_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
-        {editStorageKind === "join_dataset" && (
-          <>
-            <FormGroup label="Join dataset URN">
-              <InputGroup value={editJoinDatasetUrn} onChange={(e) => setEditJoinDatasetUrn(e.target.value)} />
-            </FormGroup>
-            <FormGroup label="Join source column">
-              <InputGroup value={editJoinSourceColumn} onChange={(e) => setEditJoinSourceColumn(e.target.value)} />
-            </FormGroup>
-            <FormGroup label="Join target column">
-              <InputGroup value={editJoinTargetColumn} onChange={(e) => setEditJoinTargetColumn(e.target.value)} />
-            </FormGroup>
-          </>
-        )}
-        {editStorageKind === "object_backed" && (
-          <>
-            <FormGroup label="Mid ObjectType">
-              <HTMLSelect fill value={editMidObjectType} onChange={(e) => setEditMidObjectType(e.target.value)}>
-                <option value="">Select…</option>
-                {otOptions.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </HTMLSelect>
-            </FormGroup>
-            <FormGroup label="Mid → source property">
-              <InputGroup value={editMidSourceProperty} onChange={(e) => setEditMidSourceProperty(e.target.value)} />
-            </FormGroup>
-            <FormGroup label="Mid → target property">
-              <InputGroup value={editMidTargetProperty} onChange={(e) => setEditMidTargetProperty(e.target.value)} />
-            </FormGroup>
-          </>
-        )}
-        <FormGroup label="Status">
-          <HTMLSelect fill value={editLifecycleStatus} onChange={(e) => setEditLifecycleStatus(e.target.value)}>
-            {LIFECYCLE_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
-        {editLifecycleStatus === "deprecated" && (
-          <>
-            <FormGroup label="Deprecation reason">
-              <InputGroup value={editDeprecationReason} onChange={(e) => setEditDeprecationReason(e.target.value)} />
-            </FormGroup>
-            <FormGroup label="Deprecation deadline">
-              <InputGroup
-                type="date"
-                value={editDeprecationDeadline}
-                onChange={(e) => setEditDeprecationDeadline(e.target.value)}
-              />
-            </FormGroup>
-            <FormGroup label="Replacement URN">
-              <InputGroup className="hl-mono" value={editReplacementUrn} onChange={(e) => setEditReplacementUrn(e.target.value)} />
-            </FormGroup>
-          </>
-        )}
-        <FormGroup label="Type classes (comma-separated)" helperText="e.g. hierarchy:parent">
-          <InputGroup value={editTypeClasses} onChange={(e) => setEditTypeClasses(e.target.value)} placeholder="hierarchy:parent" />
-        </FormGroup>
-        <FormGroup label="Source display name">
-          <InputGroup value={editSourceDisplayName} onChange={(e) => setEditSourceDisplayName(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Source plural display name">
-          <InputGroup value={editSourcePluralDisplayName} onChange={(e) => setEditSourcePluralDisplayName(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Source API name">
-          <InputGroup value={editSourceApiName} onChange={(e) => setEditSourceApiName(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Source visibility">
-          <HTMLSelect fill value={editSourceVisibility} onChange={(e) => setEditSourceVisibility(e.target.value)}>
-            {VISIBILITIES.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
-        <FormGroup label="Target display name">
-          <InputGroup value={editTargetDisplayName} onChange={(e) => setEditTargetDisplayName(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Target plural display name">
-          <InputGroup value={editTargetPluralDisplayName} onChange={(e) => setEditTargetPluralDisplayName(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Target API name">
-          <InputGroup value={editTargetApiName} onChange={(e) => setEditTargetApiName(e.target.value)} />
-        </FormGroup>
-        <FormGroup label="Target visibility">
-          <HTMLSelect fill value={editTargetVisibility} onChange={(e) => setEditTargetVisibility(e.target.value)}>
-            {VISIBILITIES.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
-        <FormGroup label="Project (optional)">
-          <HTMLSelect fill value={editProjectUrn} onChange={(e) => setEditProjectUrn(e.target.value)}>
-            <option value="">Workspace only</option>
-            {projects.map((p) => (
-              <option key={p.urn} value={p.urn}>
-                {p.name}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
+        <RelationTypeFormFields
+          value={editForm}
+          onChange={(patch) => setEditForm((form) => ({ ...form, ...patch }))}
+          objectTypeNames={otOptions}
+          projects={projects}
+        />
         {editing && <RelationPermissionsPanel name={editing.name} />}
       </RegistryDialog>
 
@@ -793,34 +597,7 @@ export function RelationTypesTab() {
         <BranchesDialog
           kind="relation_type"
           resourceName={branching.name}
-          currentDefinition={{
-            source_object_type: urnShortName(branching.source_object_type_urn),
-            target_object_type: urnShortName(branching.target_object_type_urn),
-            source_object_type_urn: branching.source_object_type_urn,
-            target_object_type_urn: branching.target_object_type_urn,
-            source_property: branching.source_property,
-            target_property: branching.target_property,
-            cardinality: branching.cardinality,
-            storage_kind: branching.storage_kind ?? "foreign_key",
-            join_dataset_urn: branching.join_dataset_urn ?? null,
-            join_source_column: branching.join_source_column ?? null,
-            join_target_column: branching.join_target_column ?? null,
-            mid_object_type_urn: branching.mid_object_type_urn ?? null,
-            mid_object_type: branching.mid_object_type_urn ? urnShortName(branching.mid_object_type_urn) : null,
-            mid_source_property: branching.mid_source_property ?? null,
-            mid_target_property: branching.mid_target_property ?? null,
-            source_display_name: branching.source_display_name ?? "",
-            source_plural_display_name: branching.source_plural_display_name ?? "",
-            source_api_name: branching.source_api_name ?? "",
-            source_visibility: branching.source_visibility ?? "normal",
-            target_display_name: branching.target_display_name ?? "",
-            target_plural_display_name: branching.target_plural_display_name ?? "",
-            target_api_name: branching.target_api_name ?? "",
-            target_visibility: branching.target_visibility ?? "normal",
-            lifecycle_status: branching.lifecycle_status ?? "experimental",
-            type_classes: branching.type_classes ?? [],
-            project_urn: branching.project_urn ?? null,
-          }}
+          currentDefinition={relationTypeBranchDefinition(branching)}
           onClose={() => setBranching(null)}
         />
       )}

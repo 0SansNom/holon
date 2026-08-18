@@ -1,19 +1,4 @@
-"""Action Type registry — named parameters (each a `value_type`
-reference, validated at invocation), declarative `edits` (Foundry-style
-rules: modify property, create/delete object, create/delete link), and
-`submission_criteria` (simple comparisons against the target instance's
-current state, evaluated before anything is requested or applied).
-
-A simple upsert registry (like Interfaces/Markings/RelationTypes), not
-versioned/branched like ObjectTypes — an Action Type's definition is
-lower-stakes to iterate on than a schema, and every other registry in
-this build already treats "definition" and "governed schema lifecycle"
-as two different tiers.
-
-`actions.py` is what actually *applies* an Action Type at request/apply
-time (`_get_action_definition`'s fallback, `_apply_declarative_edits`,
-`request_generic_action`) — this module only owns the registry.
-"""
+"""Action Type registry — declarative action rules, parameter validation, and submission criteria."""
 
 from __future__ import annotations
 

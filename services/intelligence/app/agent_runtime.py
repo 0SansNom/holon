@@ -1,16 +1,4 @@
-"""Agent Runtime — Agent session management and execution.
-
-A session is a real Resource: URN, tenant, owning agent
-principal, mandant (`on_behalf_of`), budget, consumed counters, an
-append-only transcript, and a status lifecycle.
-
-- **Effective rights**: tool calls hit Knowledge's PDP-gated endpoint with the
-  session's own bearer token, computing the agent and mandant rights intersection.
-- **Tool Registry**: compiles Knowledge's `GET /actions` definitions into tool schemas.
-- **Human-in-the-loop**: high-risk Actions invoked as tools create pending approval rows.
-- **Loop detection**: terminal sessions publish `intelligence.agent.session_completed`.
-  Automation can spawn follow-up sessions up to `max_chain_depth`.
-"""
+"""Agent Runtime — Agent session management and tool execution."""
 
 from __future__ import annotations
 

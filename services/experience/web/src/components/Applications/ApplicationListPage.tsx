@@ -29,27 +29,27 @@ export function ApplicationListPage() {
     >
       <CardGrid minWidth={260}>
         {data.map((app) => (
-          <Link key={app.name} to="/applications/$name" params={{ name: app.name }} className="hl-link-reset">
-            <Card interactive className="hl-h-full">
+          <Card key={app.name} className="hl-h-full">
               <div className="hl-registry-card-header">
-                <strong>{app.name}</strong>
+                <Link to="/applications/$name" params={{ name: app.name }} className="hl-link-reset">
+                  <strong>{app.name}</strong>
+                </Link>
                 <div className="hl-flex-row hl-items-center hl-gap-xs">
                   <Tag intent={app.status === "promoted" ? "success" : "warning"} minimal>
                     {app.status}
                   </Tag>
-                  <div onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                    <ResourceActionsMenu urn={app.urn} />
-                  </div>
+                  <ResourceActionsMenu urn={app.urn} />
                 </div>
               </div>
-              <div className="hl-mono hl-text-muted-sm hl-mt-sm">
-                v{app.version} · {app.dependencies.objectTypes.join(", ")}
-              </div>
-              <div className="hl-tag-row hl-mt-sm">
-                <ResourceTagBadges urn={app.urn} />
-              </div>
-            </Card>
-          </Link>
+              <Link to="/applications/$name" params={{ name: app.name }} className="hl-link-reset">
+                <div className="hl-mono hl-text-muted-sm hl-mt-sm">
+                  v{app.version} · {app.dependencies.objectTypes.join(", ")}
+                </div>
+                <div className="hl-tag-row hl-mt-sm">
+                  <ResourceTagBadges urn={app.urn} />
+                </div>
+              </Link>
+          </Card>
         ))}
         {data.length === 0 && (
           <EmptyState actionLabel="New application" onAction={() => setCreating(true)}>

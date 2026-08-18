@@ -1,14 +1,4 @@
-"""The file import connector — "Import fichiers" Connectivity capability.
-
-A batch pull of a static file drop, not a database/API client:
-`pyarrow.fs.S3FileSystem` reads the object's bytes directly from MinIO
-(already a transitive dependency via `pyiceberg[pyarrow,s3fs]` — no new
-package), then stdlib `csv` parses it. A fourth distinct concurrency
-shape: a synchronous filesystem client, wrapped in `asyncio.to_thread` at
-the call site (see `plugins/csv_suppliers_plugin.py`) — contrast with
-`connector.py` (asyncpg, natively async), `mongo_connector.py` (pymongo,
-sync, thread-wrapped), and `rest_connector.py` (httpx, natively async).
-"""
+"""File import connector — CSV file ingestion from S3/MinIO."""
 
 from __future__ import annotations
 

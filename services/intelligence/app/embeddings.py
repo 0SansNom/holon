@@ -1,10 +1,4 @@
-"""Embedding Client — feeds the semantic retrieval channel (metadata only,
-never bulk instance vectorization).
-
-Two real backends (Voyage API or local sentence-transformers) selected at startup by
-`HOLON_EMBEDDING_PROVIDER` — callers see the `EmbeddingClient`
-protocol regardless of backend.
-"""
+"""Embedding Client — Vector embedding generation via Voyage or local sentence-transformers."""
 
 from __future__ import annotations
 

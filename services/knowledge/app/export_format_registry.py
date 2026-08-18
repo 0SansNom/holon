@@ -1,23 +1,6 @@
-"""The **export format** plugin type. See `holon_common.plugin`'s module docstring for
-how this fits alongside the other plugin extension points.
+"""Export format plugin registry.
 
-Registers a new output serialization for `GET /objects/{type}/export`
-beyond the plain JSON every other read endpoint already returns — the
-example plugin (`plugins/csv_export_plugin.py`) adds CSV, using nothing
-but the stdlib `csv` module. Reads always go through the same
-already-permission-gated, already-masked path as every other object
-read (`_resolve_many`, confidential property masking included) — export is a
-*serialization* concern only, it never bypasses ABAC/ReBAC to reach more
-data than the caller could already see through the ordinary JSON
-endpoint.
-
-Enforced format-name-ownership guard: a plugin can't
-register itself as `json` (the built-in, always-available format) or a
-name another active export-format plugin already owns.
-
-Isolation ("sandbox"): `serialize()` is application code in this same process;
-it only ever receives already-fetched, already-masked rows, never a
-database connection of its own.
+Registers and resolves custom export serializers for dataset output formats.
 """
 
 from __future__ import annotations
