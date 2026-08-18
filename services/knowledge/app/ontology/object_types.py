@@ -9,6 +9,7 @@ import asyncpg
 
 from holon_common import Classification, most_restrictive
 
+from . import definition_cache
 from .urns import object_type_urn
 from .lifecycle import (
     NON_DELETABLE_OBJECT_TYPE_STATUSES,
@@ -724,19 +725,32 @@ async def create_object_type(
             "UPDATE object_type SET column_classification = $1::jsonb, classification = $2 WHERE urn = $3",
             json.dumps(declared), overall.value, urn,
         )
+    definition_cache.invalidate_object_type(urn=urn, tenant_id=tenant_id)
     return await get_object_type(pool, urn)
 
 
 async def get_object_type_by_dataset(pool: asyncpg.Pool, tenant_id: str, source_dataset_urn: str) -> dict | None:
+    cache_key = definition_cache.object_type_dataset_key(tenant_id, source_dataset_urn)
+    if definition_cache.has(cache_key):
+        return definition_cache.get(cache_key)
     row = await pool.fetchrow(
         "SELECT * FROM object_type WHERE tenant_id = $1 AND source_dataset_urn = $2", tenant_id, source_dataset_urn
     )
-    return _parse_jsonb_keys(row, _OT_JSONB_KEYS) if row is not None else None
+    parsed = _parse_jsonb_keys(row, _OT_JSONB_KEYS) if row is not None else None
+    if parsed is not None:
+        definition_cache.put(cache_key, parsed)
+    return parsed
 
 
 async def get_object_type(pool: asyncpg.Pool, urn: str) -> dict | None:
+    cache_key = definition_cache.object_type_key(urn)
+    if definition_cache.has(cache_key):
+        return definition_cache.get(cache_key)
     row = await pool.fetchrow("SELECT * FROM object_type WHERE urn = $1", urn)
-    return _parse_jsonb_keys(row, _OT_JSONB_KEYS) if row is not None else None
+    parsed = _parse_jsonb_keys(row, _OT_JSONB_KEYS) if row is not None else None
+    if parsed is not None:
+        definition_cache.put(cache_key, parsed)
+    return parsed
 
 
 def _parse_version_row(row: asyncpg.Record) -> dict:
@@ -768,13 +782,19 @@ async def upsert_property_classification(
         """,
         object_type_urn, property_name, classification,
     )
+    definition_cache.invalidate(definition_cache.property_classifications_key(object_type_urn))
 
 
 async def get_property_classifications(pool: asyncpg.Pool, object_type_urn: str) -> dict[str, str]:
+    cache_key = definition_cache.property_classifications_key(object_type_urn)
+    if definition_cache.has(cache_key):
+        return definition_cache.get(cache_key) or {}
     rows = await pool.fetch(
         "SELECT property_name, classification FROM object_type_property WHERE object_type_urn = $1", object_type_urn
     )
-    return {row["property_name"]: row["classification"] for row in rows}
+    parsed = {row["property_name"]: row["classification"] for row in rows}
+    definition_cache.put(cache_key, parsed)
+    return parsed
 
 
 async def list_object_types(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
@@ -792,8 +812,13 @@ async def list_object_types(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     OSDK generator walking the list endpoint needs to trust it the same
     way any other caller trusts the detail endpoint.
     """
+    cache_key = definition_cache.object_type_list_key(tenant_id)
+    if definition_cache.has(cache_key):
+        return definition_cache.get(cache_key) or []
     rows = await pool.fetch("SELECT * FROM object_type WHERE tenant_id = $1 ORDER BY name", tenant_id)
-    return [_parse_jsonb_keys(row, _OT_JSONB_KEYS) for row in rows]
+    parsed = [_parse_jsonb_keys(row, _OT_JSONB_KEYS) for row in rows]
+    definition_cache.put(cache_key, parsed)
+    return parsed
 
 
 async def delete_object_type(pool: asyncpg.Pool, urn: str) -> None:
@@ -843,3 +868,4 @@ async def delete_object_type(pool: asyncpg.Pool, urn: str) -> None:
         result = await conn.execute("DELETE FROM object_type WHERE urn = $1", urn)
         if result == "DELETE 0":
             raise ValueError(f"unknown ObjectType: {urn}")
+    definition_cache.invalidate_object_type(urn=urn)

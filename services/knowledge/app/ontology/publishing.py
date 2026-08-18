@@ -1121,6 +1121,16 @@ async def _write_publish(
     await outbox.enqueue(conn, event)
 
 
+def _invalidate_published_cache(object_type_urn: str, *, current: Optional[dict], draft: Optional[dict]) -> None:
+    tenant_id = (current or {}).get("tenant_id") or (draft or {}).get("tenant_id")
+    if not tenant_id and object_type_urn.startswith("hl:"):
+        parts = object_type_urn.split(":")
+        tenant_id = parts[1] if len(parts) > 1 else None
+    from . import definition_cache
+
+    definition_cache.invalidate_object_type(urn=object_type_urn, tenant_id=tenant_id)
+
+
 async def publish_object_type_version(
     pool: asyncpg.Pool,
     *,
@@ -1201,4 +1211,5 @@ async def publish_object_type_version(
             property_types=property_types,
         )
 
+    _invalidate_published_cache(object_type_urn, current=current, draft=draft)
     return await get_object_type(pool, object_type_urn)

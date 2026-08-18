@@ -1,9 +1,30 @@
-import type { Application } from "../../api/experience";
+import type { Application, ApplicationDefinition } from "../../api/experience";
 import { isObjectAppSurface } from "../../api/experience";
-import type { RelationType } from "../../api/knowledge";
+import type { ActionType, ObjectType, RelationType } from "../../api/knowledge";
 import { urnShortName, type RelatedLink } from "../ObjectExplorer/objectExplorerUtils";
 
 export const EMPTY_OBJECT_APP_LINKS: string[] = [];
+
+export function defaultApplicationDefinition(
+  objectTypes: Array<Pick<ObjectType, "name" | "visibility">>,
+  actions: Array<Pick<ActionType, "name" | "target_object_type" | "risk_level">>,
+): ApplicationDefinition {
+  const objectType = objectTypes.find((type) => type.visibility !== "hidden")?.name;
+  if (!objectType) {
+    return { surfaces: [], bindings: [], actionRefs: [] };
+  }
+  const action = actions.find(
+    (candidate) => candidate.target_object_type === objectType && candidate.risk_level !== "high",
+  );
+  return {
+    surfaces: [{ type: "objectApp", objectType, route: `/apps/${objectType}` }],
+    bindings: [
+      { component: "table", objectType },
+      { component: "detail", objectType },
+    ],
+    actionRefs: action ? [{ action: action.name, riskClass: action.risk_level }] : [],
+  };
+}
 
 export function resolveObjectAppSurface(application: Application): {
   objectType: string;

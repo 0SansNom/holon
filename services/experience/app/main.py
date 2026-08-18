@@ -229,11 +229,12 @@ async def ready() -> dict:
 
 @app.get("/api/config")
 async def config() -> dict:
+    """Public bootstrap flags. No demo principal or ObjectType — the
+    instance may be empty (ADR 026) and login is Identity's job.
+    """
     return {
         "tenant_id": TENANT_ID,
         "workspace_id": WORKSPACE_ID,
-        "default_user_urn": f"hl:{TENANT_ID}:global:user:jdoe",
-        "customer_object_type_urn": f"hl:{TENANT_ID}:{WORKSPACE_ID}:object-type:Customer",
         "allow_dev_login": _allow_dev_login(),
         "intelligence_enabled": _intelligence_enabled(),
     }
@@ -603,9 +604,15 @@ async def unpin_resource(project_urn: str, resource_urn: str, principal: Princip
 @app.get("/api/projects/{project_urn}/pins")
 async def list_project_pins(project_urn: str, principal: Principal = Depends(current_principal)) -> list[dict]:
     # Read-gated, not write — a project viewer should still see what's
-    # pinned, only curating (pin/unpin above) needs write.
+    # pinned, only curating (pin/unpin above) needs write. Member URNs
+    # are filtered the same way collection members are: a pin must not
+    # disclose a resource this principal cannot read.
     await _authorize_project(principal, project_urn, "read")
-    return await project_pins.list_pins(app.state.pool, tenant_id=principal.tenant_id, project_urn=project_urn)
+    pins = await project_pins.list_pins(app.state.pool, tenant_id=principal.tenant_id, project_urn=project_urn)
+    readable = set(
+        await _filter_readable_resource_urns(principal, [pin["resource_urn"] for pin in pins])
+    )
+    return [pin for pin in pins if pin["resource_urn"] in readable]
 
 
 async def _authorize_workspace(principal: Principal, permission: str) -> None:
