@@ -77,22 +77,13 @@ def test_experience_token_proxy_rejects_anonymous_callers():
     assert status == 401, body
 
 
-def test_experience_knowledge_proxies(jdoe_token: str):
-    """Verify proxied Knowledge endpoints."""
-    # List Customers
-    status, customers = _request("GET", f"{EXPERIENCE}/api/customers", token=jdoe_token)
-    assert status in (200, 404)  # 200 if seeded, 404 if empty
-
-    # Get Lineage for Customer ObjectType URN
+def test_experience_lineage_proxy(jdoe_token: str):
+    """Verify the proxied Knowledge lineage endpoint."""
     status, lineage = _request(
         "GET",
         f"{EXPERIENCE}/api/lineage/hl:{TENANT_ID}:main:object-type:Customer",
         token=jdoe_token,
     )
-    assert status in (200, 404)
-
-    # Get Customer Orders proxy
-    status, orders = _request("GET", f"{EXPERIENCE}/api/customers/1/orders", token=jdoe_token)
     assert status in (200, 404)
 
 

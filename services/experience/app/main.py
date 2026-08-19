@@ -144,10 +144,6 @@ class TokenRequest(BaseModel):
     principal_urn: str
 
 
-class CreditHoldRequest(BaseModel):
-    reason: str
-
-
 async def _proxy(method: str, url: str, *, authorization: Optional[str] = None, json: Optional[dict] = None) -> Response:
     headers = {"Authorization": authorization} if authorization else {}
 
@@ -280,40 +276,12 @@ async def mint_token(request: TokenRequest, principal: Principal = Depends(curre
     )
 
 
-@app.get("/api/customers")
-async def list_customers(request: Request) -> Response:
-    return await _proxy(
-        "GET",
-        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/Customer",
-        authorization=request.headers.get("authorization"),
-    )
-
-
 @app.get("/api/lineage/{urn:path}")
 async def get_lineage(urn: str, request: Request) -> Response:
     return await _proxy(
         "GET",
         f"{KNOWLEDGE_URL}/api/holon/lineage/{urn}",
         authorization=request.headers.get("authorization"),
-    )
-
-
-@app.get("/api/customers/{customer_id}/orders")
-async def get_customer_orders(customer_id: int, request: Request) -> Response:
-    return await _proxy(
-        "GET",
-        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/Customer/{customer_id}/orders",
-        authorization=request.headers.get("authorization"),
-    )
-
-
-@app.post("/api/customers/{customer_id}/credit-hold")
-async def put_customer_on_credit_hold(customer_id: int, body: CreditHoldRequest, request: Request) -> Response:
-    return await _proxy(
-        "POST",
-        f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/Customer/{customer_id}/actions/putOnCreditHold",
-        authorization=request.headers.get("authorization"),
-        json=body.model_dump(),
     )
 
 
