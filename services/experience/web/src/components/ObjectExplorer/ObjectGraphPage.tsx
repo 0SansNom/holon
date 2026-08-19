@@ -6,26 +6,10 @@ import "reactflow/dist/style.css";
 import { useObjectGraph } from "../../api/hooks";
 import { DetailPage } from "../common/PageLayout";
 import type { InstanceGraphNode } from "../../api/knowledge";
-
-// Categorical accent, secondary to the node's own label (which already
-// states the friendly instance name in plain text) — never the sole
-// channel of identity, which is why each node card also carries a small
-// text badge naming its ObjectType. Per the dataviz skill's reference
-// palette; beyond its first 3 slots, all-pairs CVD separation isn't
-// guaranteed (the palette's own documented limit, not a new gap
-// introduced here), acceptable specifically because color is redundant
-// with the always-visible type badge, not load-bearing on its own.
-const TYPE_COLORS: Record<string, string> = {
-  Customer: "#2d63c8",
-  Order: "#b8551f",
-  SupportTicket: "#0e8a5f",
-  ProductReview: "#8f6a1f",
-  Supplier: "#a8386b",
-  InventoryLevel: "#3a8a4a",
-};
+import { colorForObjectType } from "./objectGraphColors";
 
 function NodeCard({ objectType, label }: { objectType: string; label: string }) {
-  const color = TYPE_COLORS[objectType] ?? "#5f6b7a";
+  const color = colorForObjectType(objectType);
   return (
     <div>
       <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", color, fontWeight: 600, marginBottom: 4 }}>
@@ -52,7 +36,7 @@ export function ObjectGraphPage() {
         id: n.id,
         position: { x: n.hop * 320, y: row * 90 },
         data: { label: <NodeCard objectType={n.objectType} label={n.label} /> },
-        style: nodeStyle(n.id === graph.root, TYPE_COLORS[n.objectType]),
+        style: nodeStyle(n.id === graph.root, colorForObjectType(n.objectType)),
         className: "hl-graph-node",
       };
     });

@@ -210,6 +210,12 @@ async def _materialize_sync(
 
     shared_rows = await ontology.list_shared_property_types(pool, tenant_id)
     shared_by_name = {row["api_name"]: row for row in shared_rows}
+    instance_markings = await ontology.get_instance_markings_bulk(
+        pool,
+        object_type_urn=object_type_urn,
+        tenant_id=tenant_id,
+        instance_ids=[str(row["id"]) for row in index_rows],
+    )
     await search.index_rows(
         opensearch_url,
         opensearch_password,
@@ -221,6 +227,7 @@ async def _materialize_sync(
         allowed_countries=allowed_countries,
         property_types=property_types,
         shared_property_types=shared_by_name,
+        instance_markings=instance_markings,
     )
 
 
@@ -240,6 +247,15 @@ async def consume_events(
             if event.event_type == "connectivity.sync.completed":
                 async with pool.acquire() as conn, conn.transaction():
                     await _catalogue_sync(conn, event.tenant_id, workspace_id, event.payload)
+                dynamic_type = await ontology.get_object_type_by_dataset(
+                    pool, event.tenant_id, event.payload["dataset_urn"]
+                )
+                if dynamic_type is not None:
+                    from .ontology import definition_cache
+
+                    definition_cache.invalidate_object_type(
+                        urn=dynamic_type["urn"], tenant_id=event.tenant_id
+                    )
                 await _materialize_sync(
                     pool,
                     event.tenant_id,
@@ -305,6 +321,12 @@ async def reindex_object_type_search(
 
     shared_rows = await ontology.list_shared_property_types(pool, tenant_id)
     shared_by_name = {row["api_name"]: row for row in shared_rows}
+    instance_markings = await ontology.get_instance_markings_bulk(
+        pool,
+        object_type_urn=object_type_urn,
+        tenant_id=tenant_id,
+        instance_ids=[str(row["id"]) for row in index_rows],
+    )
     if index_rows:
         await search.index_rows(
             opensearch_url,
@@ -317,6 +339,7 @@ async def reindex_object_type_search(
             allowed_countries=allowed_countries,
             property_types=property_types,
             shared_property_types=shared_by_name,
+            instance_markings=instance_markings,
         )
 
     return {

@@ -16,6 +16,7 @@ from typing import Any, Optional
 from fastapi import Header, Query
 
 from holon_common import HolonError, Principal, active_jwt, build_urn, make_principal_dependency, require_urn_tenant_match
+from holon_common.authz import spicedb_object_id
 
 from . import function_registry, ontology, resolver, serving_store
 from .struct_values import assemble_struct_value, parse_struct_or_array
@@ -370,6 +371,82 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type: str, li
 
 allowed_countries: set = set()
 producer = None
+
+
+async def held_marking_names(principal: Principal) -> list[str]:
+    """Marking names the principal `hold`s. Used as search entitlement
+    tokens so instance-level markings filter at the index (R8.6), not
+    after the hit list.
+    """
+    markings = await ontology.list_markings(pool, principal.tenant_id)
+    if not markings:
+        return []
+    try:
+        held_ids = await authz.lookup_resource_ids(
+            resource_type="marking", permission="hold", principal_urn=principal.urn
+        )
+        if principal.on_behalf_of:
+            mandant_ids = await authz.lookup_resource_ids(
+                resource_type="marking", permission="hold", principal_urn=principal.on_behalf_of
+            )
+            held_ids &= mandant_ids
+        return [
+            row["name"]
+            for row in markings
+            if spicedb_object_id(build_urn(principal.tenant_id, "global", "marking", row["name"])) in held_ids
+        ]
+    except Exception:
+        logger.exception("marking LookupResources failed; falling back to per-marking CheckPermission")
+        held: list[str] = []
+        for row in markings:
+            marking_urn = build_urn(principal.tenant_id, "global", "marking", row["name"])
+            if await authz.check_rebac(principal.urn, "marking", marking_urn, "hold"):
+                if principal.on_behalf_of and not await authz.check_rebac(
+                    principal.on_behalf_of, "marking", marking_urn, "hold"
+                ):
+                    continue
+                held.append(row["name"])
+        return held
+
+
+async def readable_object_type_names(principal: Principal) -> list[str]:
+    """ObjectType names the principal may read (ReBAC ∩ markings).
+
+    Search applies this as an OpenSearch `object_type` filter so a
+    workspace-wide `/search` no longer requires workspace `read` — a
+    project-only contractor sees their types and nothing else (R8.6).
+    """
+    types = await ontology.list_object_types(pool, principal.tenant_id)
+    if not types:
+        return []
+    try:
+        readable_ids = await authz.lookup_resource_ids(
+            resource_type="object_type", permission="read", principal_urn=principal.urn
+        )
+        if principal.on_behalf_of:
+            mandant_ids = await authz.lookup_resource_ids(
+                resource_type="object_type", permission="read", principal_urn=principal.on_behalf_of
+            )
+            readable_ids &= mandant_ids
+        candidates = [ot for ot in types if spicedb_object_id(ot["urn"]) in readable_ids]
+    except Exception:
+        logger.exception("object_type LookupResources failed; falling back to per-type CheckPermission")
+        candidates = []
+        for ot in types:
+            if await authz.check_rebac(principal.urn, "object_type", ot["urn"], "read"):
+                if principal.on_behalf_of and not await authz.check_rebac(
+                    principal.on_behalf_of, "object_type", ot["urn"], "read"
+                ):
+                    continue
+                candidates.append(ot)
+
+    allowed: list[str] = []
+    for ot in candidates:
+        markings = ot.get("markings") or []
+        if markings and not await _authorize_markings(principal, markings):
+            continue
+        allowed.append(ot["name"])
+    return allowed
 
 
 async def _authorize_object_type(principal: Principal, object_type_urn: str, permission: str) -> None:

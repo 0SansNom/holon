@@ -49,7 +49,7 @@ export function useCreatePrincipal() {
   return useMutation({
     mutationFn: (body: {
       tenant_id: string;
-      type: "user" | "agent" | "service_account";
+      type: "user" | "agent" | "service_account" | "group";
       local_name: string;
       display_name: string;
       country?: string | null;
@@ -76,6 +76,31 @@ export function useCreateProject() {
   return useMutation({
     mutationFn: (name: string) => identityApi.createProject(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.projects() }),
+  });
+}
+
+export function useGroupMembers(groupUrn: string) {
+  return useSuspenseQuery({
+    queryKey: queryKeys.groupMembers(groupUrn),
+    queryFn: () => identityApi.listGroupMembers(groupUrn),
+  });
+}
+
+export function useAddGroupMember() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ groupUrn, principalUrn }: { groupUrn: string; principalUrn: string }) =>
+      identityApi.addGroupMember(groupUrn, principalUrn),
+    onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: queryKeys.groupMembers(vars.groupUrn) }),
+  });
+}
+
+export function useRemoveGroupMember() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ groupUrn, memberUrn }: { groupUrn: string; memberUrn: string }) =>
+      identityApi.removeGroupMember(groupUrn, memberUrn),
+    onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: queryKeys.groupMembers(vars.groupUrn) }),
   });
 }
 

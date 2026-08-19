@@ -8,6 +8,7 @@ import asyncpg
 
 from .object_types import get_object_type, get_object_type_version
 from .publishing import (
+    _invalidate_published_cache,
     _run_publish_validations,
     _write_publish,
     propose_object_type_version,
@@ -227,6 +228,7 @@ async def review_branch(
                 property_types=property_types,
             )
             await conn.execute("UPDATE ontology_branch SET status = 'merged' WHERE id = $1", branch["id"])
+        _invalidate_published_cache(object_type_urn, current=current, draft=draft)
     else:
         await pool.execute(
             "INSERT INTO ontology_review (branch_id, tenant_id, reviewer_urn, decision, note) VALUES ($1, $2, $3, $4, $5)",
