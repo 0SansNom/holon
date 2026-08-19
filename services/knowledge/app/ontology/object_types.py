@@ -529,10 +529,9 @@ CREATE TABLE IF NOT EXISTS action_type (
     -- Writeback: names a `write_target` dataset registered in
     -- Connectivity (`POST /write-targets`), by its `dataset_name`. When
     -- set, an approved high-risk invocation of this Action Type also
-    -- mirrors its applied `edits` back to the source system, via the
-    -- same saga (Knowledge -> event bus -> Automation -> Connectivity ->
-    -- compensate-on-failure) `Customer.closeAccount` already uses —
-    -- generalized, not replaced; see `actions.py`'s
+    -- mirrors its applied `edits` back to the source system, via a
+    -- saga (Knowledge -> event bus -> Automation -> Connectivity ->
+    -- compensate-on-failure); see `actions.py`'s
     -- `compensate_from_workflow_engine` and `services/automation/app/
     -- workflow.py`. `NULL` (the default) means "local-only", exactly
     -- today's declarative-Action behavior, unaffected.

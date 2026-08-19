@@ -31,7 +31,7 @@ from .render_hints import ALLOWED_RENDER_HINTS, normalize_render_hints
 
 def _action_local_name(action_name: str) -> str:
     """Interface `required_actions` store the short local name
-    (`putOnCreditHold`); registry keys are usually `Type.action`.
+    (e.g. `archive`); registry keys are usually `Type.action`.
     Bare names (no dot) pass through unchanged.
     """
     return action_name.split(".", 1)[1] if "." in action_name else action_name
