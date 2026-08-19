@@ -5,7 +5,13 @@
 // `editor` relation — this is what makes the check relational rather than
 // a flat tenant-string comparison (the thing this increment replaces).
 
-definition principal {}
+// Users, service accounts, agents, and groups share this type (SAS §1.4).
+// `member` is only written on group principals; a workspace/project grant
+// on a group uses `principal#member` so members inherit without a
+// per-user tuple (and a direct grant on a user is still just `principal`).
+definition principal {
+    relation member: principal
+}
 
 definition tenant {
     relation member: principal
@@ -13,9 +19,9 @@ definition tenant {
 
 definition workspace {
     relation parent_tenant: tenant
-    relation viewer: principal
-    relation editor: principal
-    relation admin: principal
+    relation viewer: principal | principal#member
+    relation editor: principal | principal#member
+    relation admin: principal | principal#member
 
     permission read = viewer + editor + admin
     permission write = editor + admin
@@ -32,9 +38,9 @@ definition workspace {
 // `object_type`'s own permissions below inherit from.
 definition project {
     relation parent_workspace: workspace
-    relation viewer: principal
-    relation editor: principal
-    relation admin: principal
+    relation viewer: principal | principal#member
+    relation editor: principal | principal#member
+    relation admin: principal | principal#member
 
     permission read = viewer + editor + admin + parent_workspace->read
     permission write = editor + admin + parent_workspace->write

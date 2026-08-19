@@ -72,6 +72,7 @@ export const queryKeys = {
   resourceCollections: (urn: string) => ["resourceCollections", urn] as const,
 
   principals: () => ["principals"] as const,
+  groupMembers: (groupUrn: string) => ["groupMembers", groupUrn] as const,
   tenants: () => ["tenants"] as const,
   workspaces: (tenantId?: string) => ["workspaces", tenantId ?? "all"] as const,
   projects: () => ["projects"] as const,

@@ -11,13 +11,16 @@ import {
   InputGroup,
   Tag,
 } from "@blueprintjs/core";
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import {
   usePrincipals,
   useGrantWorkspaceAccess,
   useRevokeWorkspaceAccess,
   useCreatePrincipal,
+  useAddGroupMember,
+  useRemoveGroupMember,
 } from "../../api/hooks";
+import { queryKeys } from "../../api/queryKeys";
 import { identityApi, type IdentityPrincipal, type AccessRelation } from "../../api/identity";
 import { ApiError } from "../../api/client";
 import { CardGrid, EmptyState, ErrorCallout } from "../common/ListPrimitives";
@@ -77,14 +80,85 @@ function ManageAccessDialog({ principal, onClose }: { principal: IdentityPrincip
   );
 }
 
+function ManageMembersDialog({ group, onClose }: { group: IdentityPrincipal; onClose: () => void }) {
+  const { data: principals } = usePrincipals();
+  const { data: members = [] } = useQuery({
+    queryKey: queryKeys.groupMembers(group.urn),
+    queryFn: () => identityApi.listGroupMembers(group.urn),
+  });
+  const add = useAddGroupMember();
+  const remove = useRemoveGroupMember();
+  const [memberUrn, setMemberUrn] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const candidates = (principals ?? []).filter((p) => p.type !== "group" && p.urn !== group.urn);
+
+  async function onAdd() {
+    if (!memberUrn) return;
+    setError(null);
+    try {
+      await add.mutateAsync({ groupUrn: group.urn, principalUrn: memberUrn });
+      setMemberUrn("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Request failed");
+    }
+  }
+
+  return (
+    <Dialog isOpen title={`Members — ${group.display_name}`} onClose={onClose}>
+      <DialogBody>
+        <p className="hl-mono hl-text-muted">{group.urn}</p>
+        <ul className="hl-mt-sm">
+          {members.map((m) => (
+            <li key={m.principal_urn} className="hl-flex-row hl-gap-sm hl-mb-xs">
+              <span className="hl-grow">
+                {m.display_name ?? m.principal_urn}{" "}
+                <span className="hl-text-muted-sm">{m.type}</span>
+              </span>
+              <Button
+                small
+                minimal
+                intent="danger"
+                loading={remove.isPending}
+                onClick={() => void remove.mutateAsync({ groupUrn: group.urn, memberUrn: m.principal_urn })}
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+          {members.length === 0 && <li className="hl-text-muted">No members yet.</li>}
+        </ul>
+        <FormGroup label="Add member" className="hl-mt-sm">
+          <HTMLSelect
+            fill
+            value={memberUrn}
+            onChange={(e) => setMemberUrn(e.target.value)}
+            options={[{ value: "", label: "Select a principal…" }, ...candidates.map((p) => ({ value: p.urn, label: `${p.display_name} (${p.type})` }))]}
+          />
+        </FormGroup>
+        {error && <ErrorCallout>{error}</ErrorCallout>}
+      </DialogBody>
+      <DialogFooter
+        actions={
+          <Button intent="primary" disabled={!memberUrn} loading={add.isPending} onClick={() => void onAdd()}>
+            Add
+          </Button>
+        }
+      />
+    </Dialog>
+  );
+}
+
 export function PrincipalsTab() {
   const { data } = usePrincipals();
   const { data: me } = useSuspenseQuery({ queryKey: ["whoami"], queryFn: identityApi.whoami });
   const create = useCreatePrincipal();
   const [managing, setManaging] = useState<IdentityPrincipal | null>(null);
+  const [managingMembers, setManagingMembers] = useState<IdentityPrincipal | null>(null);
   const [filter, setFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [createType, setCreateType] = useState<IdentityPrincipal["type"]>("user");
   const [localName, setLocalName] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -107,7 +181,7 @@ export function PrincipalsTab() {
     try {
       const row = await create.mutateAsync({
         tenant_id: me.tenant_id,
-        type: "user",
+        type: createType,
         local_name: localName,
         display_name: displayName,
       });
@@ -165,18 +239,41 @@ export function PrincipalsTab() {
             </div>
             <div className="hl-card-footer">
               <span className="hl-text-muted-sm">{principal.country ?? "—"}</span>
-              <Button small minimal icon="key" onClick={() => setManaging(principal)}>
-                Manage access
-              </Button>
+              <span className="hl-flex-row hl-gap-xs">
+                {principal.type === "group" && (
+                  <Button small minimal icon="people" onClick={() => setManagingMembers(principal)}>
+                    Members
+                  </Button>
+                )}
+                <Button small minimal icon="key" onClick={() => setManaging(principal)}>
+                  Manage access
+                </Button>
+              </span>
             </div>
           </Card>
         ))}
         {filtered.length === 0 && <EmptyState>No principals match this filter.</EmptyState>}
       </CardGrid>
       {managing && <ManageAccessDialog principal={managing} onClose={() => setManaging(null)} />}
+      {managingMembers && (
+        <ManageMembersDialog group={managingMembers} onClose={() => setManagingMembers(null)} />
+      )}
 
       <Dialog isOpen={createOpen} title="Create principal" onClose={() => setCreateOpen(false)}>
         <DialogBody>
+          <FormGroup label="Type">
+            <HTMLSelect
+              fill
+              value={createType}
+              onChange={(e) => setCreateType(e.target.value as IdentityPrincipal["type"])}
+              options={[
+                { value: "user", label: "User" },
+                { value: "group", label: "Group" },
+                { value: "service_account", label: "Service account" },
+                { value: "agent", label: "Agent" },
+              ]}
+            />
+          </FormGroup>
           <FormGroup label="Local name">
             <InputGroup value={localName} onChange={(e) => setLocalName(e.target.value)} placeholder="jdupont" />
           </FormGroup>
