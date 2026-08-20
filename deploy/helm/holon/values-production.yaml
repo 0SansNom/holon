@@ -17,7 +17,6 @@ bootstrap:
   tenantId: acme
   workspaceId: main
 
-allowDevLogin: false
 intelligenceEnabled: false
 llmProvider: fake
 servingStoreRequireMaterialized: true

@@ -49,6 +49,7 @@ SERVICE_NAME = "experience-platform"
 configure_json_logging(SERVICE_NAME)
 
 IDENTITY_URL = os.environ["HOLON_IDENTITY_URL"]
+CONNECTIVITY_URL = os.environ["HOLON_CONNECTIVITY_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
@@ -65,10 +66,6 @@ SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 
 AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
-
-
-def _allow_dev_login() -> bool:
-    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "false").lower() in {"1", "true", "yes"}
 
 
 def _intelligence_enabled() -> bool:
@@ -140,10 +137,6 @@ install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
 
-class TokenRequest(BaseModel):
-    principal_urn: str
-
-
 async def _proxy(method: str, url: str, *, authorization: Optional[str] = None, json: Optional[dict] = None) -> Response:
     headers = {"Authorization": authorization} if authorization else {}
 
@@ -207,6 +200,50 @@ async def _post_json(url: str, *, authorization: Optional[str] = None, json: Opt
         return upstream.status_code, {"detail": upstream.text}
 
 
+_HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "date", "server"}
+
+
+async def _relay(base_url: str, path: str, request: Request) -> Response:
+    target = f"{base_url}/{path}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    body = await request.body()
+
+    async def _do() -> httpx.Response:
+        return await app.state.client.request(
+            request.method, target, params=request.query_params,
+            headers=headers, content=body, follow_redirects=False,
+        )
+
+    try:
+        upstream = await app.state.breaker.call(_do)
+    except CircuitBreakerOpenError:
+        return Response(
+            content=b'{"detail": "upstream temporarily unavailable"}', status_code=503, media_type="application/json"
+        )
+    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=response_headers)
+
+
+@app.api_route("/api/identity/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_identity(path: str, request: Request) -> Response:
+    return await _relay(IDENTITY_URL, path, request)
+
+
+@app.api_route("/api/connectivity/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_connectivity(path: str, request: Request) -> Response:
+    return await _relay(CONNECTIVITY_URL, path, request)
+
+
+@app.api_route("/api/knowledge/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_knowledge(path: str, request: Request) -> Response:
+    return await _relay(KNOWLEDGE_URL, path, request)
+
+
+@app.api_route("/api/intelligence/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_intelligence(path: str, request: Request) -> Response:
+    return await _relay(INTELLIGENCE_URL, path, request)
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -231,7 +268,6 @@ async def config() -> dict:
     return {
         "tenant_id": TENANT_ID,
         "workspace_id": WORKSPACE_ID,
-        "allow_dev_login": _allow_dev_login(),
         "intelligence_enabled": _intelligence_enabled(),
     }
 
@@ -257,23 +293,6 @@ async def list_experience_audit_events(
         outcome=outcome,
         page_size=50 if pageSize is None else pageSize,
         page_token=pageToken,
-    )
-
-
-@app.post("/api/token")
-async def mint_token(request: TokenRequest, principal: Principal = Depends(current_principal)) -> Response:
-    """Dev-only token mint helper — derives `*-dev-secret` server-side.
-    Disabled when `HOLON_ALLOW_DEV_LOGIN` is false. Prefer Identity
-    `/login` (cookie session) or OIDC.
-    """
-    if not _allow_dev_login():
-        raise HolonError.forbidden('PrincipalDisabled', "demo token proxy disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",)
-    if request.principal_urn != principal.urn:
-        raise HolonError.forbidden('ForbiddenMint', "cannot mint a token for another principal")
-    local_name = request.principal_urn.rsplit(":", 1)[-1]
-    client_secret = f"{local_name}-dev-secret"
-    return await _proxy(
-        "POST", f"{IDENTITY_URL}/token", json={"principal_urn": request.principal_urn, "client_secret": client_secret}
     )
 
 

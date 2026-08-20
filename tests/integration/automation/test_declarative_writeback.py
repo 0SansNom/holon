@@ -86,11 +86,6 @@ def _register_sync_and_create_object_type(msmith_token: str, jdoe_token: str) ->
 
 def _register_write_target(jdoe_token: str, *, table_name: str = "writeback_test_target") -> str:
     dataset_name = _unique_name("writeback_target")
-    # `allowed_properties` maps the ontology-facing property name
-    # ("processingStatus") to the real source column ("status")
-    # need not match, and deliberately don't here, to keep the ontology
-    # property clear of `_RESERVED_RESPONSE_KEYS` while allowing the
-    # source column name to differ.
     status, target = _request(
         "POST", f"{CONNECTIVITY}/write-targets", token=jdoe_token,
         body={

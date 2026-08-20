@@ -30,8 +30,6 @@ allowlist / Identity user-mint flag.
 ## Production checklist
 
 - [ ] `HOLON_ENV=production`
-- [ ] `HOLON_ALLOW_DEV_LOGIN=false`
-- [ ] Experience `POST /api/token` stays off when `HOLON_ALLOW_DEV_LOGIN=false`
 - [ ] `HOLON_INTELLIGENCE_ENABLED=false` until the agent package is opted in
 - [ ] `HOLON_ALLOW_JOBLIB_MODELS` unset/false; `HOLON_ALLOW_TOOL_PLUGIN_REGISTER` unset/false
 - [ ] `HOLON_JWT_ALG=RS256` + `HOLON_JWT_PRIVATE_KEYS` / `HOLON_JWT_PUBLIC_KEYS` (`make gen-jwt-rsa`); `HOLON_JWT_REQUIRE_ASYMMETRIC=true`
@@ -58,8 +56,10 @@ allowlist / Identity user-mint flag.
 
 Local `docker-compose.yml` is a **dev** stack: OpenSearch
 `discovery.type=single-node` and `plugins.security.disabled=true`,
-`HOLON_ALLOW_DEV_LOGIN=true`, optional empty OTLP, and `HOLON_ENV` left
-empty so production posture checks are a no-op. Do not treat compose
+optional empty OTLP, and `HOLON_ENV` left empty so production posture
+checks are a no-op. There is no dev-login shortcut — bootstrap requires
+`HOLON_BOOTSTRAP_ADMIN_SECRET` in every environment, local included; see
+[docs/ops/seed-data.md](docs/ops/seed-data.md). Do not treat compose
 defaults as a production posture.
 
 ## Known residual risks

@@ -47,7 +47,6 @@ data:
   HOLON_OIDC_WORKSPACE_GROUP_PREFIX: {{ .Values.oidc.workspaceGroupPrefix | default "workspace:" | quote }}
   {{- end }}
   HOLON_SPICEDB_SCHEMA_PATH: {{ .Values.external.spicedbSchemaPath | default "/app/spicedb-schema.zed" | quote }}
-  HOLON_ALLOW_DEV_LOGIN: {{ .Values.allowDevLogin | quote }}
   HOLON_INTELLIGENCE_ENABLED: {{ .Values.intelligenceEnabled | default true | quote }}
   HOLON_LLM_PROVIDER: {{ .Values.llmProvider | default "anthropic" | quote }}
   HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: {{ .Values.servingStoreRequireMaterialized | default false | quote }}

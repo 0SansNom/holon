@@ -39,8 +39,7 @@ def _authz(*, admin_rels=None):
 
 @pytest.fixture(autouse=True)
 def _bootstrap_env(monkeypatch):
-    monkeypatch.setenv("HOLON_ALLOW_DEV_LOGIN", "true")
-    monkeypatch.delenv("HOLON_BOOTSTRAP_ADMIN_SECRET", raising=False)
+    monkeypatch.setenv("HOLON_BOOTSTRAP_ADMIN_SECRET", "test-bootstrap-secret")
     monkeypatch.delenv("HOLON_BOOTSTRAP_ADMIN_RESET_SECRET", raising=False)
     monkeypatch.setenv("HOLON_BOOTSTRAP_ADMIN_LOCAL_NAME", "admin")
 
@@ -166,8 +165,7 @@ def test_workspace_tenant_mismatch_fails_closed():
         asyncio.run(_body())
 
 
-def test_production_empty_requires_bootstrap_secret(monkeypatch):
-    monkeypatch.setenv("HOLON_ALLOW_DEV_LOGIN", "false")
+def test_empty_instance_requires_bootstrap_secret_in_every_env(monkeypatch):
     monkeypatch.delenv("HOLON_BOOTSTRAP_ADMIN_SECRET", raising=False)
 
     pool = _pool(fetchrow=AsyncMock(return_value=None), fetch=[])

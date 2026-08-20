@@ -118,13 +118,16 @@ jobs:
       - name: Provision test fixtures
         run: make provision-test-fixtures
 
-      - name: Seed source ERP rows
+      - name: Seed fake external source systems
+        # Postgres source_erp, Mongo support_desk, the CSV/reviews-api/
+        # Kafka-stream fixtures — none of these load on a plain `make up`
+        # any more (test-only, opt-in via this target specifically).
         run: make seed
 
       - name: Sync test datasets
-        # `make seed` only loads raw rows into source_erp — it never
-        # calls /sync, so nothing is catalogued into Iceberg yet. A large
-        # slice of tests/ assume Customer/Order/etc. already resolve.
+        # `make seed` never calls /sync itself, so nothing is catalogued
+        # into Iceberg yet. A large slice of tests/ assume Customer/Order/
+        # etc. already resolve.
         # Poll Knowledge /catalog/datasets until each sync converges
         # (async catalog consumer after connectivity.sync.completed).
         run: |

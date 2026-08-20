@@ -30,10 +30,11 @@ def assert_production_posture(*, service_name: str) -> None:
     name = service_name.lower()
 
     # Demo data is never auto-seeded. Empty-instance bootstrap is Identity's
-    # ensure_instance_bootstrap only (admin + tenant/workspace).
-
-    if _truthy("HOLON_ALLOW_DEV_LOGIN"):
-        violations.append("HOLON_ALLOW_DEV_LOGIN must not be truthy in production")
+    # ensure_instance_bootstrap only (admin + tenant/workspace). There is no
+    # HOLON_ALLOW_DEV_LOGIN flag to check any more — bootstrap unconditionally
+    # requires HOLON_BOOTSTRAP_ADMIN_SECRET in every environment (seed.py's
+    # _require_bootstrap_admin_secret), so there's no permissive default left
+    # for this check to guard against.
 
     if not (os.environ.get("HOLON_METRICS_TOKEN") or "").strip():
         violations.append("HOLON_METRICS_TOKEN must be set (non-empty) in production")

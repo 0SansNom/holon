@@ -88,9 +88,10 @@ async function request<T>(method: string, url: string, body?: unknown, options: 
     ? AbortSignal.any([options.signal, timeoutController.signal])
     : timeoutController.signal;
   // The session lives in an HttpOnly cookie now, not a token this code
-  // ever holds — `credentials: "include"` is what makes the browser
-  // attach it (and accept `Set-Cookie` from `/login`) across the 5
-  // different service ports this SPA calls directly.
+  // ever holds. All calls are same-origin (Experience proxies to the
+  // internal services — see api/config.ts), so the browser attaches the
+  // cookie automatically regardless; `credentials: "include"` is kept
+  // for explicitness rather than because it's load-bearing here.
   try {
     const response = await fetch(url, {
       method,
