@@ -49,6 +49,7 @@ SERVICE_NAME = "experience-platform"
 configure_json_logging(SERVICE_NAME)
 
 IDENTITY_URL = os.environ["HOLON_IDENTITY_URL"]
+CONNECTIVITY_URL = os.environ["HOLON_CONNECTIVITY_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
@@ -205,6 +206,50 @@ async def _post_json(url: str, *, authorization: Optional[str] = None, json: Opt
         # plain-text 500 from an unhandled exception) — parsing it as
         # JSON must not itself become an unhandled crash here.
         return upstream.status_code, {"detail": upstream.text}
+
+
+_HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "date", "server"}
+
+
+async def _relay(base_url: str, path: str, request: Request) -> Response:
+    target = f"{base_url}/{path}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    body = await request.body()
+
+    async def _do() -> httpx.Response:
+        return await app.state.client.request(
+            request.method, target, params=request.query_params,
+            headers=headers, content=body, follow_redirects=False,
+        )
+
+    try:
+        upstream = await app.state.breaker.call(_do)
+    except CircuitBreakerOpenError:
+        return Response(
+            content=b'{"detail": "upstream temporarily unavailable"}', status_code=503, media_type="application/json"
+        )
+    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=response_headers)
+
+
+@app.api_route("/api/identity/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_identity(path: str, request: Request) -> Response:
+    return await _relay(IDENTITY_URL, path, request)
+
+
+@app.api_route("/api/connectivity/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_connectivity(path: str, request: Request) -> Response:
+    return await _relay(CONNECTIVITY_URL, path, request)
+
+
+@app.api_route("/api/knowledge/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_knowledge(path: str, request: Request) -> Response:
+    return await _relay(KNOWLEDGE_URL, path, request)
+
+
+@app.api_route("/api/intelligence/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_intelligence(path: str, request: Request) -> Response:
+    return await _relay(INTELLIGENCE_URL, path, request)
 
 
 @app.get("/health")

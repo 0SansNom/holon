@@ -27,6 +27,7 @@ x-app-env: &app-env
   HOLON_INTELLIGENCE_ENABLED: ${HOLON_INTELLIGENCE_ENABLED:-true}
   HOLON_LLM_PROVIDER: ${HOLON_LLM_PROVIDER:-anthropic}
   HOLON_METRICS_TOKEN: ${HOLON_METRICS_TOKEN:-}
+  HOLON_CORS_ORIGINS: ${HOLON_CORS_ORIGINS:-http://localhost:5173,http://localhost:8004}
   # OIDC (identity reads these; empty issuer keeps local secret login only).
   HOLON_OIDC_ISSUER: ${HOLON_OIDC_ISSUER:-}
   HOLON_OIDC_CLIENT_ID: ${HOLON_OIDC_CLIENT_ID:-}
@@ -346,6 +347,7 @@ services:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_knowledge
       HOLON_MINTABLE_PRINCIPAL_URNS: knowledge-project-validator,knowledge-model-caller
+      HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: ${HOLON_SERVING_STORE_REQUIRE_MATERIALIZED:-}
       HOLON_IDENTITY_URL: http://identity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
       HOLON_OPENSEARCH_URL: http://opensearch:9200
@@ -505,6 +507,7 @@ services:
       HOLON_MINTABLE_PRINCIPAL_URNS: ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
       HOLON_IDENTITY_URL: http://identity:8000
+      HOLON_CONNECTIVITY_URL: http://connectivity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
     volumes:
       - ./libs:/app/libs
@@ -516,6 +519,8 @@ services:
       postgres:
         condition: service_healthy
       knowledge:
+        condition: service_started
+      connectivity:
         condition: service_started
       spicedb:
         condition: service_started
