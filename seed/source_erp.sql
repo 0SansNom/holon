@@ -1,6 +1,30 @@
--- Idempotent reset of the demo source data (tables already created by docker/postgres-init/01-init.sql
--- on first container boot). Used by `make seed` to reset state without wiping the whole volume.
--- Truncated together: orders.customer_id references customers(id).
+-- Test-only fixture data for the source_erp DB — schema and rows both live
+-- here (docker/postgres-init/01-init.sql only creates the empty database,
+-- on purpose: a fresh `make up` boots empty, no test-only rows). `make
+-- seed` is the explicit opt-in this depends on; never invoked automatically.
+CREATE TABLE IF NOT EXISTS customers (
+    id            SERIAL PRIMARY KEY,
+    name          TEXT NOT NULL,
+    email         TEXT NOT NULL,
+    country       TEXT NOT NULL,
+    segment       TEXT NOT NULL,
+    lifetime_value NUMERIC(12, 2) NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    account_closed BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+    id          SERIAL PRIMARY KEY,
+    customer_id INTEGER NOT NULL REFERENCES customers(id),
+    product     TEXT NOT NULL,
+    amount      NUMERIC(12, 2) NOT NULL,
+    status      TEXT NOT NULL,
+    ordered_at  TIMESTAMPTZ NOT NULL
+);
+
+-- Idempotent reset: truncated together since orders.customer_id
+-- references customers(id). Re-running resets state without wiping the
+-- whole volume.
 TRUNCATE TABLE orders, customers RESTART IDENTITY;
 
 INSERT INTO customers (name, email, country, segment, lifetime_value) VALUES
