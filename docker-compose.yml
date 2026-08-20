@@ -23,7 +23,6 @@ x-app-env: &app-env
   # 127.0.0.1 inside containers — that address is the container itself,
   # so every service would spam connection-refused forever.
   HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-}
-  HOLON_ALLOW_DEV_LOGIN: ${HOLON_ALLOW_DEV_LOGIN:-true}
   HOLON_INTELLIGENCE_ENABLED: ${HOLON_INTELLIGENCE_ENABLED:-true}
   HOLON_LLM_PROVIDER: ${HOLON_LLM_PROVIDER:-anthropic}
   HOLON_METRICS_TOKEN: ${HOLON_METRICS_TOKEN:-}
@@ -275,10 +274,10 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_identity
-      # Identity is the only service allowed to mint user JWTs in production.
       HOLON_ALLOW_USER_JWT_MINT: "true"
-      # Explicit empty allowlist — Identity does not mint SA/agent tokens.
       HOLON_MINTABLE_PRINCIPAL_URNS: ""
+      HOLON_BOOTSTRAP_ADMIN_SECRET: ${HOLON_BOOTSTRAP_ADMIN_SECRET:-}
+      HOLON_BOOTSTRAP_ADMIN_RESET_SECRET: ${HOLON_BOOTSTRAP_ADMIN_RESET_SECRET:-}
     volumes:
       - ./libs:/app/libs
       - ./services/identity/app:/app/app

@@ -49,7 +49,6 @@ from . import oidc as oidc_client
 from .seed import (
     VALID_PROJECT_RELATIONS,
     VALID_WORKSPACE_RELATIONS,
-    allow_dev_login,
     create_project,
     create_tenant,
     create_workspace,
@@ -186,13 +185,6 @@ def _grant_subject_relation(target: Principal) -> str | None:
     return "member" if target.type == "group" else None
 
 
-def _reject_dev_secret_if_disabled(client_secret: str) -> None:
-    if allow_dev_login():
-        return
-    if isinstance(client_secret, str) and client_secret.endswith("-dev-secret"):
-        raise HolonError.forbidden('PrincipalDisabled', "dev client_secret login disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",)
-
-
 async def _require_grant_target(urn: str, *, tenant_id: str) -> Principal:
     target = await _fetch_principal(app.state.pool, urn)
     if target is None:
@@ -267,7 +259,6 @@ async def mint_token(request: TokenRequest) -> dict:
     """
     row = await _require_active_principal_row(request.principal_urn)
     _reject_group_authentication(row)
-    _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     principal = _principal_from_row(row)
@@ -309,7 +300,6 @@ async def oauth2_token(request: OAuth2TokenForm) -> dict:
         sa_urn = build_urn(TENANT_ID, "global", "service-account", client_id)
         row = await _require_active_principal_row(sa_urn)
     _reject_group_authentication(row)
-    _reject_dev_secret_if_disabled(request.client_secret)
     if not secrets.compare_digest(row["client_secret"], request.client_secret):
         raise HolonError.unauthorized("InvalidCredentials", "invalid client_id or client_secret")
     principal = _principal_from_row(row)
@@ -331,7 +321,6 @@ async def login(request: TokenRequest, response: Response) -> dict:
     try:
         row = await _require_active_principal_row(request.principal_urn)
         _reject_group_authentication(row)
-        _reject_dev_secret_if_disabled(request.client_secret)
         if not secrets.compare_digest(row["client_secret"], request.client_secret):
             raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     except HolonError as exc:

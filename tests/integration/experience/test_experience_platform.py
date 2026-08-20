@@ -43,38 +43,8 @@ def test_experience_config():
     assert body["workspace_id"] == "main"
     assert "default_user_urn" not in body
     assert "customer_object_type_urn" not in body
-    assert "allow_dev_login" in body
     assert "intelligence_enabled" in body
-    assert isinstance(body["allow_dev_login"], bool)
     assert isinstance(body["intelligence_enabled"], bool)
-
-
-def test_experience_token_proxy_is_limited_to_authenticated_self(jdoe_token: str):
-    """The legacy proxy may refresh self, but cannot mint another identity."""
-    user_urn = f"hl:{TENANT_ID}:global:user:jdoe"
-    status, body = _request(
-        "POST", f"{EXPERIENCE}/api/token", token=jdoe_token, body={"principal_urn": user_urn}
-    )
-    assert status == 200
-    assert "access_token" in body
-    assert body["token_type"] == "bearer"
-
-    status, body = _request(
-        "POST",
-        f"{EXPERIENCE}/api/token",
-        token=jdoe_token,
-        body={"principal_urn": f"hl:{TENANT_ID}:global:user:msmith"},
-    )
-    assert status == 403, body
-
-
-def test_experience_token_proxy_rejects_anonymous_callers():
-    status, body = _request(
-        "POST",
-        f"{EXPERIENCE}/api/token",
-        body={"principal_urn": f"hl:{TENANT_ID}:global:user:jdoe"},
-    )
-    assert status == 401, body
 
 
 def test_experience_lineage_proxy(jdoe_token: str):

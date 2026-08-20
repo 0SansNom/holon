@@ -68,10 +68,6 @@ WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
 
 
-def _allow_dev_login() -> bool:
-    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "false").lower() in {"1", "true", "yes"}
-
-
 def _intelligence_enabled() -> bool:
     return os.environ.get("HOLON_INTELLIGENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
 
@@ -139,10 +135,6 @@ instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
-
-
-class TokenRequest(BaseModel):
-    principal_urn: str
 
 
 async def _proxy(method: str, url: str, *, authorization: Optional[str] = None, json: Optional[dict] = None) -> Response:
@@ -276,7 +268,6 @@ async def config() -> dict:
     return {
         "tenant_id": TENANT_ID,
         "workspace_id": WORKSPACE_ID,
-        "allow_dev_login": _allow_dev_login(),
         "intelligence_enabled": _intelligence_enabled(),
     }
 
@@ -302,23 +293,6 @@ async def list_experience_audit_events(
         outcome=outcome,
         page_size=50 if pageSize is None else pageSize,
         page_token=pageToken,
-    )
-
-
-@app.post("/api/token")
-async def mint_token(request: TokenRequest, principal: Principal = Depends(current_principal)) -> Response:
-    """Dev-only token mint helper — derives `*-dev-secret` server-side.
-    Disabled when `HOLON_ALLOW_DEV_LOGIN` is false. Prefer Identity
-    `/login` (cookie session) or OIDC.
-    """
-    if not _allow_dev_login():
-        raise HolonError.forbidden('PrincipalDisabled', "demo token proxy disabled (set HOLON_ALLOW_DEV_LOGIN=true for local demo)",)
-    if request.principal_urn != principal.urn:
-        raise HolonError.forbidden('ForbiddenMint', "cannot mint a token for another principal")
-    local_name = request.principal_urn.rsplit(":", 1)[-1]
-    client_secret = f"{local_name}-dev-secret"
-    return await _proxy(
-        "POST", f"{IDENTITY_URL}/token", json={"principal_urn": request.principal_urn, "client_secret": client_secret}
     )
 
 
