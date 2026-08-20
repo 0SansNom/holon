@@ -16,9 +16,30 @@ import time
 import urllib.error
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "libs"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "libs"))
 
 from holon_sdk import HolonClient  # noqa: E402
+
+
+def _bootstrap_admin_secret() -> str:
+    """No dev-login fallback any more — the bootstrap admin's real secret
+    only lives in .env (this script runs on the host, not in a container,
+    so it isn't necessarily in the invoking shell's own environment).
+    Same read-.env-directly pattern as cleanup_pytest_leftovers.py's
+    postgres_password()."""
+    value = os.environ.get("HOLON_BOOTSTRAP_ADMIN_SECRET")
+    if value:
+        return value
+    env_path = REPO / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("HOLON_BOOTSTRAP_ADMIN_SECRET="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise RuntimeError(
+        "HOLON_BOOTSTRAP_ADMIN_SECRET not set (env or .env) — required to sign in as the bootstrap admin"
+    )
+
 
 IDENTITY = os.environ.get("HOLON_TEST_IDENTITY_URL", "http://localhost:8001")
 CONNECTIVITY = os.environ.get("HOLON_TEST_CONNECTIVITY_URL", "http://localhost:8002")
@@ -199,7 +220,7 @@ def main() -> None:
 
     admin_urn = _urn("user", ADMIN_LOCAL)
     print(f"Signing in as bootstrap admin {admin_urn}…")
-    admin_token = client.token_for(admin_urn)
+    admin_token = client.token_for(admin_urn, client_secret=_bootstrap_admin_secret())
 
     for local, ptype, display, country, on_behalf, relation in PERSONAS:
         type_seg = "service-account" if ptype == "service_account" else ptype

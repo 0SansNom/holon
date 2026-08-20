@@ -66,13 +66,10 @@ CREATE TABLE IF NOT EXISTS oidc_pending_state (
 
 
 def client_secret_for(local_name: str) -> str:
-    """Return dev client secret for local testing."""
+    """Convenience default for fixture/test principals that don't pass an
+    explicit client_secret — just a readable string, not a privileged one;
+    nothing treats this pattern specially at auth time."""
     return f"{local_name}-dev-secret"
-
-
-def allow_dev_login() -> bool:
-    """When false, reject client_secrets that match the *-dev-secret pattern."""
-    return os.environ.get("HOLON_ALLOW_DEV_LOGIN", "false").lower() in {"1", "true", "yes"}
 
 
 def tenant_urn(tenant_id: str) -> str:
@@ -133,7 +130,7 @@ async def ensure_instance_bootstrap(
 
     needs_admin = not await _has_usable_workspace_admin(pool, authz, w_urn)
     if needs_admin:
-        secret = _resolve_bootstrap_admin_secret(admin_local)
+        secret = _require_bootstrap_admin_secret()
         await _ensure_bootstrap_admin_principal(pool, tenant_id=tenant_id, admin_urn=admin_urn, secret=secret)
         await authz.write_relationship(
             resource_type="tenant", resource_urn=t_urn, relation="member", subject_urn=admin_urn,
@@ -142,7 +139,7 @@ async def ensure_instance_bootstrap(
             resource_type="workspace", resource_urn=w_urn, relation="admin", subject_urn=admin_urn,
         )
     elif _truthy("HOLON_BOOTSTRAP_ADMIN_RESET_SECRET"):
-        secret = _resolve_bootstrap_admin_secret(admin_local, require_explicit=True)
+        secret = _require_bootstrap_admin_secret()
         updated = await pool.execute(
             "UPDATE principal SET client_secret = $1, status = 'active' WHERE urn = $2",
             secret,
@@ -163,19 +160,16 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
 
 
-def _resolve_bootstrap_admin_secret(admin_local: str, *, require_explicit: bool = False) -> str:
+def _require_bootstrap_admin_secret() -> str:
+    """Unconditional in every environment — no dev-login fallback. A local
+    stack bootstraps exactly the same way a production one does: set
+    HOLON_BOOTSTRAP_ADMIN_SECRET in .env before first boot."""
     secret = (os.environ.get("HOLON_BOOTSTRAP_ADMIN_SECRET") or "").strip()
     if secret:
         return secret
-    if require_explicit:
-        raise RuntimeError(
-            "HOLON_BOOTSTRAP_ADMIN_RESET_SECRET requires HOLON_BOOTSTRAP_ADMIN_SECRET"
-        )
-    if allow_dev_login():
-        return client_secret_for(admin_local)
     raise RuntimeError(
-        "empty / unrepaired Identity bootstrap requires HOLON_BOOTSTRAP_ADMIN_SECRET "
-        "(or HOLON_ALLOW_DEV_LOGIN=true for local *-dev-secret)"
+        "empty / unrepaired Identity bootstrap (or HOLON_BOOTSTRAP_ADMIN_RESET_SECRET) "
+        "requires HOLON_BOOTSTRAP_ADMIN_SECRET to be set"
     )
 
 

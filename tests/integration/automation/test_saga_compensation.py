@@ -82,8 +82,6 @@ def test_failed_external_write_compensates_the_local_mutation(jdoe_token: str, m
     assert status == 200, decision
     assert decision["sagaStatus"] == "processing", decision
 
-    # Automation will call Connectivity (fails on the sentinel), then call
-    # Knowledge back to compensate
     deadline = time.monotonic() + 30
     customer, approval = {}, {}
     while time.monotonic() < deadline:
@@ -95,13 +93,9 @@ def test_failed_external_write_compensates_the_local_mutation(jdoe_token: str, m
             break
         time.sleep(1)
 
-    # Knowledge's own overlay must have been reverted, not left showing a
-    # close that was actually rolled back.
     assert customer.get("account_closed") is not True, customer
     assert approval["status"] == "failed", approval
 
-    # The source system must never actually have been changed
-    # failed before Connectivity applied anything durable.
     status, source_row = _request("GET", f"{CONNECTIVITY}/source/customers/{customer_id}", token=jdoe_token)
     assert status == 200, source_row
     assert source_row["account_closed"] is False, source_row

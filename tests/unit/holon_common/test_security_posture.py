@@ -20,7 +20,6 @@ from holon_common.security_posture import (  # noqa: E402
 def _clear_posture_env(monkeypatch) -> None:
     for key in (
         "HOLON_ENV",
-        "HOLON_ALLOW_DEV_LOGIN",
         "HOLON_METRICS_TOKEN",
         "HOLON_CORS_ORIGINS",
         "HOLON_MINTABLE_PRINCIPAL_URNS",
@@ -40,7 +39,6 @@ def _clear_posture_env(monkeypatch) -> None:
 def _base_prod(monkeypatch) -> None:
     _clear_posture_env(monkeypatch)
     monkeypatch.setenv("HOLON_ENV", "production")
-    monkeypatch.setenv("HOLON_ALLOW_DEV_LOGIN", "false")
     monkeypatch.setenv("HOLON_METRICS_TOKEN", "metrics-secret")
     monkeypatch.setenv("HOLON_CORS_ORIGINS", "https://holon.example.com")
 
@@ -60,14 +58,6 @@ def test_assert_production_posture_noop_outside_prod(monkeypatch) -> None:
     _clear_posture_env(monkeypatch)
     monkeypatch.setenv("HOLON_ENV", "dev")
     assert_production_posture(service_name="connectivity-platform")
-
-
-def test_assert_production_posture_raises_when_dev_login_true(monkeypatch) -> None:
-    _base_prod(monkeypatch)
-    monkeypatch.setenv("HOLON_ALLOW_DEV_LOGIN", "true")
-    monkeypatch.setenv("HOLON_MINTABLE_PRINCIPAL_URNS", "connectivity-pipeline-runner")
-    with pytest.raises(ProductionSecurityError, match="HOLON_ALLOW_DEV_LOGIN"):
-        assert_production_posture(service_name="connectivity-platform")
 
 
 def test_assert_production_posture_passes_identity(monkeypatch) -> None:

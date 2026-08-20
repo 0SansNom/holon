@@ -3,6 +3,7 @@ import { Shell } from "./components/Shell/Shell";
 import { LoginScreen } from "./components/Auth/LoginScreen";
 import { DetailPageSkeleton, TablePageSkeleton } from "./components/common/Skeleton";
 import { useAuthStore } from "./store/auth";
+import { identityApi } from "./api/identity";
 import { parseOntologyTab } from "./components/Ontology/ontologyTabs";
 import { lazyPage } from "./lib/lazyPage";
 
@@ -87,8 +88,14 @@ const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "shell",
   component: Shell,
-  beforeLoad: () => {
-    if (!useAuthStore.getState().session) {
+  beforeLoad: async () => {
+    if (useAuthStore.getState().session) {
+      return;
+    }
+    try {
+      const principal = await identityApi.whoami();
+      useAuthStore.getState().setSession({ principal });
+    } catch {
       throw redirect({ to: "/login" });
     }
   },

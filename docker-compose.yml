@@ -23,10 +23,10 @@ x-app-env: &app-env
   # 127.0.0.1 inside containers — that address is the container itself,
   # so every service would spam connection-refused forever.
   HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-}
-  HOLON_ALLOW_DEV_LOGIN: ${HOLON_ALLOW_DEV_LOGIN:-true}
   HOLON_INTELLIGENCE_ENABLED: ${HOLON_INTELLIGENCE_ENABLED:-true}
   HOLON_LLM_PROVIDER: ${HOLON_LLM_PROVIDER:-anthropic}
   HOLON_METRICS_TOKEN: ${HOLON_METRICS_TOKEN:-}
+  HOLON_CORS_ORIGINS: ${HOLON_CORS_ORIGINS:-http://localhost:5173,http://localhost:8004}
   # OIDC (identity reads these; empty issuer keeps local secret login only).
   HOLON_OIDC_ISSUER: ${HOLON_OIDC_ISSUER:-}
   HOLON_OIDC_CLIENT_ID: ${HOLON_OIDC_CLIENT_ID:-}
@@ -84,14 +84,27 @@ services:
     volumes:
       - minio-data:/data
 
+  # Infra only: creates the warehouse bucket, no fixture files copied in.
   minio-init:
     image: minio/mc:latest
     depends_on:
       - minio
+    entrypoint: >
+      /bin/sh -c " until mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD}; do echo waiting for minio; sleep 2; done && mc mb -p local/holon-warehouse || true && echo bucket ready "
+
+  # Test-only fixture file for the CSV connector — not started by default.
+  # `make seed` (or `docker compose --profile test-fixtures run --rm
+  # csv-seed`) copies it in when actually needed.
+  csv-seed:
+    profiles: [ "test-fixtures" ]
+    image: minio/mc:latest
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
     volumes:
       - ./docker/csv-seed:/seed:ro
     entrypoint: >
-      /bin/sh -c " until mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD}; do echo waiting for minio; sleep 2; done && mc mb -p local/holon-warehouse || true && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo bucket ready "
+      /bin/sh -c " mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD} && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo csv seeded "
 
   iceberg-rest:
     image: tabulario/iceberg-rest:1.6.0
@@ -165,13 +178,19 @@ services:
 
   mongodb:
     image: mongo:7
+    # No init-script mount: boots with an empty support_desk DB. Test-only
+    # fixture rows (docker/mongo-init/init.js) are loaded on demand by
+    # `make seed`, never automatically — see docs/ops/seed-data.md.
     volumes:
-      - ./docker/mongo-init:/docker-entrypoint-initdb.d:ro
       - mongo-data:/data/db
     ports:
       - "27017:27017"
 
+  # Fake external REST API (reviews/exchange-rate/weather feeds) — test-only,
+  # not started by default. `make seed` (or `docker compose --profile
+  # test-fixtures up -d reviews-api`) brings it up when actually needed.
   reviews-api:
+    profiles: [ "test-fixtures" ]
     image: python:3.12-slim
     working_dir: /data
     volumes:
@@ -212,11 +231,8 @@ services:
       timeout: 5s
       retries: 30
 
-  # One-shot: seeds a Kafka topic to simulate an *external* streaming
-  # source (streaming Connectivity capability) — reuses the same Redpanda image already
-  # pulled for the `redpanda` service, no new image, no persistent
-  # container (same one-shot pattern as `minio-init`/mongo's init script).
   inventory-stream-seed:
+    profiles: [ "test-fixtures" ]
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
     depends_on:
       redpanda:
@@ -274,10 +290,10 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_identity
-      # Identity is the only service allowed to mint user JWTs in production.
       HOLON_ALLOW_USER_JWT_MINT: "true"
-      # Explicit empty allowlist — Identity does not mint SA/agent tokens.
       HOLON_MINTABLE_PRINCIPAL_URNS: ""
+      HOLON_BOOTSTRAP_ADMIN_SECRET: ${HOLON_BOOTSTRAP_ADMIN_SECRET:-}
+      HOLON_BOOTSTRAP_ADMIN_RESET_SECRET: ${HOLON_BOOTSTRAP_ADMIN_RESET_SECRET:-}
     volumes:
       - ./libs:/app/libs
       - ./services/identity/app:/app/app
@@ -326,14 +342,10 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_started
-      reviews-api:
-        condition: service_started
       iceberg-rest:
         condition: service_started
       redpanda:
         condition: service_healthy
-      inventory-stream-seed:
-        condition: service_completed_successfully
 
   knowledge:
     build:
@@ -346,6 +358,7 @@ services:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_knowledge
       HOLON_MINTABLE_PRINCIPAL_URNS: knowledge-project-validator,knowledge-model-caller
+      HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: ${HOLON_SERVING_STORE_REQUIRE_MATERIALIZED:-}
       HOLON_IDENTITY_URL: http://identity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
       HOLON_OPENSEARCH_URL: http://opensearch:9200
@@ -505,6 +518,7 @@ services:
       HOLON_MINTABLE_PRINCIPAL_URNS: ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
       HOLON_IDENTITY_URL: http://identity:8000
+      HOLON_CONNECTIVITY_URL: http://connectivity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
     volumes:
       - ./libs:/app/libs
@@ -516,6 +530,8 @@ services:
       postgres:
         condition: service_healthy
       knowledge:
+        condition: service_started
+      connectivity:
         condition: service_started
       spicedb:
         condition: service_started

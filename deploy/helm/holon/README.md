@@ -50,6 +50,7 @@ least:
 | `ANTHROPIC_API_KEY` | intelligence |
 | `HOLON_OIDC_CLIENT_SECRET` | identity, only if `oidc.enabled` |
 | `VOYAGE_API_KEY` | intelligence, only if `HOLON_EMBEDDING_PROVIDER=voyage` |
+| `HOLON_BOOTSTRAP_ADMIN_SECRET` | identity — required on first boot of an empty instance (or break-glass repair with `HOLON_BOOTSTRAP_ADMIN_RESET_SECRET=true`, also here); `envFrom: secretRef` exposes every key you put in this Secret, so no chart template change is needed to add it |
 
 `secretBackend` (default `kubernetes`) is read by `libs/holon_common`'s
 pluggable secret provider — `env` (this chart's actual mechanism, despite

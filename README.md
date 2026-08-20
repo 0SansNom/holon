@@ -82,16 +82,17 @@ primitives, plugin registry) lives in `libs/holon_common`.
 ## Running it
 
 ```bash
-cp .env.example .env   # fill in real values — never commit .env
+cp .env.example .env   # set a real HOLON_BOOTSTRAP_ADMIN_SECRET — never commit .env
 docker compose up -d --build   # or `make up`
 ```
 
 After a **fresh** volume set, Identity creates tenant `acme`, workspace
-`main`, and bootstrap admin `hl:acme:global:user:admin`. With
-`HOLON_ALLOW_DEV_LOGIN=true` (compose default), sign in as that URN with
-secret `admin-dev-secret` (UI at `http://localhost:8004`, or Vite below).
-In production set `HOLON_BOOTSTRAP_ADMIN_SECRET` and
-`HOLON_ALLOW_DEV_LOGIN=false` — see [docs/ops/seed-data.md](docs/ops/seed-data.md).
+`main`, and bootstrap admin `hl:acme:global:user:admin` with the
+`HOLON_BOOTSTRAP_ADMIN_SECRET` you set — sign in as that URN with that
+secret (UI at `http://localhost:8004`, or Vite below). There is no
+dev-login shortcut: local behaves the same as production here, and
+`HOLON_BOOTSTRAP_ADMIN_SECRET` is required in every environment — see
+[docs/ops/seed-data.md](docs/ops/seed-data.md).
 
 The platform starts **without** demo ObjectTypes or connectors. Create
 them via the APIs, or for local/CI only:
