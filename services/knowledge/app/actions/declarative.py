@@ -628,7 +628,7 @@ async def validate_generic_action(
             continue
         _ok_param(name, required=required)
 
-    for name, value in parameters.items():
+    for name, _value in parameters.items():
         if name == "reason":
             continue
         if name not in declared_parameters:

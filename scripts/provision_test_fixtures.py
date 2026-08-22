@@ -19,15 +19,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "libs"))
 
-from holon_sdk import HolonClient  # noqa: E402
+from holon_sdk import HolonClient
 
 
 def _bootstrap_admin_secret() -> str:
     """No dev-login fallback any more — the bootstrap admin's real secret
     only lives in .env (this script runs on the host, not in a container,
-    so it isn't necessarily in the invoking shell's own environment).
-    Same read-.env-directly pattern as cleanup_pytest_leftovers.py's
-    postgres_password()."""
+    so it isn't necessarily in the invoking shell's own environment)."""
     value = os.environ.get("HOLON_BOOTSTRAP_ADMIN_SECRET")
     if value:
         return value
@@ -51,11 +49,11 @@ ADMIN_LOCAL = os.environ.get("HOLON_BOOTSTRAP_ADMIN_LOCAL_NAME", "admin")
 client = HolonClient(identity_url=IDENTITY)
 
 PLUGINS = [
-    "app.plugins.postgres_customers_plugin:PostgresCustomersPlugin",
-    "app.plugins.postgres_orders_plugin:PostgresOrdersPlugin",
-    "app.plugins.mongo_support_tickets_plugin:MongoSupportTicketsPlugin",
-    "app.plugins.reviews_rest_plugin:ReviewsRestPlugin",
-    "app.plugins.csv_suppliers_plugin:CsvSuppliersPlugin",
+    "holon_test_plugins.postgres_customers_plugin:PostgresCustomersPlugin",
+    "holon_test_plugins.postgres_orders_plugin:PostgresOrdersPlugin",
+    "holon_test_plugins.mongo_support_tickets_plugin:MongoSupportTicketsPlugin",
+    "holon_test_plugins.reviews_rest_plugin:ReviewsRestPlugin",
+    "holon_test_plugins.csv_suppliers_plugin:CsvSuppliersPlugin",
 ]
 
 OBJECT_TYPES = [
@@ -232,6 +230,9 @@ def main() -> None:
             "display_name": display,
             "country": country,
             "on_behalf_of": on_behalf,
+            # Explicit test-fixture convention — the pytest suite mints
+            # tokens with exactly this secret; nothing derives it any more.
+            "client_secret": f"{local}-dev-secret",
         }
         status, created = client.request("POST", f"{IDENTITY}/principals", token=admin_token, body=body)
         if status not in (201, 409):
@@ -249,7 +250,7 @@ def main() -> None:
             print(f"  grant {local} → {relation}")
 
     try:
-        editor_token = client.token_for(_urn("user", "jdoe"))
+        editor_token = client.token_for(_urn("user", "jdoe"), client_secret="jdoe-dev-secret")
     except TimeoutError:
         editor_token = admin_token
 
@@ -291,7 +292,7 @@ def main() -> None:
     if status not in (200, 201, 409):
         raise SystemExit(f"write-target customers: {status} {body}")
 
-    admin_or_msmith = client.token_for(_urn("user", "msmith"))
+    admin_or_msmith = client.token_for(_urn("user", "msmith"), client_secret="msmith-dev-secret")
     for name, dataset, mapping, title_key, column_classification in OBJECT_TYPES:
         dataset_urn = f"hl:{TENANT_ID}:{WORKSPACE_ID}:dataset:{dataset}"
         status, body = client.request(
@@ -343,7 +344,7 @@ def main() -> None:
         "POST",
         f"{KNOWLEDGE}/api/holon/function-plugins",
         token=admin_or_msmith,
-        body={"entry_point": "app.plugins.lifetime_tier_function:LifetimeTierFunction"},
+        body={"entry_point": "holon_test_plugins.lifetime_tier_function:LifetimeTierFunction"},
     )
     if status not in (200, 201, 409):
         raise SystemExit(f"function-plugin lifetime_tier: {status} {body}")
