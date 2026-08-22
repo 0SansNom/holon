@@ -50,7 +50,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./tests/fixtures/postgres-init:/docker-entrypoint-initdb.d:ro
       - pg-data:/var/lib/postgresql/data
     healthcheck:
       # -d postgres explicit: pg_isready defaults the target database to
@@ -102,7 +102,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     volumes:
-      - ./docker/csv-seed:/seed:ro
+      - ./tests/fixtures/csv-seed:/seed:ro
     entrypoint: >
       /bin/sh -c " mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD} && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo csv seeded "
 
@@ -172,14 +172,14 @@ services:
       - --addr=:8181
       - /policies/holon.rego
     volumes:
-      - ./docker/opa/holon.rego:/policies/holon.rego:ro
+      - ./tests/fixtures/opa/holon.rego:/policies/holon.rego:ro
     ports:
       - "8281:8181"
 
   mongodb:
     image: mongo:7
     # No init-script mount: boots with an empty support_desk DB. Test-only
-    # fixture rows (docker/mongo-init/init.js) are loaded on demand by
+    # fixture rows (tests/fixtures/mongo-init/init.js) are loaded on demand by
     # `make seed`, never automatically — see docs/ops/seed-data.md.
     volumes:
       - mongo-data:/data/db
@@ -194,7 +194,7 @@ services:
     image: python:3.12-slim
     working_dir: /data
     volumes:
-      - ./docker/reviews-api:/data:ro
+      - ./tests/fixtures/reviews-api:/data:ro
     command: [ "python", "-m", "http.server", "8000" ]
     ports:
       - "8091:8000"
@@ -238,7 +238,7 @@ services:
       redpanda:
         condition: service_healthy
     volumes:
-      - ./docker/stream-seed:/seed:ro
+      - ./tests/fixtures/stream-seed:/seed:ro
     entrypoint: >
       /bin/sh -c " rpk topic create external-inventory-stream --brokers redpanda:9092 -p 1 -r 1 || true && cat /seed/inventory_events.jsonl | rpk topic produce external-inventory-stream --brokers redpanda:9092 --compression none && echo stream seeded "
 
@@ -297,7 +297,7 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/identity/app:/app/app
-      - ./docker/spicedb/schema.zed:/app/spicedb-schema.zed:ro
+      - ./deploy/helm/holon/files/spicedb-schema.zed:/app/spicedb-schema.zed:ro
     ports:
       - "8001:8000"
     depends_on:
@@ -316,9 +316,10 @@ services:
       dockerfile: services/connectivity/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
+      PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_connectivity
       HOLON_MINTABLE_PRINCIPAL_URNS: connectivity-pipeline-runner
       HOLON_SOURCE_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/source_erp
@@ -332,9 +333,20 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
       HOLON_S3_ENDPOINT: http://minio:9000
+      # ADR 027 — points at a shared Airbyte instance (staging-like), never
+      # a local one; empty by default, routes under /airbyte-* just stay
+      # unavailable until an operator sets these (see _airbyte_client()).
+      HOLON_AIRBYTE_API_URL: ${HOLON_AIRBYTE_API_URL:-}
+      HOLON_AIRBYTE_CLIENT_ID: ${HOLON_AIRBYTE_CLIENT_ID:-}
+      HOLON_AIRBYTE_CLIENT_SECRET: ${HOLON_AIRBYTE_CLIENT_SECRET:-}
+      HOLON_AIRBYTE_WORKSPACE_ID: ${HOLON_AIRBYTE_WORKSPACE_ID:-}
+      HOLON_AIRBYTE_WEBHOOK_SECRET: ${HOLON_AIRBYTE_WEBHOOK_SECRET:-}
     volumes:
       - ./libs:/app/libs
       - ./services/connectivity/app:/app/app
+      # Test-only fixture plugins (tests/fixtures/plugins) — imported only
+      # when a test registers one via POST /plugins; never auto-registered.
+      - ./tests/fixtures/plugins:/opt/holon-test-plugins:ro
     ports:
       - "8002:8000"
     depends_on:
@@ -353,9 +365,10 @@ services:
       dockerfile: services/knowledge/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
+      PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_knowledge
       HOLON_MINTABLE_PRINCIPAL_URNS: knowledge-project-validator,knowledge-model-caller
       HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: ${HOLON_SERVING_STORE_REQUIRE_MATERIALIZED:-}
@@ -372,7 +385,10 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/knowledge/app:/app/app
-      - ./docker/spicedb/schema.zed:/app/spicedb-schema.zed:ro
+      - ./deploy/helm/holon/files/spicedb-schema.zed:/app/spicedb-schema.zed:ro
+      # Test-only fixture plugins (tests/fixtures/plugins) — imported only
+      # when a test registers one via POST /plugins; never auto-registered.
+      - ./tests/fixtures/plugins:/opt/holon-test-plugins:ro
     ports:
       - "8003:8000"
     depends_on:
@@ -424,9 +440,11 @@ services:
       dockerfile: services/intelligence/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
+      PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
+      HOLON_TOOL_PLUGIN_ENTRY_PREFIXES: ${HOLON_TOOL_PLUGIN_ENTRY_PREFIXES:-app.tool_plugins.,holon_test_plugins.}
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_intelligence
       HOLON_MINTABLE_PRINCIPAL_URNS: intelligence-indexer,ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
@@ -493,6 +511,9 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/intelligence/app:/app/app
+      # Test-only fixture plugins (tests/fixtures/plugins) — imported only
+      # when a test registers one via POST /plugins; never auto-registered.
+      - ./tests/fixtures/plugins:/opt/holon-test-plugins:ro
     ports:
       - "8006:8000"
     depends_on:
@@ -511,9 +532,10 @@ services:
       dockerfile: services/experience/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "*/plugins/*.py" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
+      PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_experience
       HOLON_MINTABLE_PRINCIPAL_URNS: ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
@@ -523,7 +545,10 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/experience/app:/app/app
-      - ./docker/spicedb/schema.zed:/app/spicedb-schema.zed:ro
+      - ./deploy/helm/holon/files/spicedb-schema.zed:/app/spicedb-schema.zed:ro
+      # Test-only fixture plugins (tests/fixtures/plugins) — imported only
+      # when a test registers one via POST /plugins; never auto-registered.
+      - ./tests/fixtures/plugins:/opt/holon-test-plugins:ro
     ports:
       - "8004:8000"
     depends_on:

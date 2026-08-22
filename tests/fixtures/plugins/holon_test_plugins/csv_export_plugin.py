@@ -17,7 +17,7 @@ class CsvExportPlugin:
         plugin_type="export_format",
         format_name="csv",
         content_type="text/csv",
-        entry_point="app.plugins.csv_export_plugin:CsvExportPlugin",
+        entry_point="holon_test_plugins.csv_export_plugin:CsvExportPlugin",
     )
 
     def serialize(self, rows: list[dict]) -> bytes:

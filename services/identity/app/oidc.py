@@ -7,7 +7,7 @@ import hashlib
 import logging
 import os
 import secrets
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlencode
 
 import asyncpg

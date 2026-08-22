@@ -216,7 +216,7 @@ async def _check_time_machine(object_types: list[dict]) -> list[dict]:
         if match:
             bases.setdefault(match.group(1), []).append(object_type["name"])
     findings = []
-    for base, names in bases.items():
+    for _base, names in bases.items():
         if len(names) < 2:
             continue
         for name in names:

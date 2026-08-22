@@ -18,7 +18,7 @@ class ReviewsRestPlugin:
         permissions_required=[],
         events_consumed=[],
         events_published=["connectivity.sync.completed"],
-        entry_point="app.plugins.reviews_rest_plugin:ReviewsRestPlugin",
+        entry_point="holon_test_plugins.reviews_rest_plugin:ReviewsRestPlugin",
     )
 
     async def fetch(self) -> list[dict]:

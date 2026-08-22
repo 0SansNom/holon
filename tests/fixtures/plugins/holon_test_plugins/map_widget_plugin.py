@@ -15,5 +15,5 @@ class MapWidgetPlugin:
         component_name="map",
         binding_contract={"requiredProperties": ["country"]},
         iframe_url="http://reviews-api:8000/map-widget.html",
-        entry_point="app.plugins.map_widget_plugin:MapWidgetPlugin",
+        entry_point="holon_test_plugins.map_widget_plugin:MapWidgetPlugin",
     )

@@ -13,7 +13,7 @@ import pytest
 from conftest import EXPERIENCE, IDENTITY, _request
 
 
-PLUGINS_DIR = Path(__file__).resolve().parents[3] / "services" / "experience" / "app" / "plugins"
+PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"
 
 
 def _token_for(principal_urn: str) -> str:
@@ -40,7 +40,7 @@ def _write_conflict_plugin(module_name: str, class_name: str, component_name: st
         f'        name="{module_name}", version="1.0.0", plugin_type="ui_component",\n'
         f'        component_name="{component_name}", binding_contract={{}},\n'
         '        iframe_url="http://reviews-api:8000/map-widget.html",\n'
-        f'        entry_point="app.plugins.{module_name}:{class_name}",\n'
+        f'        entry_point="holon_test_plugins.{module_name}:{class_name}",\n'
         "    )\n"
     )
     return path
@@ -73,7 +73,7 @@ def test_unregistered_component_is_rejected_registered_one_is_accepted(jdoe_toke
 
     status, reg = _request(
         "POST", f"{EXPERIENCE}/ui-component-plugins", token=jdoe_token,
-        body={"entry_point": "app.plugins.map_widget_plugin:MapWidgetPlugin"},
+        body={"entry_point": "holon_test_plugins.map_widget_plugin:MapWidgetPlugin"},
     )
     assert status == 200, reg
     assert reg["manifest"]["component_name"] == "map", reg
@@ -97,7 +97,7 @@ def test_unregistered_component_is_rejected_registered_one_is_accepted(jdoe_toke
 
 def test_workspace_viewer_cannot_manage_ui_component_plugins(kenji_token: str) -> None:
     """UI component manifests control a dashboard iframe URL, so a viewer."""
-    entry_point = "app.plugins.map_widget_plugin:MapWidgetPlugin"
+    entry_point = "holon_test_plugins.map_widget_plugin:MapWidgetPlugin"
     for method, path, body in (
         ("POST", "/ui-component-plugins", {"entry_point": entry_point}),
         ("POST", "/ui-component-plugins/map-widget/disable", None),
@@ -113,7 +113,7 @@ def test_a_plugin_cannot_claim_a_builtin_component_name(jdoe_token: str) -> None
     try:
         status, body = _request(
             "POST", f"{EXPERIENCE}/ui-component-plugins", token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "built-in" in body["detail"], body
@@ -126,14 +126,14 @@ def test_a_plugin_cannot_claim_another_active_plugins_component_name(jdoe_token:
     # within a session run by the first test in this module.
     status, _ = _request(
         "POST", f"{EXPERIENCE}/ui-component-plugins", token=jdoe_token,
-        body={"entry_point": "app.plugins.map_widget_plugin:MapWidgetPlugin"},
+        body={"entry_point": "holon_test_plugins.map_widget_plugin:MapWidgetPlugin"},
     )
     module_name = f"_test_conflict_dup_{int(time.time())}"
     path = _write_conflict_plugin(module_name, "HijackPlugin", "map")
     try:
         status, body = _request(
             "POST", f"{EXPERIENCE}/ui-component-plugins", token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "map-widget" in body["detail"], body
@@ -144,7 +144,7 @@ def test_a_plugin_cannot_claim_another_active_plugins_component_name(jdoe_token:
 def test_disabling_and_enabling_flips_registry_status(jdoe_token: str) -> None:
     status, _ = _request(
         "POST", f"{EXPERIENCE}/ui-component-plugins", token=jdoe_token,
-        body={"entry_point": "app.plugins.map_widget_plugin:MapWidgetPlugin"},
+        body={"entry_point": "holon_test_plugins.map_widget_plugin:MapWidgetPlugin"},
     )
     assert status == 200
 

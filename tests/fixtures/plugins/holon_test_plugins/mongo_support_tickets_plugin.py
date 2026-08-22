@@ -19,7 +19,7 @@ class MongoSupportTicketsPlugin:
         permissions_required=[],
         events_consumed=[],
         events_published=["connectivity.sync.completed"],
-        entry_point="app.plugins.mongo_support_tickets_plugin:MongoSupportTicketsPlugin",
+        entry_point="holon_test_plugins.mongo_support_tickets_plugin:MongoSupportTicketsPlugin",
     )
 
     async def fetch(self) -> list[dict]:

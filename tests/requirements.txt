@@ -5,6 +5,7 @@ fastapi>=0.110
 pydantic>=2,<3
 aiokafka>=0.10
 asyncpg>=0.29
+pyiceberg[pyarrow,s3fs]==0.7.1
 prometheus-client>=0.20
 cryptography>=42
 httpx>=0.27

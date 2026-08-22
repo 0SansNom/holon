@@ -30,7 +30,7 @@ class WeatherLookupPlugin:
             "required": ["country_code"],
         },
         risk_level="low",
-        entry_point="app.plugins.weather_lookup_plugin:WeatherLookupPlugin",
+        entry_point="holon_test_plugins.weather_lookup_plugin:WeatherLookupPlugin",
     )
 
     async def invoke(self, tool_input: dict) -> dict:

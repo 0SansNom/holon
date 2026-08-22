@@ -14,9 +14,6 @@ from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, 
 
 WORKSPACE_ID = "main"
 
-# Mirrors seed/source_erp.sql + docker/mongo-init/init.js + docker/reviews-api/reviews.json:
-# Customer 1 "Acme Robotics" -> 3 Orders, 2 SupportTickets (hop 1);
-# Order 1 and Order 2 each have one ProductReview, Order 3 has none (hop 2).
 CUSTOMER_WITH_FULL_NEIGHBORHOOD = 1
 
 
