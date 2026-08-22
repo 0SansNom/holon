@@ -19,7 +19,7 @@ class ExchangeRatePlugin:
         permissions_required=["read:external-finance-feed"],
         events_consumed=[],
         events_published=["connectivity.sync.completed"],
-        entry_point="app.plugins.exchange_rate_plugin:ExchangeRatePlugin",
+        entry_point="holon_test_plugins.exchange_rate_plugin:ExchangeRatePlugin",
     )
 
     async def fetch(self) -> list[dict]:

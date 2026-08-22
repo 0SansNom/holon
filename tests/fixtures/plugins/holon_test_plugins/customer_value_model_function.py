@@ -54,7 +54,7 @@ class CustomerValueModelFunction:
             "properties": {"lifetimeValue": {"type": "number"}},
             "required": ["lifetimeValue"],
         },
-        entry_point="app.plugins.customer_value_model_function:CustomerValueModelFunction",
+        entry_point="holon_test_plugins.customer_value_model_function:CustomerValueModelFunction",
     )
 
     async def call(self, **kwargs) -> dict:

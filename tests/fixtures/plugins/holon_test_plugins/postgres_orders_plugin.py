@@ -18,7 +18,7 @@ class PostgresOrdersPlugin:
         permissions_required=[],
         events_consumed=[],
         events_published=["connectivity.sync.completed"],
-        entry_point="app.plugins.postgres_orders_plugin:PostgresOrdersPlugin",
+        entry_point="holon_test_plugins.postgres_orders_plugin:PostgresOrdersPlugin",
     )
 
     async def fetch(self) -> list[dict]:

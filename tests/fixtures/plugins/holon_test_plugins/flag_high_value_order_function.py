@@ -26,7 +26,7 @@ class FlagHighValueOrderFunction:
             "properties": {"amount": {"type": "number"}},
             "required": ["amount"],
         },
-        entry_point="app.plugins.flag_high_value_order_function:FlagHighValueOrderFunction",
+        entry_point="holon_test_plugins.flag_high_value_order_function:FlagHighValueOrderFunction",
     )
 
     async def call(self, **kwargs) -> dict:

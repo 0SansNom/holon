@@ -18,7 +18,7 @@ class PostgresCustomersPlugin:
         permissions_required=[],
         events_consumed=[],
         events_published=["connectivity.sync.completed"],
-        entry_point="app.plugins.postgres_customers_plugin:PostgresCustomersPlugin",
+        entry_point="holon_test_plugins.postgres_customers_plugin:PostgresCustomersPlugin",
     )
 
     async def fetch(self) -> list[dict]:
