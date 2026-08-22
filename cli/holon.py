@@ -17,14 +17,12 @@ env-var indirection for a single-tenant local deployment, overridable via
 HOLON_CLI_*_URL only if you genuinely need to point elsewhere.
 
 Session state (a bearer token, minted by `holon login`) is cached in
-~/.holon/session.json between invocations — plain-text, dev-only, the
-same trust level as every other credential in this build (seed.py's own
-deterministic dev secrets). Tokens expire in an hour (Identity's own
-`issue_token` default); re-run `holon login` when a command starts
-failing with 401.
+~/.holon/session.json between invocations — plain-text, dev-only.
+Tokens expire in an hour (Identity's own `issue_token` default);
+re-run `holon login` when a command starts failing with 401.
 
 Usage:
-    holon login jdoe
+    holon login jdoe --client-secret "$JDoe_SECRET"   # or HOLON_CLIENT_SECRET
     holon whoami
     holon principals list
     holon projects list
@@ -75,10 +73,16 @@ TENANT_ID = os.environ.get("HOLON_CLI_TENANT_ID", "acme")
 SESSION_PATH = Path.home() / ".holon" / "session.json"
 
 
-def _client_secret_for(local_name: str) -> str:
-    # Deterministic dev-only convention (identity/app/seed.py's own
-    # client_secret_for) — never a real credential.
-    return f"{local_name}-dev-secret"
+def _client_secret(args: argparse.Namespace) -> str:
+    secret = args.client_secret or os.environ.get("HOLON_CLIENT_SECRET", "").strip()
+    if not secret:
+        print(
+            "error: a client secret is required — pass --client-secret or set HOLON_CLIENT_SECRET "
+            "(it is returned once by POST /principals at principal creation)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return secret
 
 
 def _request(method: str, url: str, *, token: Optional[str] = None, body: Optional[dict] = None) -> tuple[int, Any]:
@@ -144,7 +148,7 @@ def _call(method: str, url: str, *, token: str, body: Optional[dict] = None) -> 
 def cmd_login(args: argparse.Namespace) -> None:
     urn = f"hl:{TENANT_ID}:global:user:{args.local_name}"
     status, body = _request(
-        "POST", f"{IDENTITY_URL}/token", body={"principal_urn": urn, "client_secret": _client_secret_for(args.local_name)}
+        "POST", f"{IDENTITY_URL}/token", body={"principal_urn": urn, "client_secret": _client_secret(args)}
     )
     _die_on_error(status, body)
     _save_session({"principal_urn": urn, "access_token": body["access_token"]})
@@ -271,8 +275,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="holon", description="A minimal CLI wrapping Holon's REST APIs.")
     top = parser.add_subparsers(dest="command", required=True)
 
-    login = top.add_parser("login", help="Mint and cache a session token for a seeded principal")
+    login = top.add_parser("login", help="Mint and cache a session token for a principal")
     login.add_argument("local_name", help="e.g. jdoe, msmith, kenji, alice")
+    login.add_argument(
+        "--client-secret",
+        default=None,
+        help="the principal's client secret (or set HOLON_CLIENT_SECRET)",
+    )
     login.set_defaults(func=cmd_login)
 
     top.add_parser("whoami", help="Show the current session's principal").set_defaults(func=cmd_whoami)

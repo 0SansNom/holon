@@ -1,12 +1,7 @@
 # Holon
+ 
+An enterprise knowledge platform that connects and organizes information from different systems into a unified business model. It provides a common way to understand and work with data, supports controlled actions and approvals when needed, enables workflows and search, and allows AI agents to work with the same information and business rules as human users.
 
-An enterprise knowledge platform: a governed ontology (typed
-`ObjectType`s and `RelationType`s, not raw tables) over heterogeneous
-sources — Postgres, MongoDB, REST, file, and streaming connectors —
-with ReBAC + ABAC authorization, column-level lineage, human-in-the-loop
-governed writes (`Action`s with approval for high-risk ones), a
-saga-based workflow engine, unified search, and an LLM agent runtime
-scoped to the same governed paths a human user goes through.
 
 ## Where this actually stands
 
@@ -32,19 +27,19 @@ enterprise:
   are created through APIs (or CI fixtures — see
   [docs/ops/seed-data.md](docs/ops/seed-data.md)).
 - **SSO / secrets / JWT ops** — OIDC + `SecretProvider` + JWT `kid`
-  rotation and optional RS256 (`make gen-jwt-rsa`,
-  `HOLON_JWT_REQUIRE_ASYMMETRIC`) are in-tree; Vault/IdP wiring and
-  key custody are yours. Prefer connector `secret_ref`.
+  rotation and optional RS256 (`HOLON_JWT_REQUIRE_ASYMMETRIC`) are
+  in-tree; Vault/IdP wiring and key custody are yours. Prefer connector
+  `secret_ref`.
 - **Intelligence is experimental** — leave
   `HOLON_INTELLIGENCE_ENABLED=false` in prod (posture-enforced). Joblib
   model upload and tool-plugin register are refused in production;
   tool-plugin `entry_point`s are prefix-allowlisted. Prefer
   `HOLON_LLM_PROVIDER=fake` locally; set
   `services.intelligence.runtimeClassName` (gVisor) in Helm.
-- **Capacity & HA are yours.** CI is compose HTTP pytest;
-  `make smoke-load` is a light probe only — no soak/chaos suite.
-  Enable `HOLON_SERVING_STORE_REQUIRE_MATERIALIZED` in prod (posture +
-  Helm overlay). Backup/DR tooling and HA data-plane are **your** SI.
+- **Capacity & HA are yours.** CI is compose HTTP pytest only — no
+  soak/chaos suite. Enable `HOLON_SERVING_STORE_REQUIRE_MATERIALIZED` in
+  prod (posture + Helm overlay). Backup/DR tooling and HA data-plane are
+  **your** SI.
 - **Operator pack** — runbooks in `docs/ops/` (deploy, backup-restore,
   seed-data, observability), [`SECURITY.md`](SECURITY.md), Helm under
   `deploy/helm/holon/`, Prometheus artefacts under `deploy/observability/`,

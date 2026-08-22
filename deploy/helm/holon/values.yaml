@@ -43,8 +43,8 @@ secretBackend: kubernetes
 existingSecret: holon-secrets
 
 # JWT algorithm. HS256 (default) uses HOLON_JWT_SECRET in existingSecret.
-# For RS256: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS in the secret
-# (make gen-jwt-rsa), set algorithm: RS256, and ideally requireAsymmetric: true.
+# For RS256: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS in the secret,
+# set algorithm: RS256, and ideally requireAsymmetric: true.
 jwt:
   algorithm: HS256
   requireAsymmetric: false
