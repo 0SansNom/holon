@@ -316,7 +316,7 @@ services:
       dockerfile: services/connectivity/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "/opt/holon-test-plugins/*" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
       PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
@@ -365,7 +365,7 @@ services:
       dockerfile: services/knowledge/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "/opt/holon-test-plugins/*" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
       PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
@@ -440,7 +440,7 @@ services:
       dockerfile: services/intelligence/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "/opt/holon-test-plugins/*" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
       PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
@@ -532,7 +532,7 @@ services:
       dockerfile: services/experience/Dockerfile
     restart: unless-stopped
 
-    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "/opt/holon-test-plugins/*" ]
+    command: [ "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     environment:
       <<: *app-env
       PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins

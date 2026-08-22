@@ -29,7 +29,7 @@ class SegmentFromValueFunction:
             "properties": {"lifetimeValue": {"type": "number"}},
             "required": ["lifetimeValue"],
         },
-        entry_point="app.plugins.segment_from_value_function:SegmentFromValueFunction",
+        entry_point="holon_test_plugins.segment_from_value_function:SegmentFromValueFunction",
     )
 
     async def call(self, **kwargs) -> dict:

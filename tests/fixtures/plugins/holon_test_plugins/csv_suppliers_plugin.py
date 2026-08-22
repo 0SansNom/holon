@@ -19,7 +19,7 @@ class CsvSuppliersPlugin:
         permissions_required=[],
         events_consumed=[],
         events_published=["connectivity.sync.completed"],
-        entry_point="app.plugins.csv_suppliers_plugin:CsvSuppliersPlugin",
+        entry_point="holon_test_plugins.csv_suppliers_plugin:CsvSuppliersPlugin",
     )
 
     async def fetch(self) -> list[dict]:

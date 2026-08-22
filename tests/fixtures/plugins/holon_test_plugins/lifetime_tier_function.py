@@ -29,7 +29,7 @@ class LifetimeTierFunction:
             "properties": {"lifetimeValue": {"type": "number"}},
             "required": ["lifetimeValue"],
         },
-        entry_point="app.plugins.lifetime_tier_function:LifetimeTierFunction",
+        entry_point="holon_test_plugins.lifetime_tier_function:LifetimeTierFunction",
     )
 
     async def call(self, **kwargs) -> dict:

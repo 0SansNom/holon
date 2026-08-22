@@ -27,7 +27,7 @@ class ServingStoreAdapterPlugin:
         version="1.0.0",
         plugin_type="execution_adapter",
         adapter_object_type="Supplier",
-        entry_point="app.plugins.serving_store_adapter_plugin:ServingStoreAdapterPlugin",
+        entry_point="holon_test_plugins.serving_store_adapter_plugin:ServingStoreAdapterPlugin",
     )
 
     async def execute(
