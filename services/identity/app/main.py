@@ -8,13 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncpg
-from fastapi import Depends, FastAPI, Response
+from fastapi import Depends, FastAPI, Form, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -45,7 +44,10 @@ from holon_common import (
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
 from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
 
+from . import federation
 from . import oidc as oidc_client
+from . import saml as saml_client
+from . import scim
 from .seed import (
     VALID_PROJECT_RELATIONS,
     VALID_WORKSPACE_RELATIONS,
@@ -66,6 +68,7 @@ from .seed import (
     set_tenant_status,
     set_workspace_status,
     tenant_urn,
+    verify_and_migrate_secret,
     workspace_urn,
 )
 
@@ -128,6 +131,7 @@ instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
+app.include_router(scim.router, prefix="/scim/v2")
 
 
 def _issue(principal: Principal, *, ttl_seconds: int | None = None) -> str:
@@ -153,7 +157,7 @@ def _principal_from_row(row: asyncpg.Record) -> Principal:
     fields = {
         k: v
         for k, v in dict(row).items()
-        if k not in ("client_secret", "status", "oidc_sub")
+        if k not in ("client_secret", "client_secret_hash", "status", "oidc_sub", "external_id")
     }
     return Principal(**fields)
 
@@ -259,34 +263,33 @@ async def mint_token(request: TokenRequest) -> dict:
     """
     row = await _require_active_principal_row(request.principal_urn)
     _reject_group_authentication(row)
-    if not secrets.compare_digest(row["client_secret"], request.client_secret):
+    if not await verify_and_migrate_secret(app.state.pool, row, request.client_secret):
         raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     principal = _principal_from_row(row)
     return {"access_token": _issue(principal), "token_type": "bearer"}
 
 
-class OAuth2TokenForm(BaseModel):
-    """OAuth2 client_credentials token request.
+@app.post("/api/oauth2/token")
+async def oauth2_token(
+    grant_type: str = Form("client_credentials"),
+    client_id: str = Form(...),
+    client_secret: str = Form(...),
+    scope: str = Form(""),
+) -> dict:
+    """OAuth2 client_credentials token request — `application/x-www-form-urlencoded`,
+    per RFC 6749 §4.4.2 (every real OAuth2 provider requires this shape;
+    a JSON body is not spec-compliant here, unlike most of this API).
 
     `client_id` may be a full principal URN or the local name (resolved
     against the default tenant). Same JWT as `/token`.
     """
-
-    grant_type: str = "client_credentials"
-    client_id: str
-    client_secret: str
-    scope: str = ""
-
-
-@app.post("/api/oauth2/token")
-async def oauth2_token(request: OAuth2TokenForm) -> dict:
-    if request.grant_type != "client_credentials":
+    if grant_type != "client_credentials":
         raise HolonError.invalid_argument(
             "UnsupportedGrantType",
-            f"unsupported grant_type: {request.grant_type}",
-            grant_type=request.grant_type,
+            f"unsupported grant_type: {grant_type}",
+            grant_type=grant_type,
         )
-    client_id = request.client_id.strip()
+    client_id = client_id.strip()
     if client_id.startswith("hl:"):
         principal_urn = client_id
     else:
@@ -300,10 +303,10 @@ async def oauth2_token(request: OAuth2TokenForm) -> dict:
         sa_urn = build_urn(TENANT_ID, "global", "service-account", client_id)
         row = await _require_active_principal_row(sa_urn)
     _reject_group_authentication(row)
-    if not secrets.compare_digest(row["client_secret"], request.client_secret):
+    if not await verify_and_migrate_secret(app.state.pool, row, client_secret):
         raise HolonError.unauthorized("InvalidCredentials", "invalid client_id or client_secret")
     principal = _principal_from_row(row)
-    _ = request.scope
+    _ = scope
     return {
         "access_token": _issue(principal),
         "token_type": "bearer",
@@ -321,7 +324,7 @@ async def login(request: TokenRequest, response: Response) -> dict:
     try:
         row = await _require_active_principal_row(request.principal_urn)
         _reject_group_authentication(row)
-        if not secrets.compare_digest(row["client_secret"], request.client_secret):
+        if not await verify_and_migrate_secret(app.state.pool, row, request.client_secret):
             raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     except HolonError as exc:
         emit_audit(
@@ -350,6 +353,143 @@ async def login(request: TokenRequest, response: Response) -> dict:
 async def logout(response: Response) -> dict:
     clear_session_cookie(response)
     return {"status": "ok"}
+
+
+_FEDERATED_ERROR_NAME = {"oidc": "OidcError", "saml": "SamlError"}
+
+
+async def _complete_federated_login(
+    *,
+    protocol: str,
+    external_id: str,
+    tenant_id: str,
+    local_name: str,
+    display_name: str,
+    workspace_roles: dict[str, str],
+    frontend_redirect: str,
+) -> RedirectResponse:
+    """Shared tail of every federated (OIDC/SAML) browser login: resolve
+    or JIT-provision the principal by its protocol's external id, sync
+    IdP group claims to workspace roles, audit, and set the session
+    cookie. `protocol` picks the linking column — OIDC keeps its own
+    `oidc_sub` (already shipped); SAML uses the shared `external_id`
+    anchor (migration 0002 — also used by SCIM's `externalId`).
+    """
+    lookup_column = "oidc_sub" if protocol == "oidc" else "external_id"
+    audit_action = f"identity.{protocol}.login"
+    error_name = _FEDERATED_ERROR_NAME[protocol]
+
+    tenant = await get_tenant(app.state.pool, tenant_id)
+    if tenant is None or tenant["status"] != "active":
+        emit_audit(
+            category="identity",
+            action=audit_action,
+            outcome="failure",
+            tenant_id=tenant_id,
+            actor_urn=external_id,
+            reason=f"unknown or disabled tenant: {tenant_id}",
+        )
+        raise HolonError.forbidden('TenantDisabled', f"unknown or disabled tenant for {protocol} login: {tenant_id}")
+
+    row = await app.state.pool.fetchrow(f"SELECT * FROM principal WHERE {lookup_column} = $1", external_id)
+    if row is None:
+        try:
+            created = await insert_principal(
+                app.state.pool,
+                tenant_id=tenant_id,
+                type="user",
+                local_name=local_name,
+                display_name=display_name,
+                **{lookup_column: external_id},
+            )
+        except asyncpg.UniqueViolationError:
+            created = dict(
+                await app.state.pool.fetchrow(
+                    "SELECT * FROM principal WHERE urn = $1",
+                    build_urn(tenant_id, "global", "user", local_name),
+                )
+            )
+            await app.state.pool.execute(
+                f"UPDATE principal SET {lookup_column} = $2 WHERE urn = $1", created["urn"], external_id
+            )
+        await app.state.authz.write_relationship(
+            resource_type="tenant",
+            resource_urn=tenant_urn(tenant_id),
+            relation="member",
+            subject_urn=created["urn"],
+        )
+        row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", created["urn"])
+    else:
+        # Returning user: keep original DB tenant mapping
+        if row["tenant_id"] != tenant_id:
+            emit_audit(
+                category="identity",
+                action=audit_action,
+                outcome="failure",
+                tenant_id=row["tenant_id"],
+                actor_urn=row["urn"],
+                reason=f"{protocol} tenant claim mismatch",
+            )
+            raise HolonError.forbidden(error_name, (
+                    f"{protocol} tenant claim {tenant_id!r} does not match linked principal "
+                    f"tenant {row['tenant_id']!r}; unlink {lookup_column} or update the principal"
+                ),)
+
+    if row["status"] != "active":
+        raise HolonError.forbidden('PrincipalDisabled', "principal is disabled")
+    principal = _principal_from_row(row)
+
+    # Group → workspace relation sync (admin/editor/viewer). Highest privilege wins;
+    # alternate relations on the same workspace are removed for this principal.
+    synced: list[dict] = []
+    for workspace_id, relation in workspace_roles.items():
+        ws = await get_workspace(app.state.pool, workspace_id)
+        if ws is None or ws["tenant_id"] != principal.tenant_id:
+            continue
+        w_urn = workspace_urn(principal.tenant_id, workspace_id)
+        await app.state.authz.write_relationship(
+            resource_type="workspace",
+            resource_urn=w_urn,
+            relation=relation,
+            subject_urn=principal.urn,
+        )
+        for other in VALID_WORKSPACE_RELATIONS - {relation}:
+            try:
+                await app.state.authz.delete_relationship(
+                    resource_type="workspace",
+                    resource_urn=w_urn,
+                    relation=other,
+                    subject_urn=principal.urn,
+                )
+            except Exception:
+                logger.debug("%s sync: no %s relation to delete on %s", protocol, other, workspace_id, exc_info=True)
+        synced.append({"workspaceId": workspace_id, "relation": relation})
+        emit_audit(
+            category="identity",
+            action=f"identity.{protocol}.group_sync",
+            outcome="success",
+            tenant_id=principal.tenant_id,
+            actor_urn=principal.urn,
+            actor_type=principal.type,
+            resource_type="workspace",
+            resource_urn=w_urn,
+            permission=relation,
+            extra={"source": f"{protocol}_groups"},
+        )
+
+    emit_audit(
+        category="identity",
+        action=audit_action,
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        extra={"syncedWorkspaces": synced},
+    )
+
+    redirect = RedirectResponse(url=frontend_redirect, status_code=302)
+    set_session_cookie(redirect, _issue(principal))
+    return redirect
 
 
 @app.get("/oidc/login")
@@ -389,122 +529,81 @@ async def oidc_callback(code: str, state: str):
             reason="OIDC claims missing sub",
         )
         raise HolonError.unauthorized('OidcError', "OIDC claims missing sub")
-    tenant_id = oidc_client.tenant_from_claims(claims, default_tenant=TENANT_ID)
-    tenant = await get_tenant(app.state.pool, tenant_id)
-    if tenant is None or tenant["status"] != "active":
-        emit_audit(
-            category="identity",
-            action="identity.oidc.login",
-            outcome="failure",
-            tenant_id=tenant_id,
-            actor_urn=sub,
-            reason=f"unknown or disabled tenant: {tenant_id}",
-        )
-        raise HolonError.forbidden('TenantDisabled', f"unknown or disabled tenant for OIDC login: {tenant_id}")
 
-    row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE oidc_sub = $1", sub)
-    if row is None:
-        local_name = oidc_client.local_name_from_claims(claims)
-        try:
-            created = await insert_principal(
-                app.state.pool,
-                tenant_id=tenant_id,
-                type="user",
-                local_name=local_name,
-                display_name=oidc_client.display_name_from_claims(claims),
-                oidc_sub=sub,
-            )
-        except asyncpg.UniqueViolationError:
-            created = dict(
-                await app.state.pool.fetchrow(
-                    "SELECT * FROM principal WHERE urn = $1",
-                    build_urn(tenant_id, "global", "user", local_name),
-                )
-            )
-            await app.state.pool.execute(
-                "UPDATE principal SET oidc_sub = $2 WHERE urn = $1", created["urn"], sub
-            )
-        await app.state.authz.write_relationship(
-            resource_type="tenant",
-            resource_urn=tenant_urn(tenant_id),
-            relation="member",
-            subject_urn=created["urn"],
-        )
-        row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", created["urn"])
-    else:
-        # Returning user: keep original DB tenant mapping
-        if row["tenant_id"] != tenant_id:
-            emit_audit(
-                category="identity",
-                action="identity.oidc.login",
-                outcome="failure",
-                tenant_id=row["tenant_id"],
-                actor_urn=row["urn"],
-                reason="OIDC tenant claim mismatch",
-            )
-            raise HolonError.forbidden('OidcError', (
-                    f"OIDC tenant claim {tenant_id!r} does not match linked principal "
-                    f"tenant {row['tenant_id']!r}; unlink oidc_sub or update the principal"
-                ),)
-
-    if row["status"] != "active":
-        raise HolonError.forbidden('PrincipalDisabled', "principal is disabled")
-    principal = _principal_from_row(row)
-
-    # Group → workspace relation sync (admin/editor/viewer). Highest privilege wins;
-    # alternate relations on the same workspace are removed for this principal.
-    synced: list[dict] = []
-    desired = oidc_client.workspace_roles_from_claims(claims)
-    for workspace_id, relation in desired.items():
-        ws = await get_workspace(app.state.pool, workspace_id)
-        if ws is None or ws["tenant_id"] != principal.tenant_id:
-            continue
-        w_urn = workspace_urn(principal.tenant_id, workspace_id)
-        await app.state.authz.write_relationship(
-            resource_type="workspace",
-            resource_urn=w_urn,
-            relation=relation,
-            subject_urn=principal.urn,
-        )
-        for other in VALID_WORKSPACE_RELATIONS - {relation}:
-            try:
-                await app.state.authz.delete_relationship(
-                    resource_type="workspace",
-                    resource_urn=w_urn,
-                    relation=other,
-                    subject_urn=principal.urn,
-                )
-            except Exception:
-                logger.debug("OIDC sync: no %s relation to delete on %s", other, workspace_id, exc_info=True)
-        synced.append({"workspaceId": workspace_id, "relation": relation})
-        emit_audit(
-            category="identity",
-            action="identity.oidc.group_sync",
-            outcome="success",
-            tenant_id=principal.tenant_id,
-            actor_urn=principal.urn,
-            actor_type=principal.type,
-            resource_type="workspace",
-            resource_urn=w_urn,
-            permission=relation,
-            extra={"source": "oidc_groups"},
-        )
-
-    emit_audit(
-        category="identity",
-        action="identity.oidc.login",
-        outcome="success",
-        tenant_id=principal.tenant_id,
-        actor_urn=principal.urn,
-        actor_type=principal.type,
-        extra={"syncedWorkspaces": synced},
+    tenant_id = federation.tenant_from_claims(claims, default_tenant=TENANT_ID)
+    frontend = os.environ.get("HOLON_OIDC_POST_LOGIN_REDIRECT", "http://localhost:5173/objects")
+    return await _complete_federated_login(
+        protocol="oidc",
+        external_id=sub,
+        tenant_id=tenant_id,
+        local_name=federation.local_name_from_claims(claims),
+        display_name=federation.display_name_from_claims(claims),
+        workspace_roles=federation.workspace_roles_from_claims(claims),
+        frontend_redirect=frontend,
     )
 
-    # Set session cookie on RedirectResponse object
-    frontend = os.environ.get("HOLON_OIDC_POST_LOGIN_REDIRECT", "http://localhost:5173/objects")
-    redirect = RedirectResponse(url=frontend, status_code=302)
-    set_session_cookie(redirect, _issue(principal))
-    return redirect
+
+@app.get("/saml/login")
+async def saml_login(request: Request) -> RedirectResponse:
+    """Start SAML SP-initiated SSO. 404 when no IdP metadata is configured."""
+    if not saml_client.saml_enabled():
+        raise HolonError.not_found('SamlNotConfigured', "SAML is not configured")
+    url = saml_client.build_login_redirect(
+        https=request.url.scheme == "https",
+        http_host=request.url.hostname or "localhost",
+        script_name=request.url.path,
+    )
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.post("/saml/acs")
+async def saml_acs(request: Request):
+    """SAML Assertion Consumer Service — validates the IdP's signed
+    response, then completes login via the same path OIDC uses."""
+    if not saml_client.saml_enabled():
+        raise HolonError.not_found('SamlNotConfigured', "SAML is not configured")
+    form = await request.form()
+    post_params = {key: value for key, value in form.items()}
+    try:
+        claims = saml_client.process_acs_response(
+            https=request.url.scheme == "https",
+            http_host=request.url.hostname or "localhost",
+            script_name=request.url.path,
+            post_params=post_params,
+        )
+    except Exception as exc:
+        emit_audit(
+            category="identity",
+            action="identity.saml.login",
+            outcome="failure",
+            tenant_id=TENANT_ID,
+            reason=str(exc),
+        )
+        raise HolonError.unauthorized('SamlError', f"SAML assertion invalid: {exc}") from exc
+
+    tenant_id = federation.tenant_from_claims(claims, default_tenant=TENANT_ID)
+    frontend = os.environ.get(
+        "HOLON_SAML_POST_LOGIN_REDIRECT",
+        os.environ.get("HOLON_OIDC_POST_LOGIN_REDIRECT", "http://localhost:5173/objects"),
+    )
+    return await _complete_federated_login(
+        protocol="saml",
+        external_id=claims["sub"],
+        tenant_id=tenant_id,
+        local_name=federation.local_name_from_claims(claims),
+        display_name=federation.display_name_from_claims(claims),
+        workspace_roles=federation.workspace_roles_from_claims(claims),
+        frontend_redirect=frontend,
+    )
+
+
+@app.get("/saml/metadata")
+async def saml_metadata() -> Response:
+    """SP metadata XML for the IdP-side setup — not gated on
+    `saml_enabled()` since an operator configuring the IdP integration
+    needs this before HOLON_SAML_IDP_METADATA_* can be set."""
+    xml = saml_client.build_sp_metadata_xml()
+    return Response(content=xml, media_type="application/xml")
 
 
 @app.get("/whoami", response_model=Principal)
@@ -632,6 +731,7 @@ class CreatePrincipalRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=256)
     country: str | None = None
     on_behalf_of: str | None = None
+    client_secret: str | None = Field(default=None, min_length=8, max_length=256)
 
 
 class StatusRequest(BaseModel):
@@ -767,6 +867,7 @@ async def principals_create(
             display_name=request.display_name,
             country=request.country,
             on_behalf_of=request.on_behalf_of,
+            client_secret=request.client_secret,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HolonError.conflict('PrincipalAlreadyExists', "principal already exists") from exc

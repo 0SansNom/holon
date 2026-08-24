@@ -12,7 +12,7 @@ import pytest
 from conftest import IDENTITY, KNOWLEDGE, ontology_url, holon_url
 
 
-PLUGINS_DIR = Path(__file__).resolve().parents[3] / "services" / "knowledge" / "app" / "plugins"
+PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"
 
 
 def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None, raw: bool = False):
@@ -53,7 +53,7 @@ def _write_adapter_conflict_plugin(module_name: str, class_name: str, adapter_ob
         "    manifest = PluginManifest(\n"
         f'        name="{module_name}", version="1.0.0", plugin_type="execution_adapter",\n'
         f'        adapter_object_type="{adapter_object_type}",\n'
-        f'        entry_point="app.plugins.{module_name}:{class_name}",\n'
+        f'        entry_point="holon_test_plugins.{module_name}:{class_name}",\n'
         "    )\n\n"
         "    async def execute(self, pool, *, object_type, tenant_id, filter_property, filter_value, operation):\n"
         "        return []\n"
@@ -69,7 +69,7 @@ def _write_export_conflict_plugin(module_name: str, class_name: str, format_name
         "    manifest = PluginManifest(\n"
         f'        name="{module_name}", version="1.0.0", plugin_type="export_format",\n'
         f'        format_name="{format_name}", content_type="text/plain",\n'
-        f'        entry_point="app.plugins.{module_name}:{class_name}",\n'
+        f'        entry_point="holon_test_plugins.{module_name}:{class_name}",\n'
         "    )\n\n"
         "    def serialize(self, rows):\n"
         "        return b''\n"
@@ -82,7 +82,7 @@ def test_register_execution_adapter_and_route_through_it(jdoe_token: str) -> Non
         "POST",
         holon_url("/execution-adapter-plugins"),
         token=jdoe_token,
-        body={"entry_point": "app.plugins.serving_store_adapter_plugin:ServingStoreAdapterPlugin"},
+        body={"entry_point": "holon_test_plugins.serving_store_adapter_plugin:ServingStoreAdapterPlugin"},
     )
     assert status == 200, registration
     assert registration["manifest"]["adapter_object_type"] == "Supplier", registration
@@ -106,7 +106,7 @@ def test_execution_adapter_cannot_claim_an_already_adapted_object_type(jdoe_toke
             "POST",
             holon_url("/execution-adapter-plugins"),
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "serving-store-adapter" in body["detail"], body
@@ -119,7 +119,7 @@ def test_disabling_and_enabling_execution_adapter_flips_registry_status(jdoe_tok
         "POST",
         holon_url("/execution-adapter-plugins"),
         token=jdoe_token,
-        body={"entry_point": "app.plugins.serving_store_adapter_plugin:ServingStoreAdapterPlugin"},
+        body={"entry_point": "holon_test_plugins.serving_store_adapter_plugin:ServingStoreAdapterPlugin"},
     )
     assert status == 200
     try:
@@ -139,7 +139,7 @@ def test_register_export_format_and_export_via_it(jdoe_token: str) -> None:
         "POST",
         holon_url("/export-format-plugins"),
         token=jdoe_token,
-        body={"entry_point": "app.plugins.csv_export_plugin:CsvExportPlugin"},
+        body={"entry_point": "holon_test_plugins.csv_export_plugin:CsvExportPlugin"},
     )
     assert status == 200, registration
     assert registration["manifest"]["format_name"] == "csv", registration
@@ -172,7 +172,7 @@ def test_export_format_cannot_claim_the_builtin_json_name(jdoe_token: str) -> No
             "POST",
             holon_url("/export-format-plugins"),
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "built-in" in body["detail"], body
@@ -185,7 +185,7 @@ def test_export_format_cannot_claim_another_active_plugins_name(jdoe_token: str)
         "POST",
         holon_url("/export-format-plugins"),
         token=jdoe_token,
-        body={"entry_point": "app.plugins.csv_export_plugin:CsvExportPlugin"},
+        body={"entry_point": "holon_test_plugins.csv_export_plugin:CsvExportPlugin"},
     )
     assert status == 200
     module_name = f"_test_conflict_csv_{int(time.time())}"
@@ -195,7 +195,7 @@ def test_export_format_cannot_claim_another_active_plugins_name(jdoe_token: str)
             "POST",
             holon_url("/export-format-plugins"),
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "csv-export" in body["detail"], body

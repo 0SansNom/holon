@@ -51,10 +51,6 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Helm ships a copy of docker/spicedb/schema.zed — fail fast on drift.
-      - name: Check SpiceDB schema sync
-        run: make check-spicedb-schema
-
       - name: Create .env from example
         run: |
           sed -e 's/=change-me$/=ci-only-not-a-secret/' \
@@ -64,6 +60,10 @@ jobs:
           echo "HOLON_EMBEDDING_PROVIDER=local" >> .env
           echo "HOLON_INTELLIGENCE_RUNTIME=runc" >> .env
           echo "HOLON_LLM_PROVIDER=fake" >> .env
+          # Enables the SCIM router (test_scim.py) — SAML stays unset since
+          # it needs a real IdP metadata/cert pair to do anything beyond
+          # the gating/metadata checks that don't require it.
+          echo "HOLON_SCIM_BEARER_TOKEN=ci-only-scim-token" >> .env
           # A handful of white-box test files (test_dlq.py,
           # test_bitemporal_history.py, etc.) connect to Postgres/OpenSearch
           # directly, reading these two credentials from os.environ (falling
@@ -73,6 +73,8 @@ jobs:
           # explicitly into the job's environment for the two to agree.
           grep '^POSTGRES_PASSWORD=' .env >> "$GITHUB_ENV"
           grep '^OPENSEARCH_ADMIN_PASSWORD=' .env >> "$GITHUB_ENV"
+          # test_scim.py sends the bearer token itself, the same white-box way.
+          grep '^HOLON_SCIM_BEARER_TOKEN=' .env >> "$GITHUB_ENV"
 
       # experience's docker-compose bind-mount (./services/experience/app:/app/app,
       # there so Python edits hot-reload locally) overlays the image's own

@@ -32,7 +32,7 @@ def registered_function(msmith_token: str) -> dict:
     """Idempotent (`ON CONFLICT (name) DO UPDATE`), same idiom."""
     status, registration = _request(
         "POST", holon_url("/function-plugins"), token=msmith_token,
-        body={"entry_point": "app.plugins.flag_high_value_order_function:FlagHighValueOrderFunction"},
+        body={"entry_point": "holon_test_plugins.flag_high_value_order_function:FlagHighValueOrderFunction"},
     )
     assert status == 200, registration
     assert registration["manifest"]["function_name"] == "flag_high_value_order", registration

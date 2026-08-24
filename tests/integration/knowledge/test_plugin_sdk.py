@@ -13,7 +13,7 @@ import pytest
 from conftest import CONNECTIVITY, IDENTITY, _request
 
 
-PLUGINS_DIR = Path(__file__).resolve().parents[3] / "services" / "connectivity" / "app" / "plugins"
+PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"
 
 
 def _token_for(principal_urn: str) -> str:
@@ -38,7 +38,7 @@ def _write_conflict_plugin(module_name: str, class_name: str, dataset_name: str)
         f"class {class_name}:\n"
         "    manifest = PluginManifest(\n"
         f'        name="{module_name}", version="1.0.0", plugin_type="connector",\n'
-        f'        dataset_name="{dataset_name}", entry_point="app.plugins.{module_name}:{class_name}",\n'
+        f'        dataset_name="{dataset_name}", entry_point="holon_test_plugins.{module_name}:{class_name}",\n'
         "    )\n\n"
         "    async def fetch(self) -> list[dict]:\n"
         "        return []\n"
@@ -51,7 +51,7 @@ def test_registering_the_shipped_plugin_and_syncing_through_it_works(jdoe_token:
         "POST",
         f"{CONNECTIVITY}/plugins",
         token=jdoe_token,
-        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+        body={"entry_point": "holon_test_plugins.exchange_rate_plugin:ExchangeRatePlugin"},
     )
     assert status == 200, registration
     assert registration["name"] == "exchange-rate-feed", registration
@@ -72,7 +72,7 @@ def test_a_plugin_cannot_claim_a_seeded_demo_plugins_dataset(jdoe_token: str) ->
             "POST",
             f"{CONNECTIVITY}/plugins",
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:CoreHijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:CoreHijackPlugin"},
         )
         assert status == 409, body
         assert "already claimed by active plugin" in body["detail"], body
@@ -90,7 +90,7 @@ def test_a_plugin_cannot_claim_another_active_plugins_dataset(jdoe_token: str) -
             "POST",
             f"{CONNECTIVITY}/plugins",
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:PluginHijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:PluginHijackPlugin"},
         )
         assert status == 409, body
         assert "exchange-rate-feed" in body["detail"], body
@@ -103,7 +103,7 @@ def test_disabling_a_plugin_blocks_sync_and_enabling_restores_it(jdoe_token: str
         "POST",
         f"{CONNECTIVITY}/plugins",
         token=jdoe_token,
-        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+        body={"entry_point": "holon_test_plugins.exchange_rate_plugin:ExchangeRatePlugin"},
     )
     assert status == 200
 
@@ -130,7 +130,7 @@ def test_plugins_list_includes_registered_plugins_with_status_and_schedule(jdoe_
     """
     status, _ = _request(
         "POST", f"{CONNECTIVITY}/plugins", token=jdoe_token,
-        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+        body={"entry_point": "holon_test_plugins.exchange_rate_plugin:ExchangeRatePlugin"},
     )
     assert status == 200
 
@@ -146,7 +146,7 @@ def test_plugins_list_includes_registered_plugins_with_status_and_schedule(jdoe_
 def test_setting_a_plugin_schedule_validates_and_persists(jdoe_token: str) -> None:
     status, _ = _request(
         "POST", f"{CONNECTIVITY}/plugins", token=jdoe_token,
-        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+        body={"entry_point": "holon_test_plugins.exchange_rate_plugin:ExchangeRatePlugin"},
     )
     assert status == 200
 
@@ -180,7 +180,7 @@ def test_a_scheduled_plugin_syncs_itself_with_no_manual_trigger(jdoe_token: str)
     """
     status, _ = _request(
         "POST", f"{CONNECTIVITY}/plugins", token=jdoe_token,
-        body={"entry_point": "app.plugins.exchange_rate_plugin:ExchangeRatePlugin"},
+        body={"entry_point": "holon_test_plugins.exchange_rate_plugin:ExchangeRatePlugin"},
     )
     assert status == 200
     marker = time.time()

@@ -1102,9 +1102,15 @@ async def set_plugin_schedule(name: str, body: SetPluginScheduleRequest, princip
 
 class RegisterConnectionRequest(BaseModel):
     name: str
-    auth_header_name: str
+    auth_type: str = "header"
+    auth_header_name: Optional[str] = None
     # Optional; if omitted on edit, existing secret is retained
     auth_header_value: Optional[str] = None
+    oauth2_token_url: Optional[str] = None
+    oauth2_client_id: Optional[str] = None
+    # Optional; if omitted on edit, existing secret is retained
+    oauth2_client_secret: Optional[str] = None
+    oauth2_scope: Optional[str] = None
 
 
 @app.post("/connections")
@@ -1115,15 +1121,26 @@ async def register_connection(body: RegisterConnectionRequest, principal: Princi
     the same secret into every one. Same authentication tier as
     `/sources`/`/plugins`. A real upsert (same `name` again updates it)
     — this is also how editing a connection works, no separate PUT route.
+    Two auth types: a static header, or OAuth2 client_credentials
+    (`auth_type="oauth2_client_credentials"` — refreshed and cached
+    centrally, shared by every source pointed at this connection).
     """
-    return await generic_source_registry.register_connection(
-        app.state.pool,
-        tenant_id=principal.tenant_id,
-        name=body.name,
-        auth_header_name=body.auth_header_name,
-        auth_header_value=body.auth_header_value,
-        created_by_urn=principal.urn,
-    )
+    try:
+        return await generic_source_registry.register_connection(
+            app.state.pool,
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            auth_type=body.auth_type,
+            auth_header_name=body.auth_header_name,
+            auth_header_value=body.auth_header_value,
+            oauth2_token_url=body.oauth2_token_url,
+            oauth2_client_id=body.oauth2_client_id,
+            oauth2_client_secret=body.oauth2_client_secret,
+            oauth2_scope=body.oauth2_scope,
+            created_by_urn=principal.urn,
+        )
+    except generic_source_registry.SourceConfigError as exc:
+        raise HolonError.invalid_argument('ConnectionValidationFailed', str(exc)) from exc
 
 
 @app.get("/connections")

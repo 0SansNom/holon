@@ -24,7 +24,6 @@ from holon_common import EventActor, EventEnvelope, build_urn, outbox
 
 from . import markings as markings_module
 from .object_types import get_object_type, get_object_type_version, validate_ot_metadata
-from .interfaces import get_interface_type
 from .type_classes import normalize_type_classes
 from .render_hints import ALLOWED_RENDER_HINTS, normalize_render_hints
 
