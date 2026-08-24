@@ -331,6 +331,71 @@ def test_deleting_an_unknown_connection_is_404(jdoe_token: str) -> None:
     assert status == 404, body
 
 
+def test_invalid_auth_type_is_400(jdoe_token: str) -> None:
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={"name": _unique_name("bad_auth_type"), "auth_type": "basic_auth"},
+    )
+    assert status == 400, body
+
+
+def test_oauth2_connection_missing_token_url_is_400(jdoe_token: str) -> None:
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={
+            "name": _unique_name("oauth2_missing_url"),
+            "auth_type": "oauth2_client_credentials",
+            "oauth2_client_id": "some-client",
+            "oauth2_client_secret": "some-secret",
+        },
+    )
+    assert status == 400, body
+
+
+def test_oauth2_connection_missing_secret_is_400(jdoe_token: str) -> None:
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={
+            "name": _unique_name("oauth2_missing_secret"),
+            "auth_type": "oauth2_client_credentials",
+            "oauth2_token_url": "https://idp.example.com/token",
+            "oauth2_client_id": "some-client",
+        },
+    )
+    assert status == 400, body
+
+
+def test_editing_an_oauth2_connection_without_resending_the_secret_keeps_it(jdoe_token: str) -> None:
+    connection_name = _unique_name("oauth2_edit")
+    status, connection = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={
+            "name": connection_name,
+            "auth_type": "oauth2_client_credentials",
+            "oauth2_token_url": "https://idp.example.com/token",
+            "oauth2_client_id": "some-client",
+            "oauth2_client_secret": "some-secret",
+        },
+    )
+    assert status == 200, connection
+    assert connection["has_oauth2_client_secret"] is True, connection
+
+    # Re-register without oauth2_client_secret — only the scope changes.
+    status, edited = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={
+            "name": connection_name,
+            "auth_type": "oauth2_client_credentials",
+            "oauth2_token_url": "https://idp.example.com/token",
+            "oauth2_client_id": "some-client",
+            "oauth2_scope": "read:data",
+        },
+    )
+    assert status == 200, edited
+    assert edited["has_oauth2_client_secret"] is True, edited
+    assert edited["oauth2_scope"] == "read:data", edited
+
+
 # --- Scheduling ------------------------------------------------------------
 
 
