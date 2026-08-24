@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "identity"))
 
-from app import oidc  # noqa: E402
+from app import federation  # noqa: E402
 from holon_common.auth import load_jwt_secrets  # noqa: E402
 
 
@@ -21,7 +21,7 @@ def test_workspace_roles_highest_privilege_wins(monkeypatch) -> None:
     monkeypatch.delenv("HOLON_OIDC_WORKSPACE_ADMIN_GROUP_PREFIX", raising=False)
     monkeypatch.delenv("HOLON_OIDC_WORKSPACE_EDITOR_GROUP_PREFIX", raising=False)
     monkeypatch.delenv("HOLON_OIDC_WORKSPACE_GROUP_PREFIX", raising=False)
-    roles = oidc.workspace_roles_from_claims(
+    roles = federation.workspace_roles_from_claims(
         {
             "groups": [
                 "workspace:main",
