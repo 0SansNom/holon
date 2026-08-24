@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import os
 
+import asyncpg
+
 from holon_common.plugin import PluginManifest
+
+_QUERY = """
+    SELECT id, customer_id, product, amount, status, ordered_at
+    FROM orders
+    ORDER BY id
+"""
 
 
 class PostgresOrdersPlugin:
@@ -22,6 +30,9 @@ class PostgresOrdersPlugin:
     )
 
     async def fetch(self) -> list[dict]:
-        from app import connector
-
-        return await connector.read_orders(os.environ["HOLON_SOURCE_DB_URL"])
+        conn = await asyncpg.connect(os.environ["HOLON_SOURCE_DB_URL"])
+        try:
+            rows = await conn.fetch(_QUERY)
+        finally:
+            await conn.close()
+        return [dict(row) for row in rows]
