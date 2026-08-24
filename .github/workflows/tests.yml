@@ -60,13 +60,10 @@ jobs:
           echo "HOLON_EMBEDDING_PROVIDER=local" >> .env
           echo "HOLON_INTELLIGENCE_RUNTIME=runc" >> .env
           echo "HOLON_LLM_PROVIDER=fake" >> .env
-          # No shared Airbyte instance exists to give CI real API creds for
-          # (ADR 027) — only the webhook secret is set, so
-          # test_airbyte_webhook.py can exercise the real inbound
-          # webhook -> catalog path; HOLON_AIRBYTE_API_URL/CLIENT_ID/
-          # CLIENT_SECRET stay unset, same as every other deployment
-          # without Airbyte provisioned yet.
-          echo "HOLON_AIRBYTE_WEBHOOK_SECRET=ci-only-webhook-secret" >> .env
+          # Enables the SCIM router (test_scim.py) — SAML stays unset since
+          # it needs a real IdP metadata/cert pair to do anything beyond
+          # the gating/metadata checks that don't require it.
+          echo "HOLON_SCIM_BEARER_TOKEN=ci-only-scim-token" >> .env
           # A handful of white-box test files (test_dlq.py,
           # test_bitemporal_history.py, etc.) connect to Postgres/OpenSearch
           # directly, reading these two credentials from os.environ (falling
@@ -76,9 +73,8 @@ jobs:
           # explicitly into the job's environment for the two to agree.
           grep '^POSTGRES_PASSWORD=' .env >> "$GITHUB_ENV"
           grep '^OPENSEARCH_ADMIN_PASSWORD=' .env >> "$GITHUB_ENV"
-          # test_airbyte_webhook.py connects to MinIO/Iceberg REST directly
-          # (localhost-mapped ports) the same white-box way, for the same reason.
-          grep '^AWS_SECRET_ACCESS_KEY=' .env >> "$GITHUB_ENV"
+          # test_scim.py sends the bearer token itself, the same white-box way.
+          grep '^HOLON_SCIM_BEARER_TOKEN=' .env >> "$GITHUB_ENV"
 
       # experience's docker-compose bind-mount (./services/experience/app:/app/app,
       # there so Python edits hot-reload locally) overlays the image's own

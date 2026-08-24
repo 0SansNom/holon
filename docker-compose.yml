@@ -37,6 +37,16 @@ x-app-env: &app-env
   HOLON_OIDC_TENANT_GROUP_PREFIX: ${HOLON_OIDC_TENANT_GROUP_PREFIX:-tenant:}
   HOLON_OIDC_WORKSPACE_GROUP_PREFIX: ${HOLON_OIDC_WORKSPACE_GROUP_PREFIX:-workspace:}
   HOLON_OIDC_POST_LOGIN_REDIRECT: ${HOLON_OIDC_POST_LOGIN_REDIRECT:-http://localhost:5173/objects}
+  # SAML (identity reads these; empty IdP metadata keeps SAML disabled).
+  HOLON_SAML_IDP_METADATA_URL: ${HOLON_SAML_IDP_METADATA_URL:-}
+  HOLON_SAML_IDP_METADATA_XML: ${HOLON_SAML_IDP_METADATA_XML:-}
+  HOLON_SAML_SP_ENTITY_ID: ${HOLON_SAML_SP_ENTITY_ID:-http://localhost:8001/saml/metadata}
+  HOLON_SAML_SP_ACS_URL: ${HOLON_SAML_SP_ACS_URL:-http://localhost:8001/saml/acs}
+  HOLON_SAML_SP_CERT: ${HOLON_SAML_SP_CERT:-}
+  HOLON_SAML_SP_PRIVATE_KEY: ${HOLON_SAML_SP_PRIVATE_KEY:-}
+  HOLON_SAML_POST_LOGIN_REDIRECT: ${HOLON_SAML_POST_LOGIN_REDIRECT:-http://localhost:5173/objects}
+  # SCIM (identity reads this; empty token keeps the SCIM router disabled).
+  HOLON_SCIM_BEARER_TOKEN: ${HOLON_SCIM_BEARER_TOKEN:-}
 
 services:
   # ---- Infrastructure ----------------------------------------------------
@@ -333,14 +343,6 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
       HOLON_S3_ENDPOINT: http://minio:9000
-      # ADR 027 — points at a shared Airbyte instance (staging-like), never
-      # a local one; empty by default, routes under /airbyte-* just stay
-      # unavailable until an operator sets these (see _airbyte_client()).
-      HOLON_AIRBYTE_API_URL: ${HOLON_AIRBYTE_API_URL:-}
-      HOLON_AIRBYTE_CLIENT_ID: ${HOLON_AIRBYTE_CLIENT_ID:-}
-      HOLON_AIRBYTE_CLIENT_SECRET: ${HOLON_AIRBYTE_CLIENT_SECRET:-}
-      HOLON_AIRBYTE_WORKSPACE_ID: ${HOLON_AIRBYTE_WORKSPACE_ID:-}
-      HOLON_AIRBYTE_WEBHOOK_SECRET: ${HOLON_AIRBYTE_WEBHOOK_SECRET:-}
     volumes:
       - ./libs:/app/libs
       - ./services/connectivity/app:/app/app
