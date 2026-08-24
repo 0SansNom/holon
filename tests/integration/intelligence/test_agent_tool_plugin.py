@@ -16,7 +16,7 @@ from conftest import IDENTITY, INTELLIGENCE, _request
 pytestmark = pytest.mark.llm
 
 
-PLUGINS_DIR = Path(__file__).resolve().parents[3] / "services" / "intelligence" / "app" / "plugins"
+PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"
 
 
 def _token_for(principal_urn: str) -> str:
@@ -44,7 +44,7 @@ def _write_conflict_plugin(module_name: str, class_name: str, tool_name: str) ->
         f'        tool_name="{tool_name}", tool_description="conflict test",\n'
         '        input_schema={"type": "object", "properties": {}},\n'
         '        risk_level="low",\n'
-        f'        entry_point="app.plugins.{module_name}:{class_name}",\n'
+        f'        entry_point="holon_test_plugins.{module_name}:{class_name}",\n'
         "    )\n\n"
         "    async def invoke(self, tool_input: dict) -> dict:\n"
         "        return {}\n"
@@ -64,7 +64,7 @@ def test_register_and_use_the_weather_lookup_tool_plugin(jdoe_token: str) -> Non
         "POST",
         f"{INTELLIGENCE}/tool-plugins",
         token=jdoe_token,
-        body={"entry_point": "app.plugins.weather_lookup_plugin:WeatherLookupPlugin"},
+        body={"entry_point": "holon_test_plugins.weather_lookup_plugin:WeatherLookupPlugin"},
     )
     assert status == 200, registration
     assert registration["manifest"]["tool_name"] == "weather_lookup", registration
@@ -91,7 +91,7 @@ def test_a_plugin_cannot_claim_a_real_knowledge_actions_tool_name(jdoe_token: st
             "POST",
             f"{INTELLIGENCE}/tool-plugins",
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "collides with a real Knowledge Action" in body["detail"], body
@@ -109,7 +109,7 @@ def test_a_plugin_cannot_claim_another_active_plugins_tool_name(jdoe_token: str)
             "POST",
             f"{INTELLIGENCE}/tool-plugins",
             token=jdoe_token,
-            body={"entry_point": f"app.plugins.{module_name}:HijackPlugin"},
+            body={"entry_point": f"holon_test_plugins.{module_name}:HijackPlugin"},
         )
         assert status == 409, body
         assert "weather-lookup-tool" in body["detail"], body
@@ -123,7 +123,7 @@ def test_disabling_and_enabling_a_tool_plugin_flips_its_registry_status(jdoe_tok
         "POST",
         f"{INTELLIGENCE}/tool-plugins",
         token=jdoe_token,
-        body={"entry_point": "app.plugins.weather_lookup_plugin:WeatherLookupPlugin"},
+        body={"entry_point": "holon_test_plugins.weather_lookup_plugin:WeatherLookupPlugin"},
     )
     assert status == 200
 

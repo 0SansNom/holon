@@ -43,7 +43,7 @@ def weather_lookup_registered(jdoe_token: str) -> None:
         "POST",
         f"{INTELLIGENCE}/tool-plugins",
         token=jdoe_token,
-        body={"entry_point": "app.plugins.weather_lookup_plugin:WeatherLookupPlugin"},
+        body={"entry_point": "holon_test_plugins.weather_lookup_plugin:WeatherLookupPlugin"},
     )
     assert status == 200, registration
 

@@ -24,7 +24,8 @@ import logging
 import uuid
 from typing import Any, Mapping, NoReturn, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -321,7 +322,7 @@ def install_error_handlers(app: FastAPI, *, service_name: str) -> None:
             error_code=CODE_INVALID_ARGUMENT,
             error_name="RequestValidationFailed",
             service=service_name,
-            parameters={"errors": exc.errors()},
+            parameters={"errors": jsonable_encoder(exc.errors())},
             error_instance_id=instance_id,
         )
         _log_error(

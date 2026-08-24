@@ -5,6 +5,7 @@ Allows registering REST data sources, authentication headers, record extraction 
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -51,6 +52,25 @@ CREATE TABLE IF NOT EXISTS generic_rest_connection (
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS secret_ref TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS connection_name TEXT;
 
+-- OAuth2 client_credentials as a second connection auth type, alongside
+-- the static header. Centralized here (not on generic_rest_source)
+-- because token refresh needs to be shared across every source that
+-- points at the same connection, and across Connectivity replicas —
+-- the same reason the header secret is already centralized here.
+-- oauth2_client_secret is the raw-value counterpart to the existing
+-- `secret_ref` column (secret_ref wins when set), same relationship
+-- auth_header_value already has to it — one connection, one secret,
+-- regardless of which auth_type it's storing.
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS auth_type TEXT NOT NULL DEFAULT 'header';
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_token_url TEXT;
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_client_id TEXT;
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_client_secret TEXT;
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_scope TEXT;
+-- Persisted cache, not per-process memory: shared across replicas so
+-- only one of them actually calls the token endpoint per refresh.
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_cached_token TEXT;
+ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_token_expires_at TIMESTAMPTZ;
+
 -- Scheduling (the Kestra idea: decouple "when" from "how") — an
 -- optional interval, not a cron expression. A non-technical admin
 -- configures "every N minutes" without learning cron syntax, and it's
@@ -93,7 +113,8 @@ _PUBLIC_COLUMNS = (
 )
 
 _CONNECTION_PUBLIC_COLUMNS = (
-    "tenant_id, name, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
+    "tenant_id, name, auth_type, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
+    "oauth2_token_url, oauth2_client_id, (oauth2_client_secret IS NOT NULL) AS has_oauth2_client_secret, oauth2_scope, "
     "created_by_urn, created_at"
 )
 
@@ -129,46 +150,77 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
 
 
+_VALID_CONNECTION_AUTH_TYPES = frozenset({"header", "oauth2_client_credentials"})
+
+
 async def register_connection(
     pool: asyncpg.Pool,
     *,
     tenant_id: str,
     name: str,
-    auth_header_name: str,
-    auth_header_value: Optional[str],
     created_by_urn: str,
+    auth_type: str = "header",
+    auth_header_name: Optional[str] = None,
+    auth_header_value: Optional[str] = None,
+    oauth2_token_url: Optional[str] = None,
+    oauth2_client_id: Optional[str] = None,
+    oauth2_client_secret: Optional[str] = None,
+    oauth2_scope: Optional[str] = None,
 ) -> dict:
     """A real upsert (same `name` again updates it) — same intent
     `register_source` already covers for its own secret, but resolved
-    in Python here rather than SQL `COALESCE`: `generic_rest_source`'s
-    `auth_header_value` column is nullable (a source can have no auth at
-    all), so `COALESCE(EXCLUDED.x, table.x)` inside `ON CONFLICT DO
-    UPDATE` works there. This table's `auth_header_value` is `NOT NULL`
-    (a connection *is* a stored secret — one without a value makes no
-    sense), and Postgres validates `NOT NULL` against the raw proposed
+    in Python here rather than SQL `COALESCE`: historically
+    `auth_header_value` was `NOT NULL` (a connection *is* a stored
+    secret), and Postgres validates `NOT NULL` against the raw proposed
     row *before* conflict resolution ever runs, so passing a literal
-    `NULL` for it fails outright even when `ON CONFLICT DO UPDATE` would
-    otherwise have coalesced it away — confirmed directly against
+    `NULL` for it failed outright even when `ON CONFLICT DO UPDATE`
+    would otherwise have coalesced it away — confirmed directly against
     Postgres, not assumed. Resolving "omitted means keep the existing
     secret" here, before the value ever reaches SQL, sidesteps that
-    entirely.
+    entirely; the same treatment now applies to `oauth2_client_secret`.
     """
-    if auth_header_value is None:
-        existing = await pool.fetchval(
-            "SELECT auth_header_value FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
-            tenant_id, name,
+    if auth_type not in _VALID_CONNECTION_AUTH_TYPES:
+        raise SourceConfigError(f"invalid auth_type: {auth_type!r} (must be one of {sorted(_VALID_CONNECTION_AUTH_TYPES)})")
+    if auth_type == "header" and not auth_header_name:
+        raise SourceConfigError("auth_type='header' requires auth_header_name")
+    if auth_type == "oauth2_client_credentials" and not (oauth2_token_url and oauth2_client_id):
+        raise SourceConfigError(
+            "auth_type='oauth2_client_credentials' requires oauth2_token_url and oauth2_client_id"
         )
-        auth_header_value = existing
+
+    existing = await pool.fetchrow(
+        "SELECT auth_header_value, oauth2_client_secret FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
+        tenant_id, name,
+    )
+    if auth_header_value is None and existing is not None:
+        auth_header_value = existing["auth_header_value"]
+    if oauth2_client_secret is None and existing is not None:
+        oauth2_client_secret = existing["oauth2_client_secret"]
+    if auth_type == "oauth2_client_credentials" and not oauth2_client_secret:
+        raise SourceConfigError("auth_type='oauth2_client_credentials' requires oauth2_client_secret")
 
     await pool.execute(
         """
-        INSERT INTO generic_rest_connection (tenant_id, name, auth_header_name, auth_header_value, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO generic_rest_connection (
+            tenant_id, name, auth_type, auth_header_name, auth_header_value,
+            oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, created_by_urn
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
+            auth_type = EXCLUDED.auth_type,
             auth_header_name = EXCLUDED.auth_header_name,
-            auth_header_value = EXCLUDED.auth_header_value
+            auth_header_value = EXCLUDED.auth_header_value,
+            oauth2_token_url = EXCLUDED.oauth2_token_url,
+            oauth2_client_id = EXCLUDED.oauth2_client_id,
+            oauth2_client_secret = EXCLUDED.oauth2_client_secret,
+            oauth2_scope = EXCLUDED.oauth2_scope,
+            -- A re-registration changes credentials; the cached token
+            -- from the old ones must not survive it.
+            oauth2_cached_token = NULL,
+            oauth2_token_expires_at = NULL
         """,
-        tenant_id, name, auth_header_name, auth_header_value, created_by_urn,
+        tenant_id, name, auth_type, auth_header_name, auth_header_value,
+        oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -425,6 +477,53 @@ def _add_query_param(url: str, key: str, value: str) -> str:
     return urlunsplit(parsed._replace(query=urlencode(query)))
 
 
+# Cached token must still have this many seconds left before use — never
+# start a page-fetch loop (which can take a while over _MAX_PAGES pages)
+# with a token already on the edge of expiring mid-flight.
+_OAUTH2_REFRESH_MARGIN_SECONDS = 60
+# RFC 6749 recommends but does not require `expires_in`; this is only a
+# floor for providers that omit it, not a real-world expectation.
+_OAUTH2_DEFAULT_TTL_SECONDS = 300
+
+
+async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_name: str, connection: asyncpg.Record) -> str:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expires_at = connection["oauth2_token_expires_at"]
+    if connection["oauth2_cached_token"] and expires_at is not None:
+        if (expires_at - now).total_seconds() > _OAUTH2_REFRESH_MARGIN_SECONDS:
+            return connection["oauth2_cached_token"]
+
+    client_secret = resolve_optional(connection["secret_ref"]) or connection["oauth2_client_secret"]
+    form = {
+        "grant_type": "client_credentials",
+        "client_id": connection["oauth2_client_id"],
+        "client_secret": client_secret,
+    }
+    if connection["oauth2_scope"]:
+        form["scope"] = connection["oauth2_scope"]
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(connection["oauth2_token_url"], data=form)
+    if response.status_code >= 400:
+        raise SourceFetchError(
+            f"connection {connection_name!r}: OAuth2 token request failed "
+            f"({response.status_code}): {response.text[:300]}"
+        )
+    body = response.json()
+    token = body.get("access_token")
+    if not token:
+        raise SourceFetchError(f"connection {connection_name!r}: OAuth2 token response had no access_token")
+    ttl_seconds = body.get("expires_in") or _OAUTH2_DEFAULT_TTL_SECONDS
+    new_expires_at = now + datetime.timedelta(seconds=int(ttl_seconds))
+
+    await pool.execute(
+        "UPDATE generic_rest_connection SET oauth2_cached_token = $1, oauth2_token_expires_at = $2 "
+        "WHERE tenant_id = $3 AND name = $4",
+        token, new_expires_at, tenant_id, connection_name,
+    )
+    return token
+
+
 async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
     row = await pool.fetchrow(
         "SELECT base_url, auth_header_name, auth_header_value, secret_ref, record_path, next_page_path, connection_name, "
@@ -438,15 +537,21 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     headers: dict[str, str] = {}
     if row["connection_name"]:
         connection = await pool.fetchrow(
-            "SELECT auth_header_name, auth_header_value, secret_ref FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
+            "SELECT auth_type, auth_header_name, auth_header_value, secret_ref, oauth2_token_url, oauth2_client_id, "
+            "oauth2_client_secret, oauth2_scope, oauth2_cached_token, oauth2_token_expires_at "
+            "FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
             tenant_id, row["connection_name"],
         )
         if connection is None:
             raise SourceFetchError(
                 f"source {name!r} references connection {row['connection_name']!r}, which no longer exists"
             )
-        value = resolve_optional(connection["secret_ref"]) or connection["auth_header_value"]
-        headers[connection["auth_header_name"]] = value
+        if connection["auth_type"] == "oauth2_client_credentials":
+            token = await _oauth2_bearer_token(pool, tenant_id, row["connection_name"], connection)
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            value = resolve_optional(connection["secret_ref"]) or connection["auth_header_value"]
+            headers[connection["auth_header_name"]] = value
     elif row["auth_header_name"]:
         value = resolve_optional(row["secret_ref"]) or row["auth_header_value"]
         if value:

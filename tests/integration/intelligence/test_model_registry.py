@@ -157,7 +157,7 @@ def test_model_backed_function_is_a_real_derived_property_and_respects_masking(
 
     status, registration = _request(
         "POST", holon_url("/function-plugins"), token=msmith_token,
-        body={"entry_point": "app.plugins.customer_value_model_function:CustomerValueModelFunction"},
+        body={"entry_point": "holon_test_plugins.customer_value_model_function:CustomerValueModelFunction"},
     )
     assert status == 200, registration
     assert registration["manifest"]["function_name"] == "predict_customer_value_tier", registration

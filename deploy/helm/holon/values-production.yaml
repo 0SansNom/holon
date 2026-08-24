@@ -51,7 +51,7 @@ networkPolicy:
     llmEgressCidrs: []
 
 # Prefer RS256 in real prod: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS
-# in existingSecret (`make gen-jwt-rsa`), then:
+# in existingSecret, then:
 # jwt:
 #   algorithm: RS256
 #   requireAsymmetric: true

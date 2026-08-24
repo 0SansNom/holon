@@ -12,7 +12,6 @@ from .publishing import (
     _run_publish_validations,
     _write_publish,
     propose_object_type_version,
-    publish_object_type_version,
 )
 
 

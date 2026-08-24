@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 from qdrant_client import AsyncQdrantClient
@@ -129,7 +129,6 @@ def _object_card(object_type: str, instance_id: str, data: dict) -> ContextItem:
     "forbidden" marker per field, never a bare `None` a model could 
     mistake for "no value on record."
     """
-    urn = data.get("urn") or f"{object_type}/{instance_id}"
     masked_fields = set(data.get("_maskedFields") or [])
     fields = {
         k: v for k, v in data.items() if k not in ("materializedAt", "sourceLagSeconds", "degraded", "asOf", "_maskedFields")

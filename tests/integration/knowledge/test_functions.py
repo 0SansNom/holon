@@ -31,7 +31,7 @@ def registered(msmith_token: str) -> dict:
     """Registration is idempotent (`ON CONFLICT (name) DO UPDATE`), so a."""
     status, registration = _request(
         "POST", holon_url("/function-plugins"), token=msmith_token,
-        body={"entry_point": "app.plugins.lifetime_tier_function:LifetimeTierFunction"},
+        body={"entry_point": "holon_test_plugins.lifetime_tier_function:LifetimeTierFunction"},
     )
     assert status == 200, registration
     assert registration["manifest"]["function_name"] == "lifetime_tier", registration
