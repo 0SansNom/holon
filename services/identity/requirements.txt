@@ -14,4 +14,4 @@ opentelemetry-instrumentation-httpx==0.65b0
 opentelemetry-instrumentation-asyncpg==0.65b0
 setuptools==83.0.0
 python3-saml==1.16.0
-python-multipart==0.0.20
+python-multipart==0.0.31
