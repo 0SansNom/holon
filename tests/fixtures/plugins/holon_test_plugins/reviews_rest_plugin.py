@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import httpx
+
 from holon_common.plugin import PluginManifest
 
 
@@ -22,6 +24,7 @@ class ReviewsRestPlugin:
     )
 
     async def fetch(self) -> list[dict]:
-        from app import rest_connector
-
-        return await rest_connector.read_reviews(os.environ["HOLON_REVIEWS_API_URL"])
+        async with httpx.AsyncClient() as client:
+            response = await client.get(os.environ["HOLON_REVIEWS_API_URL"], timeout=10)
+            response.raise_for_status()
+        return response.json()

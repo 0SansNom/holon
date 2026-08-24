@@ -5,7 +5,21 @@ from __future__ import annotations
 import asyncio
 import os
 
+from pymongo import MongoClient
+
 from holon_common.plugin import PluginManifest
+
+_DATABASE = "support_desk"
+_COLLECTION = "support_tickets"
+
+
+def _read_support_tickets(mongo_url: str) -> list[dict]:
+    client = MongoClient(mongo_url)
+    try:
+        cursor = client[_DATABASE][_COLLECTION].find({}, {"_id": 0}).sort("id", 1)
+        return list(cursor)
+    finally:
+        client.close()
 
 
 class MongoSupportTicketsPlugin:
@@ -23,8 +37,4 @@ class MongoSupportTicketsPlugin:
     )
 
     async def fetch(self) -> list[dict]:
-        from app import mongo_connector
-
-        return await asyncio.to_thread(
-            mongo_connector.read_support_tickets, os.environ["HOLON_MONGO_URL"]
-        )
+        return await asyncio.to_thread(_read_support_tickets, os.environ["HOLON_MONGO_URL"])
