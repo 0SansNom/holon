@@ -78,7 +78,7 @@ def test_group_membership_grants_workspace_read_to_members(msmith_token: str) ->
     )
     assert status == 201, user
     status, token_body = _request(
-        "POST", f"{IDENTITY}/token", body={"principal_urn": user["urn"], "client_secret": f"{local}-dev-secret"}
+        "POST", f"{IDENTITY}/token", body={"principal_urn": user["urn"], "client_secret": user["client_secret"]}
     )
     assert status == 200, token_body
     member_token = token_body["access_token"]

@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "identity"))
 
-from app.seed import ensure_instance_bootstrap  # noqa: E402
+from app.seed import _verify_client_secret_hash, ensure_instance_bootstrap  # noqa: E402
 
 
 def _pool(*, fetchrow=None, fetch=None):
@@ -211,5 +211,5 @@ def test_reset_secret_updates_existing_bootstrap_admin(monkeypatch):
         if c.args and "UPDATE principal SET client_secret" in c.args[0]
     ]
     assert updates
-    assert updates[0][1] == "new-secret"
+    assert _verify_client_secret_hash("new-secret", updates[0][1])
     assert updates[0][2] == admin_urn

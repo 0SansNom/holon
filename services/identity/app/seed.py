@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
+import secrets
 from typing import Optional
 
 import asyncpg
@@ -65,11 +68,55 @@ CREATE TABLE IF NOT EXISTS oidc_pending_state (
 """
 
 
-def client_secret_for(local_name: str) -> str:
-    """Convenience default for fixture/test principals that don't pass an
-    explicit client_secret — just a readable string, not a privileged one;
-    nothing treats this pattern specially at auth time."""
-    return f"{local_name}-dev-secret"
+# hashlib.scrypt needs an OpenSSL build with scrypt support — absent on
+# e.g. macOS's LibreSSL-linked system Python. pbkdf2_hmac has no such gap
+# (pure-Python fallback built into hashlib itself) and is still a NIST-
+# approved KDF (SP 800-132), so it's the portable stdlib-only choice here.
+_PBKDF2_ITERATIONS = 600_000
+
+
+def hash_client_secret(secret: str) -> str:
+    """Self-describing PBKDF2-HMAC-SHA256 hash:
+    `pbkdf2$<iterations>$<salt_b64>$<hash_b64>` — stdlib-only (no
+    pgcrypto / extra dependency), iteration count travels with the hash
+    so it can be raised later without breaking hashes already stored."""
+    salt = secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac("sha256", secret.encode(), salt, _PBKDF2_ITERATIONS, dklen=32)
+    salt_b64 = base64.urlsafe_b64encode(salt).decode()
+    hash_b64 = base64.urlsafe_b64encode(derived).decode()
+    return f"pbkdf2${_PBKDF2_ITERATIONS}${salt_b64}${hash_b64}"
+
+
+def _verify_client_secret_hash(candidate: str, stored: str) -> bool:
+    try:
+        scheme, iterations, salt_b64, hash_b64 = stored.split("$")
+        if scheme != "pbkdf2":
+            return False
+        salt = base64.urlsafe_b64decode(salt_b64)
+        expected = base64.urlsafe_b64decode(hash_b64)
+    except (ValueError, base64.binascii.Error):
+        return False
+    derived = hashlib.pbkdf2_hmac("sha256", candidate.encode(), salt, int(iterations), dklen=len(expected))
+    return secrets.compare_digest(derived, expected)
+
+
+async def verify_and_migrate_secret(pool: asyncpg.Pool, row: asyncpg.Record, candidate: str) -> bool:
+    """Verify `candidate` against a principal row, lazily migrating a
+    legacy plaintext `client_secret` to `client_secret_hash` on the
+    first successful auth after upgrade — no bulk rewrite at deploy
+    time, no forced rotation for dormant principals."""
+    stored_hash = row["client_secret_hash"]
+    if stored_hash:
+        return _verify_client_secret_hash(candidate, stored_hash)
+    legacy = row["client_secret"]
+    if legacy is None or not secrets.compare_digest(legacy, candidate):
+        return False
+    await pool.execute(
+        "UPDATE principal SET client_secret_hash = $1, client_secret = NULL WHERE urn = $2",
+        hash_client_secret(candidate),
+        row["urn"],
+    )
+    return True
 
 
 def tenant_urn(tenant_id: str) -> str:
@@ -141,8 +188,8 @@ async def ensure_instance_bootstrap(
     elif _truthy("HOLON_BOOTSTRAP_ADMIN_RESET_SECRET"):
         secret = _require_bootstrap_admin_secret()
         updated = await pool.execute(
-            "UPDATE principal SET client_secret = $1, status = 'active' WHERE urn = $2",
-            secret,
+            "UPDATE principal SET client_secret = NULL, client_secret_hash = $1, status = 'active' WHERE urn = $2",
+            hash_client_secret(secret),
             admin_urn,
         )
         if updated == "UPDATE 0":
@@ -239,20 +286,20 @@ async def _ensure_bootstrap_admin_principal(
     if existing is None:
         await pool.execute(
             """
-            INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret, status)
-            VALUES ($1, 'user', $2, $3, NULL, $4, $5, 'active')
+            INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret, client_secret_hash, status)
+            VALUES ($1, 'user', $2, $3, NULL, $4, NULL, $5, 'active')
             """,
             admin_urn,
             tenant_id,
             os.environ.get("HOLON_BOOTSTRAP_ADMIN_DISPLAY_NAME", "Instance Admin"),
             os.environ.get("HOLON_BOOTSTRAP_ADMIN_COUNTRY", "FR"),
-            secret,
+            hash_client_secret(secret),
         )
         return
     # Re-activate + refresh secret when repairing an orphaned/disabled bootstrap admin.
     await pool.execute(
-        "UPDATE principal SET client_secret = $1, status = 'active' WHERE urn = $2",
-        secret,
+        "UPDATE principal SET client_secret = NULL, client_secret_hash = $1, status = 'active' WHERE urn = $2",
+        hash_client_secret(secret),
         admin_urn,
     )
 
@@ -351,15 +398,16 @@ async def insert_principal(
     on_behalf_of: Optional[str] = None,
     client_secret: Optional[str] = None,
     oidc_sub: Optional[str] = None,
+    external_id: Optional[str] = None,
 ) -> dict:
     type_segment = {"service_account": "service-account", "service-account": "service-account"}.get(type, type)
     urn = build_urn(tenant_id, "global", type_segment, local_name)
-    secret = client_secret if client_secret is not None else client_secret_for(local_name)
+    secret = client_secret if client_secret is not None else secrets.token_urlsafe(32)
     db_type = "service_account" if type in ("service_account", "service-account") else type
     await pool.execute(
         """
-        INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret, status, oidc_sub)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8)
+        INSERT INTO principal (urn, type, tenant_id, display_name, on_behalf_of, country, client_secret, client_secret_hash, status, oidc_sub, external_id)
+        VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, 'active', $8, $9)
         """,
         urn,
         db_type,
@@ -367,11 +415,14 @@ async def insert_principal(
         display_name,
         on_behalf_of,
         country,
-        secret,
+        hash_client_secret(secret),
         oidc_sub,
+        external_id,
     )
     row = await pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
-    return dict(row)
+    result = dict(row)
+    result["client_secret"] = secret
+    return result
 
 
 async def set_principal_status(pool: asyncpg.Pool, urn: str, status: str) -> Optional[dict]:

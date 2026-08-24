@@ -26,10 +26,12 @@ enterprise:
   `main`); no bundled demo. Ontology, connectors, and extra principals
   are created through APIs (or CI fixtures — see
   [docs/ops/seed-data.md](docs/ops/seed-data.md)).
-- **SSO / secrets / JWT ops** — OIDC + `SecretProvider` + JWT `kid`
-  rotation and optional RS256 (`HOLON_JWT_REQUIRE_ASYMMETRIC`) are
-  in-tree; Vault/IdP wiring and key custody are yours. Prefer connector
-  `secret_ref`.
+- **SSO / secrets / JWT ops** — OIDC, SAML SP, and SCIM provisioning
+  (day-2 deprovisioning included — see [ADR 028](docs/adr/028-saml-scim-sso.md))
+  + `SecretProvider` + JWT `kid` rotation and optional RS256
+  (`HOLON_JWT_REQUIRE_ASYMMETRIC`) are in-tree; Vault/IdP wiring and key
+  custody are yours. Prefer connector `secret_ref`. SAML Single Logout
+  and the full SCIM filter grammar are deliberately not implemented.
 - **Intelligence is experimental** — leave
   `HOLON_INTELLIGENCE_ENABLED=false` in prod (posture-enforced). Joblib
   model upload and tool-plugin register are refused in production;
