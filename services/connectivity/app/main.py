@@ -56,6 +56,7 @@ from . import (
     kafka_stream_registry,
     pipeline,
     plugin_registry,
+    sql_source_registry,
     stream_connector,
     write_target_registry,
 )
@@ -145,6 +146,7 @@ async def lifespan(app: FastAPI):
         await outbox.ensure_schema(conn)
         await plugin_registry.ensure_schema(conn)
         await generic_source_registry.ensure_schema(conn)
+        await sql_source_registry.ensure_schema(conn)
         await pipeline.ensure_schema(conn)
         await write_target_registry.ensure_schema(conn)
         await stream_connector.ensure_schema(conn)
@@ -417,8 +419,8 @@ async def _run_sync_for_dataset(
     carrying a status code and message there, caught and logged like any
     other error, never turned into an actual HTTP response.
 
-    Runtime dispatch: active plugin for this tenant → generic REST source.
-    No privileged in-process dataset map.
+    Runtime dispatch: active plugin for this tenant → generic REST source
+    → SQL source. No privileged in-process dataset map.
     """
     write_mode: Literal["overwrite", "append"] = "overwrite"
     plugin = await plugin_registry.load_active_plugin_for_dataset(app.state.pool, dataset_name, tenant_id)
@@ -428,24 +430,39 @@ async def _run_sync_for_dataset(
         read = plugin.fetch
     else:
         source = await generic_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
-        if source is None:
-            raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
-        if source["status"] != "active":
-            raise HolonError.conflict(
-                "SourceDisabled",
-                f"source {dataset_name!r} is disabled — enable it first",
-                dataset_name=dataset_name,
-            )
-        connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
-        read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
-        # Use append mode for cursor-configured sources, overwrite for full sync
-        if source["cursor_property"]:
-            write_mode = "append"
+        if source is not None:
+            if source["status"] != "active":
+                raise HolonError.conflict(
+                    "SourceDisabled",
+                    f"source {dataset_name!r} is disabled — enable it first",
+                    dataset_name=dataset_name,
+                )
+            connector_urn = build_urn(tenant_id, "global", "connector", f"generic-rest-{dataset_name}")
+            read = functools.partial(generic_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
+            # Use append mode for cursor-configured sources, overwrite for full sync
+            if source["cursor_property"]:
+                write_mode = "append"
+        else:
+            sql_source = await sql_source_registry.get_source(app.state.pool, tenant_id, dataset_name)
+            if sql_source is None:
+                raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
+            if sql_source["status"] != "active":
+                raise HolonError.conflict(
+                    "SourceDisabled",
+                    f"source {dataset_name!r} is disabled — enable it first",
+                    dataset_name=dataset_name,
+                )
+            connector_urn = build_urn(tenant_id, "global", "connector", f"sql-{dataset_name}")
+            read = functools.partial(sql_source_registry.fetch_for_dataset, app.state.pool, tenant_id, dataset_name)
+            if sql_source["cursor_property"]:
+                write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
     try:
         rows = await read()
     except generic_source_registry.SourceFetchError as exc:
+        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+    except sql_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
@@ -567,6 +584,14 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
                             tenant_id=source["tenant_id"],
                             workspace_id=source.get("workspace_id") or WORKSPACE_ID,
                             interval=timedelta(minutes=source["schedule_interval_minutes"]),
+                        )
+                    sql_sources = await sql_source_registry.list_all_scheduled_sources(pool)
+                    for sql_source in sql_sources:
+                        await _run_if_due(
+                            dataset_name=sql_source["name"],
+                            tenant_id=sql_source["tenant_id"],
+                            workspace_id=sql_source.get("workspace_id") or WORKSPACE_ID,
+                            interval=timedelta(minutes=sql_source["schedule_interval_minutes"]),
                         )
                     # Same due-check, for connector plugins — plugins have
                     # no workspace_id of their own (see plugin_registration's
@@ -1271,6 +1296,165 @@ async def delete_source(name: str, principal: Principal = Depends(current_princi
     emit_audit(
         category="access",
         action="connectivity.source.deleted",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="source",
+        resource_urn=build_urn(principal.tenant_id, WORKSPACE_ID, "source", name),
+    )
+    return {"deleted": name}
+
+
+# --- SQL sources (Postgres wire: PostgreSQL, Redshift, CockroachDB) --------
+
+
+class RegisterSqlConnectionRequest(BaseModel):
+    name: str
+    host: str
+    port: int = 5432
+    database: str
+    username: str
+    # Optional; if omitted on edit, existing secret is retained
+    password: Optional[str] = None
+    secret_ref: Optional[str] = None
+
+
+@app.post("/sql-connections")
+async def register_sql_connection(
+    body: RegisterSqlConnectionRequest, principal: Principal = Depends(current_principal)
+) -> dict:
+    """Reusable DB credential for the no-code SQL connector — unlike the
+    REST connector's optional inline auth, a connection here is always
+    required: a SQL source almost always shares its database with
+    several sibling tables. Same authentication tier as `/connections`.
+    """
+    await _authorize_workspace(principal, "write")
+    return await sql_source_registry.register_connection(
+        app.state.pool,
+        tenant_id=principal.tenant_id,
+        name=body.name,
+        host=body.host,
+        port=body.port,
+        database=body.database,
+        username=body.username,
+        password=body.password,
+        secret_ref=body.secret_ref,
+        created_by_urn=principal.urn,
+    )
+
+
+@app.get("/sql-connections")
+async def list_sql_connections(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await sql_source_registry.list_connections(app.state.pool, principal.tenant_id)
+
+
+@app.delete("/sql-connections/{name}")
+async def delete_sql_connection(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await sql_source_registry.get_connection(app.state.pool, principal.tenant_id, name) is None:
+        raise HolonError.not_found('ConnectionNotFound', f"no SQL connection registered as {name!r}", name=name)
+    try:
+        await sql_source_registry.delete_connection(app.state.pool, principal.tenant_id, name)
+    except sql_source_registry.ConnectionInUseError as exc:
+        raise HolonError.conflict('ConnectionConflict', str(exc)) from exc
+    return {"deleted": name}
+
+
+class RegisterSqlSourceRequest(BaseModel):
+    name: str
+    connection_name: str
+    workspace_id: Optional[str] = None
+    table_name: Optional[str] = None
+    query: Optional[str] = None
+    schedule_interval_minutes: Optional[int] = None
+    cursor_property: Optional[str] = None
+
+
+@app.post("/sql-sources")
+async def register_sql_source(
+    body: RegisterSqlSourceRequest,
+    principal: Principal = Depends(current_principal),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    x_holon_workspace_id: Optional[str] = Header(None, alias="X-Holon-Workspace-Id"),
+) -> dict:
+    """The no-code SQL connector: register a table (or a read-only SELECT
+    query) against an already-registered `sql_connection`, no Python to
+    write or deploy. Same authentication tier as `/sources`/`/plugins`.
+    """
+    target_workspace = _resolve_workspace(
+        explicit=body.workspace_id,
+        workspace_id=workspace_id,
+        x_holon_workspace_id=x_holon_workspace_id,
+    )
+    await _authorize_workspace(principal, "write", workspace_id=target_workspace)
+    try:
+        registration = await sql_source_registry.register_source(
+            app.state.pool,
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            workspace_id=target_workspace,
+            connection_name=body.connection_name,
+            table_name=body.table_name,
+            query=body.query,
+            schedule_interval_minutes=body.schedule_interval_minutes,
+            cursor_property=body.cursor_property,
+            created_by_urn=principal.urn,
+            reserved_dataset_names=await _reserved_dataset_names(app.state.pool),
+        )
+    except sql_source_registry.SourceConflictError as exc:
+        raise HolonError.conflict('SourceConflict', str(exc)) from exc
+    except sql_source_registry.SourceConfigError as exc:
+        raise HolonError.invalid_argument('SourceValidationFailed', str(exc)) from exc
+    emit_audit(
+        category="access",
+        action="connectivity.sql_source.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="source",
+        resource_urn=build_urn(principal.tenant_id, target_workspace, "source", body.name),
+        extra={"connection_name": body.connection_name},
+    )
+    return registration
+
+
+@app.get("/sql-sources")
+async def list_sql_sources(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await sql_source_registry.list_sources(app.state.pool, principal.tenant_id)
+
+
+@app.post("/sql-sources/{name}/disable")
+async def disable_sql_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await sql_source_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _source_not_found(name)
+    return await sql_source_registry.set_source_status(app.state.pool, principal.tenant_id, name, "disabled")
+
+
+@app.post("/sql-sources/{name}/enable")
+async def enable_sql_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await sql_source_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _source_not_found(name)
+    return await sql_source_registry.set_source_status(app.state.pool, principal.tenant_id, name, "active")
+
+
+@app.delete("/sql-sources/{name}")
+async def delete_sql_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    source = await sql_source_registry.get_source(app.state.pool, principal.tenant_id, name)
+    if source is None:
+        raise _source_not_found(name)
+    await sql_source_registry.delete_source(app.state.pool, principal.tenant_id, name)
+    emit_audit(
+        category="access",
+        action="connectivity.sql_source.deleted",
         outcome="success",
         tenant_id=principal.tenant_id,
         actor_urn=principal.urn,
