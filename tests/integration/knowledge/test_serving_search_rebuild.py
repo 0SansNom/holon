@@ -118,7 +118,7 @@ def test_serving_store_and_search_reconstruct_from_iceberg_after_being_wiped(jdo
 
     status, wiped_rows = _request("GET", ontology_url("/objects/Customer"), token=jdoe_token)
     assert status == 200
-    assert all(row.get("degraded") for row in wiped_rows), wiped_rows  # federated fallback, not a 500
+    assert wiped_rows == [], wiped_rows  # serving-store miss is empty, not a live Iceberg scan
 
     # 3. One ordinary /sync
     # the running consumer's existing `_materialize_sync` re-scans

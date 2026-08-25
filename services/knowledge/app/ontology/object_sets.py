@@ -138,11 +138,6 @@ def matches_predicates(instance: dict, definition: dict, property_mapping: dict)
     return True
 
 
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    # Table created via object_types.DDL; no-op helper for symmetry.
-    return None
-
-
 async def create_object_set(
     pool: asyncpg.Pool,
     *,

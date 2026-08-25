@@ -6,17 +6,16 @@ Applied once each, in filename order, by `holon_common.run_migrations`
 write a new one instead, even to fix a mistake in an already-applied
 migration.
 
-This exists for schema changes that aren't purely additive — a rename, a
-drop, a backfill, a data migration. Purely additive changes (a new
-table, a new nullable column) can still go through the service's own
-`ensure_schema()` (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD
-COLUMN IF NOT EXISTS`) if that's simpler; both run at every startup,
-`ensure_schema()` first.
+Knowledge is **migrations-first**. `0000_baseline.sql` is the CREATE TABLE
+baseline (idempotent `IF NOT EXISTS`). `0001`–`0004` are the historical
+non-additive follow-ups. Schema lives only in these files — there is no
+domain `ensure_schema()` / in-module `DDL` string. Additive changes go
+in a new `NNNN_*.sql` file.
 
 ## Convention
 
 - Filename: `NNNN_short_description.sql` — four-digit, zero-padded,
-  sequential, lowercase, underscores. `0001_add_widget_kind_column.sql`.
+  sequential, lowercase, underscores. `0005_add_widget_kind_column.sql`.
   A name that doesn't match this pattern is silently skipped by the
   runner (not an error, not logged) — a typo in the number or an
   uppercase letter means the file quietly never runs.

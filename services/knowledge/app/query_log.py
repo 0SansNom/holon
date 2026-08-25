@@ -13,21 +13,6 @@ from __future__ import annotations
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS query_log (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    query_text TEXT NOT NULL,
-    result_count INTEGER NOT NULL,
-    executed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def record_query(pool: asyncpg.Pool, tenant_id: str, query_text: str, result_count: int) -> None:
     await pool.execute(
         "INSERT INTO query_log (tenant_id, query_text, result_count) VALUES ($1, $2, $3)",

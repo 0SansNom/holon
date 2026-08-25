@@ -11,17 +11,12 @@ import asyncpg
 
 from holon_common.plugin import (
     PluginConflictError,
-    ensure_schema as _shared_ensure_schema,
     find_active_by_manifest_field,
     get_registration,
     load_entry_point,
     register as _shared_register,
     set_status,
 )
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await _shared_ensure_schema(conn)
 
 
 async def register_execution_adapter_plugin(pool: asyncpg.Pool, *, entry_point: str) -> dict:
@@ -63,7 +58,6 @@ async def find_active_adapter_for_object_type(pool: asyncpg.Pool, object_type: s
 
 
 __all__ = [
-    "ensure_schema",
     "register_execution_adapter_plugin",
     "get_execution_adapter_registration",
     "set_execution_adapter_status",

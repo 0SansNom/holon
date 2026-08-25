@@ -11,27 +11,6 @@ from typing import Iterable, Optional
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS relation_link_overlay (
-    tenant_id TEXT NOT NULL,
-    relation_urn TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    op TEXT NOT NULL CHECK (op IN ('add', 'delete')),
-    mid_id TEXT,
-    set_by_urn TEXT NOT NULL,
-    set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, relation_urn, source_id, target_id)
-);
-CREATE INDEX IF NOT EXISTS relation_link_overlay_relation_idx
-    ON relation_link_overlay (tenant_id, relation_urn);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def upsert_link(
     conn: asyncpg.Connection,
     *,

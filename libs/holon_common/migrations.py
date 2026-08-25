@@ -2,17 +2,18 @@
 in a `schema_migrations` table, each applied once inside its own
 transaction.
 
-Deliberately not an ORM or Alembic: every service's schema has always
-been plain SQL strings (`ensure_schema()` in each owning module,
-`CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN IF NOT
-EXISTS`, re-run idempotently on every boot). That pattern only ever
-covers *additive* change and carries no history — this adds exactly
-what it was missing, nothing more: a real place for a change that isn't
-purely additive (rename, drop, backfill, a data migration) to live,
-with a version so it's obvious what ran and when.
+Deliberately not an ORM or Alembic: most services still create tables via
+`ensure_schema()` (`CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS`, re-run idempotently on every boot). That pattern
+only ever covers *additive* change and carries no history — this adds
+exactly what it was missing: a real place for a change that isn't purely
+additive (rename, drop, backfill) to live, with a version so it's obvious
+what ran and when.
 
-Identity is migrations-first: domain `ensure_schema()` was removed there
-and the baseline is `services/identity/app/migrations/0000_baseline.sql`.
+Knowledge and Identity are migrations-first. Domain `ensure_schema()`
+helpers were removed there; baselines are
+`services/knowledge/app/migrations/0000_baseline.sql` and
+`services/identity/app/migrations/0000_baseline.sql`, then `0001`–.
 Other services still call `ensure_schema()` at boot *before*
 `run_migrations`. This runner governs schema changes from here forward;
 it is not a retroactive rewrite of what's already shipped.
