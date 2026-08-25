@@ -42,7 +42,7 @@ export function ProjectDetailPage() {
 }
 
 function ProjectDetailContent({ project }: { project: Project }) {
-  const { data: pins } = useProjectPins(project.urn);
+  const { data: pins = [] } = useProjectPins(project.urn);
   const { data: objectTypes } = useObjectTypes();
   const { data: applications } = useApplications();
 

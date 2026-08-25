@@ -27,6 +27,13 @@ tests/
 | `integration` | Compose / local infra | `make test` / `pytest -m "not llm"` |
 | `llm` | Real LLM spend | `pytest -m llm` (not default CI) |
 
+Browser e2e (Playwright) lives in `services/experience/web/e2e` and needs
+the stack plus a built SPA on Experience (`http://localhost:8004`):
+
+```bash
+cd services/experience/web && npm run test:e2e
+```
+
 Path `tests/unit/` → auto `unit`; everything else under `tests/` → auto `integration`.
 
 ## Conventions
