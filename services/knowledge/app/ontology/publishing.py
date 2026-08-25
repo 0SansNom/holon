@@ -1,14 +1,4 @@
-"""ObjectType lifecycle: propose a draft, publish it. The widest-reaching
-module in this package — publishing touches interfaces, derived-property
-Function registration, project scope, and markings validation all in one
-transaction — kept intact rather than fragmented further, per the plan's
-own note on this function.
-
-Two internal helpers separate validation from writing so that `branching.
-review_branch` can include the branch-merge `UPDATE` in the same atomic
-transaction as the publish writes (`_write_publish`), without duplicating
-the validation logic (`_run_publish_validations`).
-"""
+"""ObjectType lifecycle: propose and publish versioned definitions."""
 
 from __future__ import annotations
 
@@ -70,12 +60,7 @@ async def _validate_implements(
     interface_property_bindings: Optional[dict] = None,
     interface_overrides: Optional[dict[str, dict]] = None,
 ) -> None:
-    """Enforced at publish time (same synchronous-validation treatment
-    `create_relation_type` already gives cardinality/endpoints):
-    declaring conformance to an interface is a checked promise, not a
-    label. Uses the *effective* interface contract (local + inherited
-    parent_interfaces). Interface-targeted Actions on ancestors count.
-    """
+    """Validate that the version satisfies all declared interface contracts."""
     from .interfaces import (
         effective_interface_contract,
         expand_implements,
@@ -327,7 +312,6 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type_name: st
             return relation
         if target_name == object_type_name and reverse == link_name:
             return relation
-        # Legacy: still accept bare local name / target_property when API names diverge.
         if source_name == object_type_name and local_name == link_name:
             return relation
         if target_name == object_type_name and relation.get("target_property") == link_name:
@@ -336,7 +320,7 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type_name: st
 
 
 def _link_aggregate_path(rule: dict) -> list[str]:
-    """Foundry-style multi-hop path (1–3 link names)."""
+    """Return list of link names along multi-hop path."""
     path = rule.get("path")
     return path if isinstance(path, list) else []
 
@@ -345,25 +329,7 @@ async def _validate_derived_properties(
     pool: asyncpg.Pool, *, derived_properties: dict[str, object], object_type_name: str, tenant_id: str,
     property_types: Optional[dict[str, dict]] = None,
 ) -> None:
-    """Enforced at publish time, same tier as `_validate_implements`. A
-    plain string must name a real, currently-*active* Function plugin —
-    the original shape, unchanged. A `{"kind": "link_aggregate", ...}`
-    dict is a Foundry-style reducer over a RelationType path (`path` of
-    1–3 link names): each hop must resolve
-    from the type reached so far, `aggregate` must be a known aggregate,
-    and — unless `aggregate` is `count`, which needs no value to read —
-    `property` must be a real mapped property on the *final* related
-    ObjectType. A `{"kind": "struct_reducer", ...}` dict is a
-    Foundry-style reducer over one of *this* ObjectType's own array
-    properties: `property` must name an `array`-kind `property_types`
-    entry, `reducer` must be a known reducer, and — for the field-based
-    reducers (`latest`/`earliest`/`max`/`min`) — `by` is required and
-    must be a real field when the array's element is a `struct`, or must
-    be absent when the element is a scalar (nothing to key by; reduce the
-    values directly). Import kept local to avoid a module-load-order
-    assumption between this package and `function_registry.py` (neither
-    currently imports the other at top level; this keeps it that way).
-    """
+    """Validate derived property definitions, aggregations, and reducers."""
     from .. import function_registry
     from .relation_types import list_relation_types
 
@@ -601,7 +567,7 @@ _ALLOWED_RENDER_HINTS = ALLOWED_RENDER_HINTS
 
 
 def _validate_struct_field_metadata(property_name: str, rule: dict, *, allow_column: bool = True) -> None:
-    """Foundry-style per-field metadata allowed on struct leaves only."""
+    """Validate per-field metadata for struct types."""
     if "description" in rule and not isinstance(rule["description"], str):
         raise ValueError(f"property_types entry for {property_name!r}: description must be a string")
     if "main_field" in rule and not isinstance(rule["main_field"], bool):
@@ -621,7 +587,7 @@ def _validate_struct_field_metadata(property_name: str, rule: dict, *, allow_col
 def _validate_property_control_metadata(
     property_name: str, rule: dict, *, nested: bool, allow_field_column: bool = True
 ) -> None:
-    """Top-level-only Foundry-style property control metadata."""
+    """Validate top-level property control metadata."""
     if nested and any(
         k in rule
         for k in ("editable", "required", "visibility", "render_hints", "type_classes", "lifecycle_status")

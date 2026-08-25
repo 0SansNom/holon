@@ -5,16 +5,13 @@ Dynamically registers and loads developer-authored connector plugins.
 
 from __future__ import annotations
 
-import hashlib
-import importlib
-import inspect
 import json
 import logging
 from typing import Optional
 
 import asyncpg
 
-from holon_common.plugin import ConnectorPlugin
+from holon_common.plugin import ConnectorPlugin, PluginConflictError, checksum_of, load_entry_point
 
 logger = logging.getLogger("connectivity.plugin_registry")
 
@@ -42,25 +39,11 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
 
 
-class PluginConflictError(ValueError):
-    pass
-
-
 def _load_entry_point(entry_point: str) -> ConnectorPlugin:
-    # Same FileFinder mtime-cache gotcha as holon_common.plugin.load_entry_point:
-    # tests (and operators) write plugin modules then register them immediately.
-    importlib.invalidate_caches()
-    module_path, class_name = entry_point.split(":")
-    module = importlib.import_module(module_path)
-    return getattr(module, class_name)()
+    return load_entry_point(entry_point)
 
 
-def _checksum_of(entry_point: str) -> str:
-    importlib.invalidate_caches()
-    module_path, _ = entry_point.split(":")
-    module = importlib.import_module(module_path)
-    source = inspect.getsource(module)
-    return hashlib.sha256(source.encode()).hexdigest()
+_checksum_of = checksum_of
 
 
 def _parse_manifest(row: asyncpg.Record) -> dict:
@@ -70,8 +53,15 @@ def _parse_manifest(row: asyncpg.Record) -> dict:
     return result
 
 
-async def get_plugin_registration(pool: asyncpg.Pool, name: str) -> Optional[dict]:
-    row = await pool.fetchrow("SELECT * FROM plugin_registration WHERE name = $1", name)
+async def get_plugin_registration(pool: asyncpg.Pool, name: str, tenant_id: Optional[str] = None) -> Optional[dict]:
+    if tenant_id is None:
+        row = await pool.fetchrow("SELECT * FROM plugin_registration WHERE name = $1", name)
+    else:
+        row = await pool.fetchrow(
+            "SELECT * FROM plugin_registration WHERE name = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
+            name,
+            tenant_id,
+        )
     return None if row is None else _parse_manifest(row)
 
 
@@ -120,8 +110,16 @@ async def register_plugin(
             f"dataset {manifest.dataset_name!r} is already claimed by active plugin {conflicting['name']!r}"
         )
 
+    existing = await pool.fetchrow("SELECT tenant_id FROM plugin_registration WHERE name = $1", manifest.name)
+    if existing is not None:
+        existing_tid = existing["tenant_id"]
+        if existing_tid is None and tenant_id is not None:
+            raise PluginConflictError(f"plugin {manifest.name!r} is a global plugin")
+        if existing_tid is not None and existing_tid != tenant_id:
+            raise PluginConflictError(f"plugin {manifest.name!r} is registered by another tenant")
+
     checksum = _checksum_of(entry_point)
-    await pool.execute(
+    status = await pool.execute(
         """
         INSERT INTO plugin_registration (name, version, manifest, checksum, status, tenant_id)
         VALUES ($1, $2, $3::jsonb, $4, 'active', $5)
@@ -129,6 +127,7 @@ async def register_plugin(
             version = EXCLUDED.version, manifest = EXCLUDED.manifest,
             checksum = EXCLUDED.checksum, status = 'active',
             tenant_id = EXCLUDED.tenant_id
+        WHERE plugin_registration.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id
         """,
         manifest.name,
         manifest.version,
@@ -136,23 +135,44 @@ async def register_plugin(
         checksum,
         tenant_id,
     )
-    return await get_plugin_registration(pool, manifest.name)
+    written = int(status.split()[-1])
+    if written == 0:
+        raise PluginConflictError(f"plugin {manifest.name!r} is already registered")
+    row = await get_plugin_registration(pool, manifest.name, tenant_id)
+    if row is None or row.get("tenant_id") != tenant_id:
+        raise PluginConflictError(f"plugin {manifest.name!r} is already registered")
+    return row
 
 
-async def set_plugin_status(pool: asyncpg.Pool, name: str, status: str) -> Optional[dict]:
+async def set_plugin_status(
+    pool: asyncpg.Pool, name: str, status: str, *, tenant_id: str
+) -> Optional[dict]:
     """Activatable/deactivatable without redeploy: flips a column
     the dispatch path (`load_active_plugin_for_dataset`) actually checks.
     """
-    await pool.execute("UPDATE plugin_registration SET status = $1 WHERE name = $2", status, name)
-    return await get_plugin_registration(pool, name)
-
-
-async def set_plugin_schedule(pool: asyncpg.Pool, name: str, schedule_interval_minutes: Optional[int]) -> Optional[dict]:
-    await pool.execute(
-        "UPDATE plugin_registration SET schedule_interval_minutes = $1 WHERE name = $2",
-        schedule_interval_minutes, name,
+    result = await pool.execute(
+        "UPDATE plugin_registration SET status = $1 WHERE name = $2 AND tenant_id IS NOT DISTINCT FROM $3",
+        status,
+        name,
+        tenant_id,
     )
-    return await get_plugin_registration(pool, name)
+    if result == "UPDATE 0":
+        return None
+    return await get_plugin_registration(pool, name, tenant_id)
+
+
+async def set_plugin_schedule(
+    pool: asyncpg.Pool, name: str, schedule_interval_minutes: Optional[int], *, tenant_id: str
+) -> Optional[dict]:
+    result = await pool.execute(
+        "UPDATE plugin_registration SET schedule_interval_minutes = $1 WHERE name = $2 AND tenant_id IS NOT DISTINCT FROM $3",
+        schedule_interval_minutes,
+        name,
+        tenant_id,
+    )
+    if result == "UPDATE 0":
+        return None
+    return await get_plugin_registration(pool, name, tenant_id)
 
 
 async def list_all_scheduled_plugins(pool: asyncpg.Pool) -> list[dict]:

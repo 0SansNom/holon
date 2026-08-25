@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import jwt
 from fastapi import Request, Response
@@ -33,6 +33,41 @@ from .errors import HolonError
 COOKIE_NAME = "holon_session"
 SESSION_COOKIE_TTL_SECONDS = 3600
 SUPPORTED_JWT_ALGS = frozenset({"HS256", "RS256"})
+
+# Process-local denylist populated from identity.principal.status_changed
+# (and Identity's own status writes). JWT decode still trusts exp; this
+# closes the "disabled principal, live cookie" window on every service
+# that consumes the event — Identity also re-reads Postgres.
+_disabled_principal_urns: set[str] = set()
+
+
+def mark_principal_disabled(urn: str) -> None:
+    if urn:
+        _disabled_principal_urns.add(urn)
+
+
+def mark_principal_enabled(urn: str) -> None:
+    _disabled_principal_urns.discard(urn)
+
+
+def is_principal_disabled(urn: str) -> bool:
+    return urn in _disabled_principal_urns
+
+
+def apply_principal_status_payload(payload: Mapping[str, Any]) -> None:
+    """Apply `identity.principal.status_changed` to the process-local denylist.
+
+    Enable must clear the urn on every replica that received the disable
+    event — unique per-process Kafka groups (see `principal_status`) fan
+    the event out so this discard actually runs everywhere.
+    """
+    urn = str(payload.get("principal_urn") or "")
+    if not urn:
+        return
+    if payload.get("status") == "active":
+        mark_principal_enabled(urn)
+    else:
+        mark_principal_disabled(urn)
 
 
 class Principal(BaseModel):
@@ -271,9 +306,18 @@ def decode_token(token: str, secret: str, *, secrets: Optional[dict[str, str]] =
     )
 
 
-def make_principal_dependency(secret: str, *, expected_tenant_id: Optional[str] = None, secrets: Optional[dict[str, str]] = None):
+def make_principal_dependency(
+    secret: str,
+    *,
+    expected_tenant_id: Optional[str] = None,
+    secrets: Optional[dict[str, str]] = None,
+    check_disabled_denylist: bool = True,
+):
     """Builds a FastAPI dependency that resolves the current Principal from
     either the Authorization header or the `holon_session` HttpOnly cookie.
+
+    Identity passes `check_disabled_denylist=False`: Postgres is the source
+    of truth there, and the in-memory set is not shared across replicas.
     """
 
     async def dependency(request: Request) -> Principal:
@@ -290,6 +334,8 @@ def make_principal_dependency(secret: str, *, expected_tenant_id: Optional[str] 
         # Under RS256, decode_token ignores `secrets` and loads public keys
         # from the environment so verify-only pods need no private key.
         principal = decode_token(token, secret, secrets=secrets)
+        if check_disabled_denylist and is_principal_disabled(principal.urn):
+            raise HolonError.unauthorized("PrincipalDisabled", "principal is disabled")
         if not principal.tenant_id:
             raise HolonError.unauthorized("MissingTenantId", "missing tenant_id")
         if expected_tenant_id is not None and principal.tenant_id != expected_tenant_id:
@@ -317,7 +363,15 @@ def set_session_cookie(response: Response, token: str) -> None:
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+    # Must match set_session_cookie flags — browsers key cookies on
+    # Secure/SameSite and ignore a deletion that omits them.
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
 
 
 def require_tenant_match(principal: Principal, resource_tenant_id: str) -> None:

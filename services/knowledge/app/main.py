@@ -27,6 +27,7 @@ from holon_common import (
 from holon_common.audit import clear_durable_audit_hooks
 from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
 from holon_common.authz import PermissionClient
+from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
 
 from . import (
     actions,
@@ -71,19 +72,7 @@ SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 
 
 async def _consume_identity_events(consumer: EventConsumer) -> None:
-    """Consume identity permission events for cache invalidation."""
-    await consumer.start()
-    async for event in consumer:
-        try:
-            if event.event_type in {"identity.permission.granted", "identity.permission.revoked"}:
-                purged = app.state.authz.invalidate_principal(event.payload["principal_urn"])
-                logger.info(
-                    "authz cache: purged %d entr%s for changed principal %s",
-                    purged, "y" if purged == 1 else "ies", event.payload["principal_urn"],
-                )
-        except Exception:
-            logger.exception("failed to process identity event %s for authz cache invalidation", event.event_id)
-        await consumer.commit()
+    await consume_identity_auth_events(consumer, authz=app.state.authz)
 
 
 @asynccontextmanager
@@ -152,11 +141,8 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    authz_cache_consumer = EventConsumer(
-        KAFKA_BOOTSTRAP,
-        topics=["identity"],
-        group_id="knowledge-platform-authz-cache-invalidation",
-        dlq_producer=app.state.producer,
+    authz_cache_consumer = make_principal_status_consumer(
+        KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
     )
     authz_cache_invalidation_task = asyncio.create_task(_consume_identity_events(authz_cache_consumer))
 

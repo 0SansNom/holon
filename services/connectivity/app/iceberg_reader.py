@@ -5,15 +5,15 @@ from __future__ import annotations
 import datetime
 import decimal
 import time
+from typing import Optional
 
 from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import NoSuchTableError
 
+from holon_common.iceberg_ident import iceberg_read_identifiers
+
 _LOAD_TABLE_RETRIES = 4
 _LOAD_TABLE_RETRY_DELAY_SECONDS = 1.5
-
-NAMESPACE = "raw"
-
 
 def _json_safe(value):
     """Normalizes PyArrow/Iceberg values to JSON-serializable types.
@@ -49,6 +49,7 @@ def _load_catalog(catalog_uri: str, warehouse: str, s3_endpoint: str, access_key
 def read_table(
     table_name: str,
     *,
+    tenant_id: str,
     catalog_uri: str,
     warehouse: str,
     s3_endpoint: str,
@@ -58,16 +59,24 @@ def read_table(
 ) -> list[dict]:
     """Read all rows from an Iceberg table in the raw namespace."""
     catalog = _load_catalog(catalog_uri, warehouse, s3_endpoint, access_key, secret_key, region)
-    for attempt in range(1, _LOAD_TABLE_RETRIES + 1):
-        try:
-            table = catalog.load_table((NAMESPACE, table_name))
+    last_missing: Optional[NoSuchTableError] = None
+    table = None
+    for identifier in iceberg_read_identifiers(tenant_id, table_name):
+        for attempt in range(1, _LOAD_TABLE_RETRIES + 1):
+            try:
+                table = catalog.load_table(identifier)
+                last_missing = None
+                break
+            except NoSuchTableError as exc:
+                last_missing = exc
+                break
+            except Exception:
+                if attempt == _LOAD_TABLE_RETRIES:
+                    raise
+                time.sleep(_LOAD_TABLE_RETRY_DELAY_SECONDS)
+        if table is not None:
             break
-        except NoSuchTableError:
-            # Fail fast if table does not exist
-            raise
-        except Exception:
-            if attempt == _LOAD_TABLE_RETRIES:
-                raise
-            time.sleep(_LOAD_TABLE_RETRY_DELAY_SECONDS)
+    if table is None:
+        raise last_missing if last_missing is not None else NoSuchTableError(table_name)
     rows = table.scan().to_arrow().to_pylist()
     return [{key: _json_safe(value) for key, value in row.items()} for row in rows]

@@ -1,17 +1,4 @@
-"""Kafka stream source registry — the streaming counterpart to
-`generic_source_registry.py` (REST) and `plugin_registry.py` (code
-connectors): register a Kafka topic as a data source declaratively —
-topic, which JSON field is the record's key, target dataset, micro-batch
-window — no code to write or deploy. Replaces the single hardcoded
-inventory stream this build used to ship with; `main.py` spawns one
-consumer task per active row here instead of one lifespan-gated task
-tied to an env var.
-
-Same "maintain full current state, not an event log" shape the
-hardcoded stream always had: `kafka_stream_state` holds the latest
-payload per (source, record key), replacing the old SKU-specific
-`stream_inventory_state` table.
-"""
+"""Kafka stream source registry for streaming data ingestion."""
 
 from __future__ import annotations
 
@@ -19,6 +6,8 @@ import json
 from typing import Optional
 
 import asyncpg
+
+from holon_common.connector_safety import ConnectorSafetyError, assert_kafka_topic
 
 DDL = """
 CREATE TABLE IF NOT EXISTS kafka_stream_source (
@@ -68,6 +57,10 @@ async def register_source(
     batch_interval_seconds: float,
     created_by_urn: str,
 ) -> dict:
+    try:
+        assert_kafka_topic(topic)
+    except ConnectorSafetyError as exc:
+        raise KafkaStreamConflictError(str(exc)) from exc
     conflicting = await pool.fetchrow(
         """
         SELECT name FROM kafka_stream_source

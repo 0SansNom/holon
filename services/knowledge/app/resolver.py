@@ -10,11 +10,14 @@ from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.expressions import EqualTo
 
+from holon_common.iceberg_ident import iceberg_read_identifiers
+from holon_common.sql_ident import quote_identifier
+
 _LOAD_TABLE_RETRIES = 4
 _LOAD_TABLE_RETRY_DELAY_SECONDS = 1.5
 
 
-def _load_table(table_name: str, *, catalog_uri: str, warehouse: str, s3_endpoint: str, access_key: str, secret_key: str, region: str):
+def _load_table(table_name: str, *, tenant_id: str, catalog_uri: str, warehouse: str, s3_endpoint: str, access_key: str, secret_key: str, region: str):
     catalog = load_catalog(
         "holon",
         **{
@@ -28,15 +31,21 @@ def _load_table(table_name: str, *, catalog_uri: str, warehouse: str, s3_endpoin
             "s3.path-style-access": "true",
         },
     )
-    for attempt in range(1, _LOAD_TABLE_RETRIES + 1):
-        try:
-            return catalog.load_table(("raw", table_name))
-        except NoSuchTableError:
-            raise
-        except Exception:
-            if attempt == _LOAD_TABLE_RETRIES:
-                raise
-            time.sleep(_LOAD_TABLE_RETRY_DELAY_SECONDS)
+    last_missing = None
+    for identifier in iceberg_read_identifiers(tenant_id, table_name):
+        for attempt in range(1, _LOAD_TABLE_RETRIES + 1):
+            try:
+                return catalog.load_table(identifier)
+            except NoSuchTableError as exc:
+                last_missing = exc
+                break
+            except Exception:
+                if attempt == _LOAD_TABLE_RETRIES:
+                    raise
+                time.sleep(_LOAD_TABLE_RETRY_DELAY_SECONDS)
+    if last_missing is not None:
+        raise last_missing
+    raise NoSuchTableError(table_name)
 
 
 def scan_at(table_name: str, *, snapshot_id: Optional[int] = None, **iceberg_config):
@@ -73,20 +82,18 @@ def fetch_generic(
         return _duck_select(arrow_table, "SELECT * FROM t WHERE id = ?", [typed_id])
     if filter_column is not None:
         arrow_table = _scan_arrow(table, equal_column=filter_column, equal_value=filter_value)
-        # Column may be absent on some bridge tables — empty result, not error.
         if filter_column not in arrow_table.column_names and len(arrow_table) == 0:
-            # Retry unfiltered only to discover schema; prefer empty.
             probe = _scan_arrow(table)
             if filter_column not in probe.column_names:
                 return []
             arrow_table = probe
-        return _duck_select(arrow_table, f'SELECT * FROM t WHERE "{filter_column}" = ?', [filter_value])
+        return _duck_select(arrow_table, f"SELECT * FROM t WHERE {quote_identifier(filter_column)} = ?", [filter_value])
     arrow_table = _scan_arrow(table)
     order_col = "id" if "id" in arrow_table.column_names else (
         arrow_table.column_names[0] if arrow_table.column_names else None
     )
     if order_col:
-        return _duck_select(arrow_table, f'SELECT * FROM t ORDER BY "{order_col}"')
+        return _duck_select(arrow_table, f"SELECT * FROM t ORDER BY {quote_identifier(order_col)}")
     return _duck_select(arrow_table, "SELECT * FROM t")
 
 
@@ -118,10 +125,11 @@ def dataset_schema_and_stats(dataset_name: str, **iceberg_config) -> dict:
         name = field["name"]
         non_null_count = distinct_count = min_value = max_value = None
         try:
+            ident = quote_identifier(name)
             non_null_count, distinct_count, min_value, max_value = con.execute(
-                f'SELECT COUNT("{name}"), COUNT(DISTINCT "{name}"), MIN("{name}")::VARCHAR, MAX("{name}")::VARCHAR FROM t'
+                f"SELECT COUNT({ident}), COUNT(DISTINCT {ident}), MIN({ident})::VARCHAR, MAX({ident})::VARCHAR FROM t"
             ).fetchone()
-        except duckdb.Error:
+        except (duckdb.Error, ValueError):
             pass
         columns.append({
             **field,

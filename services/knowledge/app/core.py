@@ -16,7 +16,7 @@ from typing import Any, Optional
 from fastapi import Header, Query
 
 from holon_common import HolonError, Principal, active_jwt, build_urn, make_principal_dependency, require_urn_tenant_match
-from holon_common.authz import spicedb_object_id
+from holon_common.spicedb_id import spicedb_object_id
 
 from . import function_registry, ontology, resolver, serving_store
 from .struct_values import assemble_struct_value, parse_struct_or_array
@@ -46,6 +46,10 @@ ICEBERG_CONFIG = dict(
     secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
     region=os.environ["AWS_REGION"],
 )
+
+
+def iceberg_kwargs(tenant_id: str) -> dict:
+    return {**ICEBERG_CONFIG, "tenant_id": tenant_id}
 
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
@@ -217,7 +221,7 @@ async def _resolve_join_dataset_neighbors(
     dataset_name = join_urn.rsplit(":", 1)[-1]
     join_rows: list[dict] = []
     try:
-        join_rows = await asyncio.to_thread(resolver.fetch_generic, dataset_name, **ICEBERG_CONFIG)
+        join_rows = await asyncio.to_thread(resolver.fetch_generic, dataset_name, **iceberg_kwargs(principal.tenant_id))
     except NoSuchTableError:
         join_rows = []
 
@@ -249,7 +253,6 @@ async def _resolve_join_dataset_neighbors(
         authorized_types.add(neighbor_type)
     neighbors: list[dict] = []
     for nid in neighbor_ids:
-        # Prefer native type when neighbor ids look numeric.
         try:
             coerced = int(nid) if isinstance(nid, str) and nid.isdigit() else nid
         except (TypeError, ValueError):
@@ -335,7 +338,6 @@ async def _resolve_object_backed_neighbors(
             neighbor_type, principal.tenant_id, coerced, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
         )
         if row is not None:
-            # Attach mid link object for Foundry-style object-backed metadata.
             matching_mids = [m for m in mid_rows if str(m.get(project_col)) == str(nid)]
             if matching_mids:
                 row = {**row, "_link_object": matching_mids[0], "_link_object_type": mid_name}
@@ -361,7 +363,6 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type: str, li
             return relation
         if target_name == object_type and reverse == link_name:
             return relation
-        # Legacy: still accept bare local name / target_property when API names diverge.
         if source_name == object_type and local_name == link_name:
             return relation
         if target_name == object_type and relation.get("target_property") == link_name:
@@ -581,7 +582,6 @@ async def _compute_link_aggregate(
     if not path or len(path) > _MAX_LINK_AGGREGATE_HOPS or "id" not in row:
         return None
 
-    # Frontier of (object_type_name, row) reached so far.
     frontier: list[tuple[str, dict]] = [(object_type_name, row)]
     for link_name in path:
         next_frontier: list[tuple[str, dict]] = []
@@ -633,7 +633,6 @@ async def _compute_link_aggregate(
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             limit = _DEFAULT_COLLECT_LIMIT
         if aggregate == "collect_set":
-            # Preserve encounter order while deduping.
             seen: set[str] = set()
             unique: list[Any] = []
             for v in values:
@@ -937,7 +936,7 @@ async def _resolve_one(
     if _REQUIRE_MATERIALIZED:
         return None
     try:
-        rows = await asyncio.to_thread(fetch_fn, **{id_kwarg: instance_id}, **ICEBERG_CONFIG)
+        rows = await asyncio.to_thread(fetch_fn, **{id_kwarg: instance_id}, **iceberg_kwargs(tenant_id))
     except NoSuchTableError:
         return None
     if not rows:
@@ -973,12 +972,10 @@ async def _resolve_many(
     """
     object_type_urn = await _object_type_urn_for(object_type, tenant_id)
 
-    # Probe whether serving store has anything for this type (unpaged).
     probe = await serving_store.list_instances(
         pool, object_type, tenant_id, filter_column=filter_column, filter_value=filter_value, limit=1
     )
     if probe or limit is None:
-        # Prefer serving-store path when any row exists OR caller wants full dump.
         if limit is None and after_id is None:
             rows = await serving_store.list_instances(
                 pool, object_type, tenant_id, filter_column=filter_column, filter_value=filter_value
@@ -989,7 +986,6 @@ async def _resolve_many(
         elif probe or limit is not None:
             collected: list[dict] = []
             cursor = after_id
-            # Cap over-fetch rounds so a pathological marking filter cannot spin forever.
             for _ in range(32):
                 need = (limit - len(collected)) if limit is not None else None
                 batch_limit = None if need is None else max(need * 3, need, 16)
@@ -1020,7 +1016,7 @@ async def _resolve_many(
 
     kwargs = {filter_kwarg: filter_value} if filter_kwarg else {}
     try:
-        live_rows = await asyncio.to_thread(fetch_fn, **kwargs, **ICEBERG_CONFIG)
+        live_rows = await asyncio.to_thread(fetch_fn, **kwargs, **iceberg_kwargs(tenant_id))
     except NoSuchTableError:
         live_rows = []
     tombstoned_ids = await serving_store.list_tombstoned_ids(pool, object_type, tenant_id)

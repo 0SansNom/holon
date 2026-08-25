@@ -43,15 +43,7 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
 
 
 def _validate_steps(steps: list[dict]) -> None:
-    """DAG-shape validation, not dataset existence — a step's input
-    might be a raw connector dataset (Connectivity has no fixed registry
-    of every one a plugin could ever produce) or another pipeline's own
-    output; either way, whether it's real is discovered at *run* time
-    (`iceberg_reader.read_table` raises `NoSuchTableError` there, not
-    here), the same "validate what's checkable now, let execution be the
-    source of truth for the rest" precedent `propose_object_type_version`
-    already sets for `implements`/`markings` in Knowledge.
-    """
+    """Validate pipeline step definitions and DAG dependencies."""
     if not steps:
         raise ValueError("a pipeline needs at least one step")
 
@@ -114,12 +106,7 @@ def _parse_pipeline_row(row: asyncpg.Record) -> dict:
 
 
 def _attach_health(result: dict) -> dict:
-    """Foundry-parity "health" surface: last run's status, the row count
-    it produced, and freshness — measured against the last *successful*
-    run specifically, not merely the last attempt (a failing pipeline
-    should show growing staleness, not a fresh "just now" from its own
-    failed run).
-    """
+    """Attach health status metrics based on last run and last successful run."""
     step_results = result.pop("last_run_step_results", None)
     if isinstance(step_results, str):
         step_results = json.loads(step_results)
