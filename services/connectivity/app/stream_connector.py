@@ -1,11 +1,4 @@
-"""Streaming connector engine — generic over any registered
-`kafka_stream_source` (see `kafka_stream_registry.py`). Consumes a
-source's topic, keyed by its own `key_field`, maintains full
-current-state in Postgres, and commits a periodic Iceberg snapshot of
-that state — the same "latest reading per key, not an append-only
-event log" shape the original single hardcoded inventory stream always
-had, just parameterized instead of compiled in.
-"""
+"""Streaming connector engine for consuming Kafka events to Iceberg snapshots."""
 
 from __future__ import annotations
 
@@ -51,11 +44,7 @@ async def consume_stream_forever(
     record_sync: Callable[..., Awaitable[Any]],
     pool: asyncpg.Pool,
 ) -> None:
-    """One consumer per registered stream source — `main.py` spawns and
-    cancels one of these per active `kafka_stream_source` row, the same
-    enable/disable-without-redeploy lifecycle a connector plugin
-    already has.
-    """
+    """Consume events from a Kafka stream topic and commit periodic Iceberg snapshots."""
     tenant_id = source["tenant_id"]
     source_name = source["name"]
     topic = source["topic"]
@@ -102,7 +91,7 @@ async def consume_stream_forever(
                     started_at = datetime.now(timezone.utc)
                     rows = list(latest_by_key.values())
                     result = await asyncio.to_thread(
-                        iceberg_writer.write_snapshot, rows, dataset_name, **iceberg_config
+                        iceberg_writer.write_snapshot, rows, dataset_name, tenant_id=tenant_id, **iceberg_config
                     )
                     finished_at = datetime.now(timezone.utc)
                     await record_sync(

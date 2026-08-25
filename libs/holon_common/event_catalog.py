@@ -104,6 +104,12 @@ class IdentityPermissionGrantedV1(_Payload):
     relation: str
 
 
+@register("identity.principal.status_changed", version=1)
+class IdentityPrincipalStatusChangedV1(_Payload):
+    principal_urn: str
+    status: str
+
+
 @register("automation.workflow.completed", version=1)
 class AutomationWorkflowCompletedV1(_Payload):
     workflow_name: str

@@ -13,6 +13,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 from typing import Any, Literal, Optional, Protocol
 
 import asyncpg
@@ -119,6 +120,29 @@ class PluginConflictError(ValueError):
     pass
 
 
+_DEFAULT_ENTRY_PREFIXES = ("app.plugins.", "app.tool_plugins.")
+
+
+def entry_prefixes() -> tuple[str, ...]:
+    raw = (
+        os.environ.get("HOLON_PLUGIN_ENTRY_PREFIXES")
+        or os.environ.get("HOLON_TOOL_PLUGIN_ENTRY_PREFIXES")
+        or ""
+    ).strip()
+    if not raw:
+        return _DEFAULT_ENTRY_PREFIXES
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+def assert_entry_point_allowed(entry_point: str) -> None:
+    prefixes = entry_prefixes()
+    if not any(entry_point.startswith(p) for p in prefixes):
+        raise PluginConflictError(
+            f"plugin entry_point {entry_point!r} not under allowed prefixes {prefixes} "
+            "(HOLON_PLUGIN_ENTRY_PREFIXES)"
+        )
+
+
 def load_entry_point(entry_point: str) -> Any:
     """`invalidate_caches()` matters here specifically because plugins are
     meant to be written to disk and registered in the same breath (that's
@@ -128,6 +152,7 @@ def load_entry_point(entry_point: str) -> Any:
     `ModuleNotFoundError`, a well-known stdlib gotcha for dynamically
     created modules (see `importlib.invalidate_caches`'s own docs).
     """
+    assert_entry_point_allowed(entry_point)
     importlib.invalidate_caches()
     module_path, class_name = entry_point.split(":")
     module = importlib.import_module(module_path)
@@ -135,6 +160,7 @@ def load_entry_point(entry_point: str) -> Any:
 
 
 def checksum_of(entry_point: str) -> str:
+    assert_entry_point_allowed(entry_point)
     importlib.invalidate_caches()
     module_path, _ = entry_point.split(":")
     module = importlib.import_module(module_path)
