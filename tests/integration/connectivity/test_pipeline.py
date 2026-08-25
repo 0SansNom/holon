@@ -254,10 +254,7 @@ def test_delete_pipeline_removes_definition_and_runs(jdoe_token: str) -> None:
 
 
 def test_pipeline_health_reflects_the_last_run(registered_function: dict, orders_synced: dict, jdoe_token: str) -> None:
-    """P1a: `GET /pipelines/{name}` surfaces the same "health" Foundry's
-    Data Health page shows — last status, the row count it produced,
-    and freshness — without a separate call per pipeline.
-    """
+    """`GET /pipelines/{name}` surfaces health status, last run status, row count, and freshness."""
     pipeline_name = _unique_name("health-pipeline")
     status, definition = _request(
         "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token,
