@@ -1,18 +1,19 @@
-import {
-  skipToken,
-  useSuspenseQuery,
-  type QueryKey,
-  type UseSuspenseQueryOptions,
-} from "@tanstack/react-query";
+import { useQuery, type QueryKey } from "@tanstack/react-query";
 
-/** Typed wrapper — `skipToken` + `useSuspenseQuery` needs a cast for inference. */
+/**
+ * Optional query that must not suspend. `useSuspenseQuery` forces
+ * `enabled: true` and rejects `skipToken` (TanStack Query 5.101), which
+ * threw `Missing queryFn` whenever a caller passed an empty name
+ * (`useObjects("")`, draft application dashboard, …).
+ */
 export function useOptionalSuspenseQuery<T>(
   enabled: boolean,
   queryKey: QueryKey,
   queryFn: () => Promise<T>,
 ) {
-  return useSuspenseQuery({
+  return useQuery({
     queryKey,
-    queryFn: enabled ? queryFn : skipToken,
-  } as UseSuspenseQueryOptions<T>);
+    queryFn,
+    enabled,
+  });
 }

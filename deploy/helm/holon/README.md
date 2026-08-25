@@ -73,8 +73,9 @@ you've wired the app side to fetch from Vault directly instead.
 - **Intelligence sandbox** — set `services.intelligence.runtimeClassName`
   (production overlay defaults to `gvisor`). The cluster must define that
   RuntimeClass; leave empty only for clusters without gVisor.
-- **No load / soak suite** in CI — e2e is compose HTTP pytest only. Treat
-  green CI as correctness, not capacity.
+- **No load / soak suite** in CI — e2e is compose HTTP pytest plus
+  Playwright (login, Object Explorer, Sources). Treat green CI as
+  correctness, not capacity.
 - **JWT** — ConfigMap sets `HOLON_JWT_ALG` from `jwt.algorithm` (default
   HS256 in `values.yaml`). The production overlay sets RS256 and
   `jwt.requireAsymmetric: true`; keys live in `existingSecret`.

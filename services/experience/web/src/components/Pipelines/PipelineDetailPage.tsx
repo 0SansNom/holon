@@ -102,7 +102,7 @@ function RunCard({ run }: { run: PipelineRun }) {
 export function PipelineDetailPage() {
   const { name } = useParams({ from: "/shell/pipelines/$name" });
   const navigate = useNavigate();
-  const { data: pipeline } = usePipeline(name);
+  const { data: pipeline, isPending } = usePipeline(name);
   const { data: runs, isLoading: runsLoading, refetch } = usePipelineRuns(name);
   const runMutation = useRunPipeline(name);
   const deletePipeline = useDeletePipeline();
@@ -115,6 +115,14 @@ export function PipelineDetailPage() {
     pipeline?.schedule_interval_minutes != null ? String(pipeline.schedule_interval_minutes) : "",
   );
 
+  if (isPending) {
+    return (
+      <DetailPage breadcrumbs={[{ label: "Pipelines", to: "/pipelines" }, { label: name }]} title={name}>
+        <Spinner />
+      </DetailPage>
+    );
+  }
+
   if (!pipeline) {
     return (
       <DetailPage breadcrumbs={[{ label: "Pipelines", to: "/pipelines" }, { label: name }]} title={name}>
@@ -123,9 +131,11 @@ export function PipelineDetailPage() {
     );
   }
 
+  const scheduleMinutes = pipeline.schedule_interval_minutes;
+
   async function commitSchedule() {
     const minutes = scheduleDraft.trim() === "" ? null : Number(scheduleDraft);
-    if (minutes === pipeline.schedule_interval_minutes) return;
+    if (minutes === scheduleMinutes) return;
     try {
       await setSchedule.mutateAsync({ name, scheduleIntervalMinutes: minutes });
     } catch (err) {
