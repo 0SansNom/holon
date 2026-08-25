@@ -151,12 +151,14 @@ class EventConsumer:
         group_id: str,
         *,
         dlq_producer: Optional["EventProducer"] = None,
+        auto_offset_reset: str = "earliest",
     ):
         self._bootstrap_servers = bootstrap_servers
         self._topics = topics
         self._group_id = group_id
         self._consumer: Optional[AIOKafkaConsumer] = None
         self._dlq_producer = dlq_producer
+        self._auto_offset_reset = auto_offset_reset
 
     async def start(self) -> None:
         self._consumer = AIOKafkaConsumer(
@@ -164,7 +166,7 @@ class EventConsumer:
             bootstrap_servers=self._bootstrap_servers,
             group_id=self._group_id,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-            auto_offset_reset="earliest",
+            auto_offset_reset=self._auto_offset_reset,
             enable_auto_commit=False,
         )
         await _start_with_retry(self._consumer, what="EventConsumer")
