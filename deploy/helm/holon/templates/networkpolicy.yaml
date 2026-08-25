@@ -46,9 +46,7 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: holon
-    # Data-plane CIDRs (Postgres, Kafka, S3, SpiceDB, …). Empty = open
-    # non-RFC1918 egress so a fresh overlay still boots; lock down in
-    # values-production with real CIDRs.
+    # Data-plane egress CIDRs
     {{- $cidrs := .Values.networkPolicy.dataPlaneCidrs | default list }}
     {{- if $cidrs }}
     {{- range $cidrs }}
