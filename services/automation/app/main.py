@@ -35,6 +35,8 @@ from holon_common.audit_store import (
     list_events_page,
 )
 
+from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
+
 from . import agent_chain_trigger, workflow
 
 SERVICE_NAME = "automation-platform"
@@ -92,11 +94,18 @@ async def lifespan(app: FastAPI):
         agent_chain_trigger.consume_events(agent_chain_consumer, intelligence_url=INTELLIGENCE_URL, jwt_secret=JWT_SECRET)
     )
 
+    status_consumer = make_principal_status_consumer(
+        KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
+    )
+    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer))
+
     yield
 
+    status_task.cancel()
     agent_chain_task.cancel()
     consume_task.cancel()
     relay_task.cancel()
+    await status_consumer.stop()
     await agent_chain_consumer.stop()
     await consumer.stop()
     await app.state.producer.stop()

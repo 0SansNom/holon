@@ -45,6 +45,7 @@ from holon_common.audit_store import (
     list_events_page,
 )
 from holon_common.authz import PermissionClient
+from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
 
 from .knowledge_urls import holon_url
 from . import agent_runtime, evaluation, model_registry, spend_limits, tool_plugin_registry, vector_store
@@ -82,14 +83,11 @@ logger = logging.getLogger("intelligence")
 
 
 def _intelligence_enabled() -> bool:
-    # Default on for local; production posture requires explicit false.
     return os.environ.get("HOLON_INTELLIGENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 
 def _allow_tool_plugin_register() -> bool:
-    """In-process entry_point load is not a sandbox. Off in production;
-    local DX defaults on unless HOLON_ALLOW_TOOL_PLUGIN_REGISTER=false.
-    """
+    """Return whether dynamic tool plugin registration is enabled."""
     raw = (os.environ.get("HOLON_ALLOW_TOOL_PLUGIN_REGISTER") or "").strip().lower()
     if is_production():
         return raw in {"1", "true", "yes"}
@@ -108,11 +106,7 @@ def _indexer_token() -> str:
 
 
 def _security_probe_tokens() -> tuple[str, str]:
-    """Mint security probe tokens for internal evaluation.
-
-    Production never mints user JWTs here (Identity-only). Skip the editor
-    user probe and reuse the agent token so callers stay signature-compatible.
-    """
+    """Mint security probe tokens for internal evaluation."""
     agent = Principal(
         urn=AGENT_URN, type="agent", tenant_id=TENANT_ID, display_name="Ingest Bot", on_behalf_of=JDOE_URN, country="FR"
     )
@@ -167,7 +161,6 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.embedder = build_embedding_client()
-    # When the product flag is off, force fake LLM so no accidental spend.
     if not app.state.intelligence_enabled:
         os.environ.setdefault("HOLON_LLM_PROVIDER", "fake")
     app.state.llm = build_llm_client()
@@ -191,10 +184,17 @@ async def lifespan(app: FastAPI):
 
     sweep_task = asyncio.create_task(agent_runtime.sweep_expired_sessions_forever(app.state.pool))
 
+    status_consumer = make_principal_status_consumer(
+        KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
+    )
+    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
+
     yield
 
+    status_task.cancel()
     sweep_task.cancel()
     relay_task.cancel()
+    await status_consumer.stop()
     await app.state.producer.stop()
     await app.state.authz.aclose()
     await app.state.qdrant.close()
@@ -290,9 +290,7 @@ class AskRequest(BaseModel):
 
 @app.post("/ask")
 async def ask(request: AskRequest, http_request: Request, principal: Principal = Depends(current_principal)) -> dict:
-    """RAG ask — workspace read + product flag. Knowledge PDP still applies
-    on forwarded structural/lexical channels.
-    """
+    """RAG ask endpoint using permission-filtered context."""
     _require_intelligence_enabled()
     await _authorize_workspace(principal, "read")
     await _enforce_spend(principal)
@@ -329,15 +327,7 @@ def _require_own_session(session: dict | None, principal: Principal) -> dict:
 
 
 class CreateSessionRequest(BaseModel):
-    """Loop-detection fields — normally absent (defaults make a
-    plain `POST /sessions` with no body behave exactly as before). Set by
-    `services/automation/app/agent_chain_trigger.py` when a session is
-    spawned in response to an event, threading the causal chain forward.
-
-    `allowed_tools`/`system_prompt`/`budget`: set by Experience
-    when compiling an `agentApp` surface into a session — absent (the
-    default) behaves exactly as before, same as the loop-detection fields.
-    """
+    """Agent session creation request payload."""
 
     causation_id: Optional[str] = None
     causation_depth: int = 0
@@ -352,13 +342,15 @@ class CreateSessionRequest(BaseModel):
 async def create_agent_session(
     request: CreateSessionRequest = CreateSessionRequest(), principal: Principal = Depends(current_principal)
 ) -> dict:
-    """The caller *is* the agent (its own JWT already carries
-    `on_behalf_of`, set when the agent principal was provisioned via
-    Identity's self-serve `insert_principal`); a session can't be opened
-    declaring an arbitrary mandant in the request body.
-    """
+    """Create an agent runtime session."""
     _require_intelligence_enabled()
     await _authorize_workspace(principal, "read")
+    if request.system_prompt and principal.type not in {"agent", "service_account"}:
+        raise HolonError.forbidden(
+            "PermissionDenied",
+            "system_prompt is restricted to agent/service_account principals",
+        )
+    request.max_chain_depth = min(max(1, request.max_chain_depth), 10)
     await _enforce_spend(principal)
     try:
         session = await agent_runtime.create_session(
@@ -396,12 +388,7 @@ async def create_agent_session(
 
 @app.get("/tools")
 async def list_available_tools(http_request: Request, principal: Principal = Depends(current_principal)) -> list[dict]:
-    """the live tool-name catalog `application_builder.py`
-    validates an `agentApp` surface's declared allowlist against —
-    exactly the same computation `_list_tools` does internally on every
-    turn, exposed read-only so a caller can see what's available before
-    (or without) opening a session.
-    """
+    """List available agent tools and plugins."""
     _require_intelligence_enabled()
     await _authorize_workspace(principal, "read")
     authorization = http_request.headers.get("authorization", "")
@@ -455,11 +442,7 @@ async def replay_agent_session(session_urn: str, principal: Principal = Depends(
 
 @app.post("/evaluate")
 async def evaluate(http_request: Request, principal: Principal = Depends(current_principal)) -> dict:
-    """Runs the gold set (whatever is currently in `gold_set_question` —
-    none seeded by default) plus the zero-tolerance security suite.
-    Auth-only: this triggers real, metered LLM/embedding calls, so a valid
-    token is required, same as every other endpoint here.
-    """
+    """Run evaluation suite against gold set questions and security suite."""
     _require_intelligence_enabled()
     await _authorize_workspace(principal, "write")
     await _enforce_spend(principal)
@@ -493,9 +476,7 @@ class RegisterToolPluginRequest(BaseModel):
 async def register_tool_plugin(
     body: RegisterToolPluginRequest, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
-    """Registers an agent tool plugin. See
-    `tool_plugin_registry.py`'s module docstring for details.
-    """
+    """Register an external agent tool plugin."""
     _require_intelligence_enabled()
     if not _allow_tool_plugin_register():
         raise HolonError.forbidden('PrincipalDisabled', "tool plugin registration disabled "
@@ -636,13 +617,7 @@ class PredictRequest(BaseModel):
 
 @app.post("/models/{name}/predict")
 async def predict(name: str, body: PredictRequest, principal: Principal = Depends(current_principal)) -> dict:
-    """Real, synchronous inference — not a stub. Authenticated only, no
-    workspace-tier gate: same trust boundary Knowledge's own
-    `POST /functions/{name}/invoke` already has — a model
-    artifact carries no ontology data of its own to protect, whatever
-    authorization applies to the *features* passed in is the caller's
-    concern, same reasoning stated there.
-    """
+    """Execute model prediction inference synchronously."""
     await _authorize_workspace(principal, "read")
     if await model_registry.get_model(app.state.pool, name) is None:
         raise _model_not_found(name)

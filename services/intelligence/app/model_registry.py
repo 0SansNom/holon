@@ -31,9 +31,7 @@ _VALID_FRAMEWORKS = {"sklearn"}
 
 
 def joblib_models_allowed() -> bool:
-    """joblib/pickle deserialize is an RCE surface — off in production unless
-    explicitly forced (posture refuses that force). Local DX defaults on.
-    """
+    """Return whether joblib model deserialization is allowed."""
     from holon_common.security_posture import is_production
 
     raw = (os.environ.get("HOLON_ALLOW_JOBLIB_MODELS") or "").strip().lower()
@@ -68,12 +66,7 @@ def _parse_row(row: asyncpg.Record) -> dict:
 
 
 def _validate_artifact_sync(artifact_bytes: bytes, framework: str) -> None:
-    """Real, synchronous validation, not just trusting the caller's
-    bytes: a corrupt or incompatible artifact is rejected at
-    registration time, not discovered on the first prediction request.
-    Run through `asyncio.to_thread` by `register_model` — deserializing
-    is CPU-bound, not I/O, so it still shouldn't block the event loop.
-    """
+    """Validate model artifact deserialization synchronously."""
     model = joblib.load(io.BytesIO(artifact_bytes))
     if not hasattr(model, "predict"):
         raise ValueError(f"deserialized {framework} artifact has no predict() method")
@@ -140,8 +133,6 @@ def _predict_sync(s3_client, bucket: str, artifact_key: str, properties: list[st
     model = joblib.load(io.BytesIO(artifact_bytes))
     feature_vector = [[features[p] for p in properties]]
     prediction = model.predict(feature_vector)[0]
-    # numpy scalar types (e.g. numpy.int64) aren't JSON-serializable —
-    # `.item()` converts to the equivalent plain Python type.
     return prediction.item() if hasattr(prediction, "item") else prediction
 
 
