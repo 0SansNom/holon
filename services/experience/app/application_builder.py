@@ -29,36 +29,6 @@ def _holon_url(knowledge_url: str, path: str) -> str:
     suffix = path if path.startswith("/") else f"/{path}"
     return f"{knowledge_url.rstrip('/')}/api/holon{suffix}"
 
-DDL = """
-CREATE TABLE IF NOT EXISTS application (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    version INT NOT NULL,
-    definition JSONB NOT NULL,
-    dependencies JSONB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    promoted_at TIMESTAMPTZ,
-    UNIQUE (tenant_id, name, version)
-);
--- ReBAC, project scoping, and session tracking fields for application definitions.
-ALTER TABLE application ADD COLUMN IF NOT EXISTS urn TEXT;
-ALTER TABLE application ADD COLUMN IF NOT EXISTS project_urn TEXT;
-
-CREATE TABLE IF NOT EXISTS agent_app_session (
-    session_urn TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    application_name TEXT NOT NULL,
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
 
 def application_urn(tenant_id: str, workspace_id: str, name: str) -> str:
     return build_urn(tenant_id, workspace_id, "application", name)

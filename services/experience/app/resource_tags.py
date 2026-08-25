@@ -7,22 +7,6 @@ from typing import Optional
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS resource_tag (
-    resource_urn TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    tags JSONB NOT NULL DEFAULT '[]',
-    featured BOOLEAN NOT NULL DEFAULT false,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_by_urn TEXT NOT NULL,
-    PRIMARY KEY (resource_urn, tenant_id)
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
 
 def _deserialize(row: asyncpg.Record) -> dict:
     result = dict(row)
