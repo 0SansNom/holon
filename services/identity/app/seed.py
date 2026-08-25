@@ -82,10 +82,7 @@ _PBKDF2_ITERATIONS = 600_000
 
 
 def hash_client_secret(secret: str) -> str:
-    """Self-describing PBKDF2-HMAC-SHA256 hash:
-    `pbkdf2$<iterations>$<salt_b64>$<hash_b64>` — stdlib-only (no
-    pgcrypto / extra dependency), iteration count travels with the hash
-    so it can be raised later without breaking hashes already stored."""
+    """Compute PBKDF2-HMAC-SHA256 hash string."""
     salt = secrets.token_bytes(16)
     derived = hashlib.pbkdf2_hmac("sha256", secret.encode(), salt, _PBKDF2_ITERATIONS, dklen=32)
     salt_b64 = base64.urlsafe_b64encode(salt).decode()
@@ -107,10 +104,7 @@ def _verify_client_secret_hash(candidate: str, stored: str) -> bool:
 
 
 async def verify_and_migrate_secret(pool: asyncpg.Pool, row: asyncpg.Record, candidate: str) -> bool:
-    """Verify `candidate` against a principal row, lazily migrating a
-    legacy plaintext `client_secret` to `client_secret_hash` on the
-    first successful auth after upgrade — no bulk rewrite at deploy
-    time, no forced rotation for dormant principals."""
+    """Verify secret against stored hash, migrating legacy plaintext if needed."""
     stored_hash = row["client_secret_hash"]
     if stored_hash:
         return _verify_client_secret_hash(candidate, stored_hash)
@@ -152,18 +146,7 @@ async def ensure_instance_bootstrap(
     tenant_id: str,
     workspace_id: str,
 ) -> None:
-    """Idempotent empty-instance install + orphan recovery — not demo data.
-
-    Always ensures the env bootstrap tenant/workspace rows and the SpiceDB
-    `parent_tenant` edge. If the bootstrap workspace has no *usable*
-    `workspace.admin` (active principal row matching a SpiceDB admin
-    grant), creates/repairs the bootstrap admin principal and grants so
-    `/token` and `POST /tenants` are reachable.
-
-    Optional break-glass: `HOLON_BOOTSTRAP_ADMIN_RESET_SECRET=true` plus
-    `HOLON_BOOTSTRAP_ADMIN_SECRET` rewrites the bootstrap admin's
-    `client_secret` (then unset the reset flag).
-    """
+    """Ensure bootstrap tenant, workspace, and admin principal exist."""
     admin_local = (os.environ.get("HOLON_BOOTSTRAP_ADMIN_LOCAL_NAME") or "admin").strip() or "admin"
     admin_urn = build_urn(tenant_id, "global", "user", admin_local)
     t_urn = tenant_urn(tenant_id)
@@ -199,7 +182,6 @@ async def ensure_instance_bootstrap(
             admin_urn,
         )
         if updated == "UPDATE 0":
-            # Principal missing — fall through to full repair.
             await _ensure_bootstrap_admin_principal(pool, tenant_id=tenant_id, admin_urn=admin_urn, secret=secret)
             await authz.write_relationship(
                 resource_type="tenant", resource_urn=t_urn, relation="member", subject_urn=admin_urn,
@@ -214,9 +196,7 @@ def _truthy(name: str) -> bool:
 
 
 def _require_bootstrap_admin_secret() -> str:
-    """Unconditional in every environment — no dev-login fallback. A local
-    stack bootstraps exactly the same way a production one does: set
-    HOLON_BOOTSTRAP_ADMIN_SECRET in .env before first boot."""
+    """Retrieve HOLON_BOOTSTRAP_ADMIN_SECRET from environment."""
     secret = (os.environ.get("HOLON_BOOTSTRAP_ADMIN_SECRET") or "").strip()
     if secret:
         return secret
@@ -298,7 +278,6 @@ async def _ensure_bootstrap_admin_principal(
             hash_client_secret(secret),
         )
         return
-    # Re-activate + refresh secret when repairing an orphaned/disabled bootstrap admin.
     await pool.execute(
         "UPDATE principal SET client_secret = NULL, client_secret_hash = $1, status = 'active' WHERE urn = $2",
         hash_client_secret(secret),

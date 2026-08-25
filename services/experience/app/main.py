@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ from holon_common import (
     retry_with_backoff,
     run_migrations,
 )
+from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
 from holon_common.audit_store import (
     ensure_schema as ensure_audit_schema,
@@ -56,6 +58,7 @@ TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 DB_URL = os.environ["HOLON_DB_URL"]
+KAFKA_BOOTSTRAP = os.environ["HOLON_KAFKA_BOOTSTRAP"]
 OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 
 SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
@@ -124,7 +127,12 @@ async def lifespan(app: FastAPI):
 
     await retry_with_backoff(_seed_application_authz, what="experience authz seed")
 
+    status_consumer = make_principal_status_consumer(KAFKA_BOOTSTRAP, service_name=SERVICE_NAME)
+    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
+
     yield
+    status_task.cancel()
+    await status_consumer.stop()
     await app.state.pool.close()
     await app.state.client.aclose()
 
@@ -415,7 +423,6 @@ async def create_or_update_application(
     if existing is not None:
         await _authorize_application(principal, urn, "write")
     else:
-        # Check container workspace permission before creating application
         decision = await app.state.authz.authorize(
             principal, resource_type="workspace", resource_urn=WORKSPACE_URN, permission="write",
         )
@@ -762,10 +769,7 @@ def _upstream_detail(body: Any) -> str:
 async def application_list_data(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> Any:
-    """The 'object app' surface's list view: reads through Knowledge's
-    permission-gated `/objects/{type}` (or `/object-sets/{name}/objects`
-    when the surface declares an Object Set filter) using the caller's token.
-    """
+    """Read list data for application objectApp surface."""
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
@@ -814,12 +818,7 @@ async def application_invoke_action(
     http_request: Request,
     principal: Principal = Depends(current_principal),
 ) -> Response:
-    """An application can only invoke an Action it explicitly declared in `actionRefs`.
-
-    Every Action Type is declarative, so the generic
-    `/objects/{object_type}/{id}/actions/{full_name}` route (keyed by the
-    full dotted name) is the only shape to proxy to.
-    """
+    """Invoke action declared in application actionRefs."""
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
@@ -848,9 +847,7 @@ async def application_invoke_action(
 async def application_dashboard(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
-    """The **dashboard** surface — a page of read-only widgets,
-    each bound to an ObjectType and optionally narrowed by an Object Set.
-    """
+    """Fetch read-only widget data for application dashboard surface."""
     application = await _get_application_or_404(name, principal)
     authorization = http_request.headers.get("authorization")
     widgets_out = []
@@ -927,17 +924,7 @@ async def application_dashboard(
 async def application_analytics_execute(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> Response:
-    """The **analytics** surface: a lightweight Contour/Code
-    Workbook equivalent — ad-hoc pivot/aggregate/join exploration, unlike
-    every other surface's fixed read path. Bounded to the one ObjectType
-    the surface declared: the request body's `object_type` must match it
-    exactly, the same enforcement style `is_action_declared` already uses
-    for forms/objectApp actions. Everything else (which operation, which
-    property to group by, which RelationType to join) is genuinely ad-hoc,
-    proxied straight through to Knowledge's real `/execute` — this
-    endpoint's only job is scoping, not reimplementing Knowledge's own
-    validation.
-    """
+    """Execute ad-hoc analytics query for application analytics surface."""
     application = await _get_application_or_404(name, principal)
     object_type = application_builder.resolve_analytics_object_type(application)
     if object_type is None:
@@ -961,12 +948,7 @@ async def application_analytics_execute(
 async def application_analytics_replay(
     name: str, plan_hash: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> Response:
-    """Replay is a pure pass-through — Knowledge's own `/execute/{plan_hash}/replay`
-    already re-authorizes against whatever ObjectType(s) the frozen plan
-    actually touches (including a `join` plan's target), so there's
-    nothing left for this scoping check to add beyond confirming the
-    application really does have an analytics surface at all.
-    """
+    """Replay execution plan for application analytics surface."""
     application = await _get_application_or_404(name, principal)
     if application_builder.resolve_analytics_object_type(application) is None:
         raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no analytics surface")
@@ -1014,16 +996,7 @@ async def submit_application_form(
 
 @app.post("/api/applications/{name}/agent-sessions")
 async def create_application_agent_session(name: str, principal: Principal = Depends(current_principal)) -> Response:
-    """The **agent app** surface: compiles the surface's
-    declared `tools`/`systemPrompt`/`budget` into a real Intelligence
-    session, opened under the shared `ingest-bot` agent identity
-    `on_behalf_of` the calling principal — the same delegation model
-    `agent_runtime`'s own module docstring already establishes (effective
-    rights are the *intersection* of the agent's and the mandant's, never
-    an escalation). `record_agent_app_session` is what lets the turn
-    endpoint below tell this caller's session apart from anyone else's,
-    since every agentApp session shares one underlying agent identity.
-    """
+    """Create agent session for application agentApp surface."""
     application = await _get_application_or_404(name, principal)
     agent_app = application_builder.resolve_agent_app_config(application)
     if agent_app is None:
@@ -1054,13 +1027,7 @@ async def create_application_agent_session(name: str, principal: Principal = Dep
 async def run_application_agent_session_turn(
     name: str, session_urn: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> Response:
-    """Every turn is proxied, never handed off — the calling principal
-    can't call Intelligence directly (it doesn't hold the shared agent
-    identity's credentials), and this is also the choke point that
-    enforces only the principal who *launched* this specific session may
-    drive it, checked against `agent_app_session` rather than trusting
-    the shared agent identity alone to tell callers apart.
-    """
+    """Execute turn for application agentApp session."""
     await _get_application_or_404(name, principal)
     owner_urn = await application_builder.get_agent_app_session_owner(app.state.pool, session_urn)
     if owner_urn is None or owner_urn != principal.urn:

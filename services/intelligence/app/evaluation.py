@@ -123,10 +123,7 @@ async def run_gold_set(
 
 
 async def run_security_suite(*, knowledge_url: str, agent_token: str, editor_token: str) -> dict:
-    """Zero tolerance security suite: an agent must never exceed its own or its
-    mandant's rights. Extends the same scenario tested at the PDP layer —
-    run here as a callable, repeatable API check.
-    """
+    """Run security suite verifying agent permission boundaries and grant limits."""
     checks = []
     async with httpx.AsyncClient(timeout=15.0) as http:
         response = await http.get(ontology_url(knowledge_url, "/objects/Customer"), headers={"Authorization": f"Bearer {agent_token}"})
