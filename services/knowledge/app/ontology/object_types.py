@@ -656,33 +656,7 @@ async def create_object_type(
     deprecation_deadline=None,
     replacement_urn: Optional[str] = None,
 ) -> dict:
-    """The self-serve path: turn an already-synced Dataset into a
-    browsable ObjectType by name and column mapping alone — no code,
-    same as the no-code connector that got the data in in the first
-    place. Reuses `_upsert_object_type` (same insert path as API-created
-    demo types) rather than a parallel code path, so a self-serve
-    type is a real `object_type` row indistinguishable from any other
-    at read time. Creation itself is existence + mapping; branching,
-    interfaces, markings, and the rest attach afterward via the normal
-    versioning endpoints.
-
-    `column_classification` (source column -> "public"/"internal"/
-    "confidential"/"restricted") is the admin's one chance to say which
-    columns are sensitive — example connector plugins may ship a
-    hand-reviewed Python constant instead; a self-serve type has none,
-    so skipping this arg means every column defaults to internal
-    (`catalog.py`'s dynamic-dispatch branch), not automatically
-    downgraded to public. Persisted directly on `object_type` (not
-    versioned) so `catalog.py`'s sync consumer can re-read the same
-    declared values on every subsequent sync, not just this first write.
-
-    Caller-responsible: writing the SpiceDB `parent_workspace`
-    relationship this type needs to ever be readable at all — this
-    function only owns the Postgres row, the same split every other
-    ontology-governance write in this build already keeps (`main.py`/
-    the relevant router owns authz-relationship writes, this package
-    owns state).
-    """
+    """Register a self-serve ObjectType mapped to a source dataset."""
     dep = validate_ot_metadata(
         property_mapping=property_mapping,
         primary_key=primary_key,
@@ -797,20 +771,7 @@ async def get_property_classifications(pool: asyncpg.Pool, object_type_urn: str)
 
 
 async def list_object_types(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
-    """A real, previously-missing gap: `RelationType` always had
-    `list_relation_types`/`GET /relation-types`, but `ObjectType` never
-    got the equivalent — every existing caller already knew the six
-    hardcoded type names. A genuine Object Explorer UI needs to discover
-    them, not hardcode the same list a second time client-side.
-
-    Parses every JSONB column, not just `property_mapping` — leaving
-    `implements`/`derived_properties`/`markings`/`property_formats`/
-    `property_types`/`column_classification` as raw JSON *strings* would
-    make this endpoint diverge from `get_object_type` (`GET
-    /ontology/{name}`, detail), which already parses all of them. An
-    OSDK generator walking the list endpoint needs to trust it the same
-    way any other caller trusts the detail endpoint.
-    """
+    """List all ObjectTypes for a tenant."""
     cache_key = definition_cache.object_type_list_key(tenant_id)
     if definition_cache.has(cache_key):
         return definition_cache.get(cache_key) or []
@@ -821,17 +782,7 @@ async def list_object_types(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
 
 
 async def delete_object_type(pool: asyncpg.Pool, urn: str) -> None:
-    """Compensating delete after a failed SpiceDB `parent_workspace`
-    write on create — rolls back the Postgres row so we never leave an
-    ObjectType that exists in PG but is unreadable via ReBAC.
-
-    Refuses if lifecycle_status is `active` (Foundry: active resources
-    cannot be deleted until experimental/deprecated). Also refuses if any
-    `object_type_version` (or property/marking/branch) rows already
-    reference the type: those mean lifecycle has started and a blind
-    delete would orphan history. Brand-new self-serve creates have none
-    of those yet.
-    """
+    """Delete an ObjectType, verifying lifecycle state and dependencies."""
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             "SELECT lifecycle_status FROM object_type WHERE urn = $1 FOR UPDATE", urn

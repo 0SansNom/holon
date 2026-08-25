@@ -14,6 +14,7 @@ import asyncpg
 import duckdb
 
 from holon_common import build_urn
+from holon_common.sql_ident import quote_identifier
 
 from . import catalog, execution_adapter_registry, ontology, resolver
 
@@ -69,15 +70,16 @@ def _execute_duckdb_operation(
     arrow_table = resolver.scan_at(dataset_name, snapshot_id=snapshot_id, **iceberg_config).to_arrow()
     con = duckdb.connect()
     con.register("t", arrow_table)
+    src = quote_identifier(source_column)
     if operation == "count":
-        (count,) = con.execute(f'SELECT COUNT(*) FROM t WHERE "{source_column}" = ?', [filter_value]).fetchone()
+        (count,) = con.execute(f"SELECT COUNT(*) FROM t WHERE {src} = ?", [filter_value]).fetchone()
         return {"count": count}
     if operation == "group_by":
-        agg_expr = "COUNT(*)" if aggregate_function == "count" else f'{aggregate_function.upper()}("{aggregate_source_column}")'
-        query = f'SELECT "{source_column}" AS group_value, {agg_expr} AS aggregate_value FROM t GROUP BY "{source_column}" ORDER BY "{source_column}"'
+        agg_expr = "COUNT(*)" if aggregate_function == "count" else f"{aggregate_function.upper()}({quote_identifier(aggregate_source_column)})"
+        query = f"SELECT {src} AS group_value, {agg_expr} AS aggregate_value FROM t GROUP BY {src} ORDER BY {src}"
         rows = con.execute(query).fetch_arrow_table().to_pylist()
         return [{"group": row["group_value"], "aggregate": row["aggregate_value"]} for row in rows]
-    return con.execute(f'SELECT * FROM t WHERE "{source_column}" = ?', [filter_value]).fetch_arrow_table().to_pylist()
+    return con.execute(f"SELECT * FROM t WHERE {src} = ?", [filter_value]).fetch_arrow_table().to_pylist()
 
 
 def _execute_duckdb_join(
@@ -104,11 +106,11 @@ def _execute_duckdb_join(
     con = duckdb.connect()
     con.register("s", source_arrow)
     con.register("t", target_arrow)
-    source_select = ", ".join(f's."{col}" AS "s_{col}"' for col in source_columns)
-    target_select = ", ".join(f't."{col}" AS "t_{col}"' for col in target_columns)
+    source_select = ", ".join(f's.{quote_identifier(col)} AS "s_{col}"' for col in source_columns)
+    target_select = ", ".join(f't.{quote_identifier(col)} AS "t_{col}"' for col in target_columns)
     query = (
-        f'SELECT {source_select}, {target_select} FROM s '
-        f'JOIN t ON s."{source_join_column}" = t."{target_id_column}"'
+        f"SELECT {source_select}, {target_select} FROM s "
+        f"JOIN t ON s.{quote_identifier(source_join_column)} = t.{quote_identifier(target_id_column)}"
     )
     return con.execute(query).fetch_arrow_table().to_pylist()
 
@@ -141,12 +143,12 @@ def _execute_duckdb_bridged_join(
     con.register("s", source_arrow)
     con.register("j", bridge_arrow)
     con.register("t", target_arrow)
-    source_select = ", ".join(f's."{col}" AS "s_{col}"' for col in source_columns)
-    target_select = ", ".join(f't."{col}" AS "t_{col}"' for col in target_columns)
+    source_select = ", ".join(f's.{quote_identifier(col)} AS "s_{col}"' for col in source_columns)
+    target_select = ", ".join(f't.{quote_identifier(col)} AS "t_{col}"' for col in target_columns)
     query = (
-        f'SELECT {source_select}, {target_select} FROM s '
-        f'JOIN j ON s."{source_id_column}" = j."{bridge_source_column}" '
-        f'JOIN t ON j."{bridge_target_column}" = t."{target_id_column}"'
+        f"SELECT {source_select}, {target_select} FROM s "
+        f"JOIN j ON s.{quote_identifier(source_id_column)} = j.{quote_identifier(bridge_source_column)} "
+        f"JOIN t ON j.{quote_identifier(bridge_target_column)} = t.{quote_identifier(target_id_column)}"
     )
     return con.execute(query).fetch_arrow_table().to_pylist()
 
@@ -185,6 +187,7 @@ async def get_or_execute(
 ) -> dict:
     if operation not in _VALID_OPERATIONS:
         raise ValueError(f"unknown operation {operation!r} (must be one of {_VALID_OPERATIONS})")
+    iceberg_config = {**iceberg_config, "tenant_id": tenant_id}
 
     object_type_row = await ontology.get_object_type(pool, object_type_urn)
     if object_type_row is None:
@@ -412,7 +415,7 @@ async def get_or_execute(
     return {"planId": plan_id, "planHash": plan_hash, "cached": False, "rowCount": len(normalized), "results": normalized}
 
 
-async def replay(pool: asyncpg.Pool, iceberg_config: dict, *, plan_hash: str) -> dict:
+async def replay(pool: asyncpg.Pool, iceberg_config: dict, *, plan_hash: str, tenant_id: str) -> dict:
     """Re-executes a
     previously-run, frozen plan against the *exact historical Iceberg
     snapshot(s)* it originally pinned (via the stored `dataset_version_urn`
@@ -420,9 +423,12 @@ async def replay(pool: asyncpg.Pool, iceberg_config: dict, *, plan_hash: str) ->
     now — genuinely proving reproducibility rather than trivially
     matching because nothing changed since.
     """
-    row = await pool.fetchrow("SELECT plan, result FROM execution_run WHERE plan_hash = $1", plan_hash)
+    row = await pool.fetchrow("SELECT plan, result, tenant_id FROM execution_run WHERE plan_hash = $1", plan_hash)
     if row is None:
         raise ValueError(f"no execution_run found for plan_hash {plan_hash!r}")
+    if row["tenant_id"] != tenant_id:
+        raise ValueError(f"no execution_run found for plan_hash {plan_hash!r}")
+    iceberg_config = {**iceberg_config, "tenant_id": tenant_id}
 
     plan = json.loads(row["plan"])
     original_result = json.loads(row["result"])

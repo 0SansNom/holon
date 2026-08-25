@@ -1,15 +1,4 @@
-"""SAML 2.0 Service Provider authentication (ADR 028 — supersedes the
-"SSO V1 = OIDC only" line in ADR 026's SSO section).
-
-Uses `python3-saml` (OneLogin) for AuthnRequest building and response/
-signature validation — hand-rolled XML-dsig verification is a known
-vulnerability class (XML Signature Wrapping) and is deliberately not an
-option here.
-
-Produces the same claims-shaped `dict[str, Any]` OIDC produces (`sub` =
-NameID, attributes flattened), so `federation.py`'s claims mapping is
-shared between both protocols.
-"""
+"""SAML 2.0 Service Provider authentication."""
 
 from __future__ import annotations
 
@@ -37,8 +26,7 @@ def saml_enabled() -> bool:
 
 
 def _sp_private_key() -> str:
-    """Resolve the SP signing/decryption key via secret provider when
-    configured as a ref (same convention as oidc.py::_client_secret)."""
+    """Resolve SP private key from secret provider or environment."""
     raw = os.environ.get("HOLON_SAML_SP_PRIVATE_KEY", "")
     if raw.startswith(("env:", "vault:", "k8s:", "aws:")):
         from holon_common.secrets import get_secret
@@ -76,9 +64,7 @@ def _sp_settings() -> dict[str, Any]:
 
 
 def _settings_dict() -> dict[str, Any]:
-    """Full settings (sp + idp) for login/acs — requires the IdP side to
-    be configured. Metadata generation uses `_sp_settings()` alone; see
-    `build_sp_metadata_xml`."""
+    """Build complete SAML settings dictionary for IdP interaction."""
     return {
         "strict": True,
         "debug": False,
@@ -113,10 +99,7 @@ def build_login_redirect(*, https: bool, http_host: str, script_name: str) -> st
 
 
 def _normalize_claims(name_id: str, attributes: dict[str, list]) -> dict[str, Any]:
-    """Flatten SAML attribute statements into the same claims-dict shape
-    `federation.py` already expects from OIDC userinfo. Pulled out of
-    `process_acs_response` so the mapping logic is unit-testable without
-    a real signed assertion / the onelogin library."""
+    """Normalize SAML attribute statements into standard user claims."""
     if not name_id:
         raise ValueError("SAML assertion missing NameID")
     claims: dict[str, Any] = {"sub": name_id}
@@ -129,9 +112,7 @@ def _normalize_claims(name_id: str, attributes: dict[str, list]) -> dict[str, An
 
 
 def process_acs_response(*, https: bool, http_host: str, script_name: str, post_params: dict) -> dict[str, Any]:
-    """Validate the IdP's POSTed SAMLResponse and return a claims-shaped
-    dict. Raises `ValueError` on any validation failure — expired,
-    unsigned, wrong audience, replayed, etc."""
+    """Validate SAMLResponse payload and return user claims dictionary."""
     from onelogin.saml2.auth import OneLogin_Saml2_Auth
 
     req = _prepare_request(https=https, http_host=http_host, script_name=script_name, post_params=post_params)
@@ -142,14 +123,15 @@ def process_acs_response(*, https: bool, http_host: str, script_name: str, post_
         raise ValueError(f"SAML response invalid: {', '.join(errors)} ({auth.get_last_error_reason()})")
     if not auth.is_authenticated():
         raise ValueError("SAML response not authenticated")
-    return _normalize_claims(auth.get_nameid(), auth.get_attributes())
+    claims = _normalize_claims(auth.get_nameid(), auth.get_attributes())
+    assertion_id = auth.get_last_assertion_id()
+    if assertion_id:
+        claims["_assertion_id"] = assertion_id
+    return claims
 
 
 def build_sp_metadata_xml() -> str:
-    """SP-only metadata — deliberately doesn't require
-    `HOLON_SAML_IDP_METADATA_*` to be set: an operator needs this to
-    register Holon as a Service Provider *before* their IdP hands back
-    metadata to configure the other direction."""
+    """Generate Service Provider metadata XML string."""
     from onelogin.saml2.settings import OneLogin_Saml2_Settings
 
     settings = OneLogin_Saml2_Settings({"strict": True, "sp": _sp_settings()}, sp_validation_only=True)

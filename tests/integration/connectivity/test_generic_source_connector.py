@@ -95,7 +95,10 @@ def test_unreachable_url_surfaces_a_clear_400_not_a_500(jdoe_token: str) -> None
 
     status, result = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
     assert status == 400, result
-    assert "could not reach the source" in result["detail"], result
+    # Caught by assert_connector_host's own DNS resolution (SSRF guard),
+    # before httpx ever attempts the request — not the generic
+    # httpx.RequestError path, but still a clear 400, never a 500.
+    assert "could not be resolved" in result["detail"], result
 
 
 def test_re_registering_the_same_name_updates_it_in_place(jdoe_token: str) -> None:

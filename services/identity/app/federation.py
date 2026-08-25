@@ -1,7 +1,4 @@
-"""Protocol-agnostic claims mapping shared by OIDC and SAML federated
-login. Both produce a `dict[str, Any]` claims/attribute bag before
-handing off here — OIDC from userinfo, SAML from the assertion's NameID
-+ AttributeStatement (see `saml.py::process_acs_response`)."""
+"""Claims mapping shared by OIDC and SAML federated login."""
 
 from __future__ import annotations
 
@@ -24,9 +21,7 @@ def tenant_from_claims(claims: dict[str, Any], *, default_tenant: str) -> str:
 
 
 def urn_safe_local_name(raw: str, *, fallback: str = "sso-user") -> str:
-    """Sanitize an arbitrary IdP-supplied identifier (OIDC `sub`, SAML
-    NameID, SCIM `userName` — often an email) into Holon's URN-safe
-    local-name alphabet (`^[A-Za-z0-9][A-Za-z0-9._-]*$`)."""
+    """Sanitize IdP-supplied identifier into URN-safe local-name format."""
     safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in raw)[:64]
     safe = safe.lstrip("-.")
     return safe or fallback

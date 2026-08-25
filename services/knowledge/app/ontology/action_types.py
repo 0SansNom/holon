@@ -277,7 +277,6 @@ async def create_action_type(
     for criterion in submission_criteria or []:
         validate_submission_criterion(criterion)
 
-    # Configure/Sections: purely a display grouping for the invocation
     # form (Foundry's "Sections") — structurally checked against the same
     # `parameter_names` set built above, never against live state, since
     # it never affects what gets submitted/applied.

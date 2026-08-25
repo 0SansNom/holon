@@ -221,8 +221,10 @@ async def replay_plan(plan_hash: str, principal: Principal = Depends(core.curren
     same reasoning `/execute` itself already applies when a join plan is
     first created, not relaxed just because this is a replay.
     """
-    row = await core.pool.fetchrow("SELECT plan FROM execution_run WHERE plan_hash = $1", plan_hash)
-    if row is None:
+    row = await core.pool.fetchrow(
+        "SELECT plan, tenant_id FROM execution_run WHERE plan_hash = $1", plan_hash
+    )
+    if row is None or row["tenant_id"] != principal.tenant_id:
         raise HolonError.not_found('ExecutionRunNotFound', f"no execution_run found for plan_hash {plan_hash!r}")
     plan = json.loads(row["plan"])
     operation = plan.get("operation", "filter")
@@ -244,7 +246,9 @@ async def replay_plan(plan_hash: str, principal: Principal = Depends(core.curren
             await core._authorize_object_type(principal, target_object_type_urn, "read")
 
     try:
-        result = await execution.replay(core.pool, core.ICEBERG_CONFIG, plan_hash=plan_hash)
+        result = await execution.replay(
+            core.pool, core.ICEBERG_CONFIG, plan_hash=plan_hash, tenant_id=principal.tenant_id
+        )
     except ValueError as exc:
         raise HolonError.invalid_argument('ExecutionPlanInvalid', str(exc)) from exc
 

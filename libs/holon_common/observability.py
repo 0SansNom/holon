@@ -23,7 +23,6 @@ from starlette.responses import Response
 logger = logging.getLogger("holon_common.observability")
 
 
-# ---- Structured JSON logs -------------------------------------------
 
 
 class _JSONFormatter(logging.Formatter):
@@ -52,7 +51,6 @@ def configure_json_logging(service_name: str, *, level: int = logging.INFO) -> N
     root.setLevel(level)
 
 
-# ---- Prometheus metrics ---------------------------------------------
 
 _REQUEST_COUNT = Counter(
     "http_requests_total", "Total HTTP requests", ["service", "method", "path", "status"]
@@ -129,7 +127,6 @@ def instrument_metrics(app: FastAPI, *, service_name: str) -> None:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-# ---- Retry with exponential backoff + jitter ------------------------
 
 
 async def retry_with_backoff(
@@ -159,7 +156,6 @@ async def retry_with_backoff(
             await asyncio.sleep(delay)
 
 
-# ---- Circuit breaker -------------------------------------------------
 
 
 class CircuitBreakerOpenError(Exception):
@@ -205,7 +201,6 @@ class CircuitBreaker:
             return result
 
 
-# ---- OpenTelemetry traces --------------------------------------------
 
 
 def instrument_tracing(app: FastAPI, *, service_name: str, otlp_endpoint: str) -> None:

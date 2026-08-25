@@ -176,7 +176,7 @@ async def _materialize_sync(
     property_mapping = dynamic_type["property_mapping"]
     fetch_all = functools.partial(resolver.fetch_generic, dataset_name)
 
-    rows = await asyncio.to_thread(fetch_all, **iceberg_config)
+    rows = await asyncio.to_thread(fetch_all, **{**iceberg_config, "tenant_id": tenant_id})
     async with pool.acquire() as conn, conn.transaction():
         await serving_store.materialize(
             conn,
@@ -188,9 +188,6 @@ async def _materialize_sync(
 
     object_type = await ontology.get_object_type(pool, object_type_urn)
     property_types = (object_type or {}).get("property_types") or {}
-        # Values that fail Value Type validation fail to index.
-    # Holon still materializes them (Object Explorer can show bad data for
-    # repair) but OpenSearch only receives the valid partition.
     index_rows = rows
     if property_types:
         index_rows, _invalid = await ontology.partition_rows_by_property_types(

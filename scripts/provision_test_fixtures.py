@@ -191,6 +191,7 @@ PERSONAS = [
     ("automation-workflow-engine", "service_account", "Automation Workflow Engine", None, None, "editor"),
     ("automation-agent-chain-trigger", "service_account", "Automation Agent Chain Trigger", None, None, "viewer"),
     ("knowledge-model-caller", "service_account", "Knowledge Model Caller", None, None, "viewer"),
+    ("knowledge-project-validator", "service_account", "Knowledge Project Validator", None, None, "viewer"),
 ]
 
 

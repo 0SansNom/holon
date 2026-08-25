@@ -169,7 +169,6 @@ def _keyword_prop_values(row: dict, property_mapping: dict, property_types: dict
     return out
 
 
-# Back-compat alias used by unit tests.
 _sortable_prop_values = _keyword_prop_values
 
 
@@ -319,7 +318,6 @@ async def ensure_index(base_url: str, password: str) -> None:
         response = await client.put(f"{base_url}/{INDEX_NAME}", json=_INDEX_MAPPING)
         if response.status_code not in (200, 400):  # 400 covers "already exists"
             response.raise_for_status()
-        # Existing indexes ignore PUT body; add new R8.6 fields in place.
         mapping_response = await client.put(f"{base_url}/{INDEX_NAME}/_mapping", json=_MAPPING_ADDITIONS)
         if mapping_response.status_code not in (200, 400):
             mapping_response.raise_for_status()
@@ -399,11 +397,12 @@ async def search(
 ) -> dict[str, Any]:
     """Unified search with stable facet aggregations via ``post_filter``.
 
-    Security filters live in the query ``filter`` (R8.6): ReBAC
-    (`allowed_object_types`), ABAC entitlement tokens, and instance
-    markings. ``object_type`` / ``object_types`` and ``property_filters``
-    are UX narrowing only — facet bucket counts stay scoped to the text
-    query + those security filters.
+    Security filters live in the query ``filter`` (R8.6): tenant_id
+    (multi-org isolation), ReBAC (`allowed_object_types`), ABAC
+    entitlement tokens, and instance markings. ``object_type`` /
+    ``object_types`` and ``property_filters`` are UX narrowing only —
+    facet bucket counts stay scoped to the text query + those security
+    filters.
     """
     # `props.*` is mapped directly to `keyword` (dynamic template above) —
     # no `.keyword` sub-field exists to aggregate on top of it, unlike a
@@ -418,6 +417,7 @@ async def search(
         allow_regex=allow_regex,
     )
     security_filters: list[dict[str, Any]] = [
+        {"term": {"tenant_id": principal.tenant_id}},
         {"terms": {"entitlement_tokens": _principal_tokens(principal)}},
         _marking_filter(_principal_marking_tokens(held_markings)),
     ]

@@ -11,6 +11,7 @@ from typing import Optional
 import asyncpg
 
 from holon_common import build_urn
+from holon_common.spicedb_id import index_by_spicedb_object_id
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS tenant (
@@ -64,6 +65,11 @@ CREATE TABLE IF NOT EXISTS oidc_pending_state (
     verifier TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS saml_seen_assertion (
+    assertion_id TEXT PRIMARY KEY,
+    seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -250,10 +256,6 @@ async def _ensure_bootstrap_workspace_row(
     )
 
 
-def _spicedb_object_id(urn: str) -> str:
-    return urn.replace(":", "_").replace(".", "_")
-
-
 async def _has_usable_workspace_admin(pool: asyncpg.Pool, authz, workspace_urn_value: str) -> bool:
     """True when at least one SpiceDB workspace.admin maps to an active principal."""
     relationships = await authz.read_relationships(
@@ -264,7 +266,7 @@ async def _has_usable_workspace_admin(pool: asyncpg.Pool, authz, workspace_urn_v
     if not relationships:
         return False
     rows = await pool.fetch("SELECT urn, status FROM principal")
-    by_object_id = {_spicedb_object_id(r["urn"]): r for r in rows}
+    by_object_id = index_by_spicedb_object_id(rows)
     for rel in relationships:
         subject = rel.get("subject", {}).get("object", {})
         if subject.get("objectType") != "principal":

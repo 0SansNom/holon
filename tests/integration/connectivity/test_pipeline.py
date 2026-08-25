@@ -6,10 +6,9 @@ import json
 import time
 import urllib.error
 import urllib.request
-import uuid
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
 
 
 def _token_for(principal_urn: str) -> str:
@@ -45,10 +44,6 @@ def orders_synced(jdoe_token: str) -> dict:
     status, result = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "orders"})
     assert status == 200, result
     return result
-
-
-def _unique_name(prefix: str) -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
 def test_forward_reference_is_rejected_at_definition_time(jdoe_token: str) -> None:
@@ -259,10 +254,7 @@ def test_delete_pipeline_removes_definition_and_runs(jdoe_token: str) -> None:
 
 
 def test_pipeline_health_reflects_the_last_run(registered_function: dict, orders_synced: dict, jdoe_token: str) -> None:
-    """P1a: `GET /pipelines/{name}` surfaces the same "health" Foundry's
-    Data Health page shows — last status, the row count it produced,
-    and freshness — without a separate call per pipeline.
-    """
+    """`GET /pipelines/{name}` surfaces health status, last run status, row count, and freshness."""
     pipeline_name = _unique_name("health-pipeline")
     status, definition = _request(
         "POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token,

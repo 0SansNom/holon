@@ -1,11 +1,4 @@
-"""Declarative Action Types (`ontology/action_types.py`'s registry) —
-the no-code Action path. A leaf module: imports `_event` from
-`.hardcoded` (one-way — this file depends on that one, never the reverse)
-plus package-external modules (`ontology`, `core`, `resolver`,
-`serving_store`), never from `__init__.py`. `__init__.py`'s shared
-orchestration (`_apply_now`/`approve_action`) imports
-`_apply_declarative_edits`/`_compensate_declarative_action` from here.
-"""
+"""Declarative Action Types execution engine for no-code actions."""
 
 from __future__ import annotations
 
@@ -170,7 +163,6 @@ async def _write_instance_edits(
     result: dict[str, Any] = {}
     prior: dict[str, Any] = {}
 
-    # Collapse dotted paths into top-level property writes.
     top_level: dict[str, Any] = {}
     for key, value in resolved.items():
         if "." not in key:
@@ -179,7 +171,6 @@ async def _write_instance_edits(
         top, *rest = key.split(".")
         existing_val = top_level.get(top)
         if existing_val is None:
-            # Seed from prior overlay / base instance when available.
             existing_row = await conn.fetchrow(
                 "SELECT property_value FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 "
                 "AND instance_id = $3 AND property_name = $4",
@@ -462,21 +453,7 @@ async def revert_declarative_action(
 async def _get_unmasked_instance(
     pool: asyncpg.Pool, object_type: str, tenant_id: str, workspace_id: str, instance_id: str
 ) -> Optional[dict]:
-    """The real, unmasked truth for submission-criteria evaluation — a
-    business rule about the data, deliberately evaluated without
-    `core._resolve_one`'s masking (that's a *read-response* concern; the
-    requester's *permission* to invoke the action at all is still gated
-    separately, by `_authorize_object_type` in the router, before this
-    is ever called).
-
-    Same materialized-then-live-fallback shape `core._resolve_one`
-    already uses (a serving-store miss means "not materialized yet", not
-    "doesn't exist") — reimplemented narrowly here rather than importing
-    `core` at module level, to avoid a module-load-order coupling this
-    package doesn't otherwise have (same defensive local-import
-    reasoning `request_generic_action` below already uses for
-    `ontology`).
-    """
+    """Fetch raw unmasked object instance for submission criteria evaluation."""
     import functools
 
     from .. import core, ontology, resolver, serving_store
@@ -495,7 +472,9 @@ async def _get_unmasked_instance(
     dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
     try:
         rows = await asyncio.to_thread(
-            functools.partial(resolver.fetch_generic, dataset_name), id_value=instance_id, **core.ICEBERG_CONFIG
+            functools.partial(resolver.fetch_generic, dataset_name),
+            id_value=instance_id,
+            **core.iceberg_kwargs(tenant_id),
         )
     except NoSuchTableError:
         return None

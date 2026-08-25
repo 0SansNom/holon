@@ -47,9 +47,11 @@ x-app-env: &app-env
   HOLON_SAML_POST_LOGIN_REDIRECT: ${HOLON_SAML_POST_LOGIN_REDIRECT:-http://localhost:5173/objects}
   # SCIM (identity reads this; empty token keeps the SCIM router disabled).
   HOLON_SCIM_BEARER_TOKEN: ${HOLON_SCIM_BEARER_TOKEN:-}
+  HOLON_PLUGIN_ENTRY_PREFIXES: ${HOLON_PLUGIN_ENTRY_PREFIXES:-app.plugins.,app.tool_plugins.,holon_test_plugins.}
+  # Local compose Postgres/source-s3/reviews-api/oauth2-idp are RFC1918; production leaves this unset (fail closed).
+  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,source-s3,reviews-api,oauth2-idp}
 
 services:
-  # ---- Infrastructure ----------------------------------------------------
 
   postgres:
     image: postgres:16-alpine
@@ -77,15 +79,7 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      # Hardcoded, not templated from .env — this is an identifier, not a
-      # secret (the actual credential is MINIO_ROOT_PASSWORD). Every
-      # service below authenticates to MinIO's S3 API with
-      # `AWS_ACCESS_KEY_ID: holon`, hardcoded to match — templating this
-      # one from .env while MINIO_ROOT_USER stays fixed is exactly what
-      # broke CI: .env.example's placeholder (`change-me`) never equals
-      # this literal, so every S3 call failed with "Access Key Id...
-      # does not exist" the moment CI generated .env from the example
-      # instead of a real, manually-filled-in one.
+      # Default root user for local S3 storage
       MINIO_ROOT_USER: holon
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
@@ -116,6 +110,30 @@ services:
     entrypoint: >
       /bin/sh -c " mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD} && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo csv seeded "
 
+  # External S3 store fixture for testing object storage connector
+  source-s3:
+    profiles: [ "test-fixtures" ]
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: source
+      MINIO_ROOT_PASSWORD: source12345
+    ports:
+      - "9500:9000"
+    volumes:
+      - source-s3-data:/data
+
+  # Seed utility for object storage connector
+  source-s3-seed:
+    profiles: [ "test-fixtures" ]
+    image: minio/mc:latest
+    depends_on:
+      - source-s3
+    volumes:
+      - ./tests/fixtures/csv-seed:/seed:ro
+    entrypoint: >
+      /bin/sh -c " until mc alias set src http://source-s3:9000 source source12345; do echo waiting for source-s3; sleep 2; done && mc mb -p src/tenant-landing || true && mc cp /seed/suppliers.csv src/tenant-landing/landing/suppliers.csv && echo source-s3 seeded "
+
   iceberg-rest:
     image: tabulario/iceberg-rest:1.6.0
     depends_on:
@@ -131,10 +149,6 @@ services:
       AWS_ACCESS_KEY_ID: holon
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
-      # JdbcCatalog on Postgres instead of the image's default embedded
-      # SQLite — SQLite is single-writer and locks up under concurrent
-      # /sync calls ([SQLITE_BUSY] The database file is locked, a real
-      # incident hit and only worked around, not fixed, before this).
       CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
       CATALOG_URI: jdbc:postgresql://postgres:5432/holon_iceberg_catalog
       CATALOG_JDBC_USER: holon
@@ -142,11 +156,7 @@ services:
     ports:
       - "8181:8181"
 
-  # One-shot: the postgres datastore engine below refuses every request
-  # ("datastore is not migrated") until this has run once against a fresh
-  # `holon_spicedb` database — same service_completed_successfully gate
-  # `minio-init` already uses for `iceberg-rest`. Re-running against an
-  # already-migrated database is a safe no-op.
+  # One-shot migration initializer for SpiceDB
   spicedb-migrate:
     image: authzed/spicedb:latest
     command:
@@ -188,17 +198,12 @@ services:
 
   mongodb:
     image: mongo:7
-    # No init-script mount: boots with an empty support_desk DB. Test-only
-    # fixture rows (tests/fixtures/mongo-init/init.js) are loaded on demand by
-    # `make seed`, never automatically — see docs/ops/seed-data.md.
     volumes:
       - mongo-data:/data/db
     ports:
       - "27017:27017"
 
-  # Fake external REST API (reviews/exchange-rate/weather feeds) — test-only,
-  # not started by default. `make seed` (or `docker compose --profile
-  # test-fixtures up -d reviews-api`) brings it up when actually needed.
+  # Test-only REST API fixture
   reviews-api:
     profiles: [ "test-fixtures" ]
     image: python:3.12-slim
@@ -208,6 +213,18 @@ services:
     command: [ "python", "-m", "http.server", "8000" ]
     ports:
       - "8091:8000"
+
+  # Fake external OAuth2 client_credentials IdP, for the REST connector's
+  # OAuth2 auth type — deliberately not Holon's own Identity service (see
+  # tests/fixtures/oauth2-idp/server.py's docstring: connector_safety
+  # blocks every platform-internal hostname by design).
+  oauth2-idp:
+    profiles: [ "test-fixtures" ]
+    image: python:3.12-slim
+    working_dir: /data
+    volumes:
+      - ./tests/fixtures/oauth2-idp:/data:ro
+    command: [ "python", "server.py" ]
 
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
@@ -221,15 +238,7 @@ services:
       - --overprovisioned
       - --node-id=0
       - --check=false
-      # Two listeners: INTERNAL for other containers (advertised as
-      # `redpanda:9092`, resolvable only inside the Docker network) and
-      # OUTSIDE for host-side tooling (advertised as `localhost:19092`) —
-      # a raw Kafka client on the host bootstraps fine via the port-forward
-      # on 9092, but the broker's own metadata response then tells it to
-      # reconnect to whatever address is *advertised*; without a second
-      # listener that address is the Docker-internal hostname, which the
-      # host can't resolve (`nodename nor servname provided`). Needed for
-      # tests/test_projection_rebuild.py, the first host-side Kafka client.
+      # Redpanda listeners (internal compose network and host access)
       - --kafka-addr=INTERNAL://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
       - --advertise-kafka-addr=INTERNAL://redpanda:9092,OUTSIDE://localhost:19092
     ports:
@@ -289,7 +298,6 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
-  # ---- Holon platforms -----------------
 
   identity:
     build:
@@ -467,40 +475,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Sandboxing container where the Agent
-    # Runtime's tool calls actually execute. gVisor is genuine kernel-level
-    # sandboxing — installed and tested for real on this host (Colima/
-    # Ubuntu 24.04 aarch64 VM): syscalls the sandboxed process makes are
-    # intercepted by gVisor's userspace kernel (Sentry) rather than
-    # reaching the host kernel directly, so a container-escape
-    # vulnerability in the host kernel itself is no longer sufficient on
-    # its own. `runsc-hostnet` (not plain `runsc`) specifically: gVisor's
-    # own network stack (netstack) reproducibly failed to resolve Docker's
-    # embedded DNS (127.0.0.11) for this container's compose service names
-    # (`postgres`, `knowledge`, ...) — confirmed via direct in-container
-    # socket tests, not assumed. `runsc-hostnet` is a second registered
-    # runtime (same `runsc` binary, `--network=host` gVisor flag — *not*
-    # Docker's own `--network=host`, this container still gets its own
-    # namespace/IP on the compose network) that routes network syscalls
-    # through the real host kernel instead of gVisor's netstack
-    # reimplementation, which fixed it. Real, honestly-stated trade-off:
-    # this narrows kernel-level interception specifically for network
-    # syscalls; every other syscall class (filesystem, process, memory —
-    # the larger kernel attack surface) is still fully intercepted. The
-    # application-level guarantee that actually enforces "no arbitrary
-    # network access" (Tool Registry only requirement)
-    # is unaffected either way — it's enforced in `agent_runtime.py`'s own
-    # code path, not by gVisor's network mode. Verified against real
-    # workload, not just a smoke test: the full LLM-marked suite (real
-    # Postgres/Kafka/Qdrant/Anthropic/Voyage I/O, a real multi-turn agent
-    # tool-calling loop) passes identically under `runsc-hostnet` as it
-    # did under plain `runc`, at no measurably different wall-clock time
-    # for this I/O-bound workload — stable across multiple consecutive
-    # runs. Layered with the container hardening below (no-new-privileges,
-    # dropped capabilities, read-only rootfs) rather than replacing it.
-    # Configurable because CI's GitHub-hosted runner doesn't have gVisor
-    # installed at all — CI overrides this to plain `runc` via its own
-    # .env generation, same pattern as HOLON_EMBEDDING_PROVIDER below.
+    # Sandboxed container runtime for agent tool execution
     runtime: ${HOLON_INTELLIGENCE_RUNTIME:-runc}
     security_opt:
       - no-new-privileges:true
@@ -566,6 +541,7 @@ services:
 volumes:
   pg-data:
   minio-data:
+  source-s3-data:
   mongo-data:
   opensearch-data:
   qdrant-data:

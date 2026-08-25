@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 import asyncpg
 
+from holon_common.sql_ident import quote_identifier, require_identifier
+
 DDL = """
 CREATE TABLE IF NOT EXISTS write_target (
     tenant_id TEXT NOT NULL,
@@ -52,6 +54,13 @@ async def register_write_target(
 ) -> dict:
     if not allowed_properties:
         raise WriteTargetConfigError("allowed_properties must name at least one property")
+    try:
+        require_identifier(table_name, what="table_name")
+        require_identifier(id_column, what="id_column")
+        for column in allowed_properties.values():
+            require_identifier(str(column), what="column")
+    except ValueError as exc:
+        raise WriteTargetConfigError(str(exc)) from exc
     await pool.execute(
         """
         INSERT INTO write_target (tenant_id, dataset_name, table_name, id_column, allowed_properties, created_by_urn)
@@ -111,7 +120,7 @@ async def apply_write(
 
     columns = [target["allowed_properties"][name] for name in edits]
     values = list(edits.values())
-    set_clause = ", ".join(f"{col} = ${i + 1}" for i, col in enumerate(columns))
+    set_clause = ", ".join(f"{quote_identifier(col)} = ${i + 1}" for i, col in enumerate(columns))
     id_placeholder = len(values) + 1
 
     try:
@@ -122,7 +131,7 @@ async def apply_write(
     conn = await asyncpg.connect(source_db_url)
     try:
         row = await conn.fetchrow(
-            f"UPDATE {target['table_name']} SET {set_clause} WHERE {target['id_column']} = ${id_placeholder} RETURNING *",
+            f"UPDATE {quote_identifier(target['table_name'])} SET {set_clause} WHERE {quote_identifier(target['id_column'])} = ${id_placeholder} RETURNING *",
             *values, typed_instance_id,
         )
     finally:

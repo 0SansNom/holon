@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import datetime
 from typing import Any, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import asyncpg
 import httpx
 
+from holon_common.connector_safety import ConnectorSafetyError, assert_http_url, same_origin
 from holon_common.secrets import resolve_optional
 
 DDL = """
@@ -33,12 +34,7 @@ CREATE TABLE IF NOT EXISTS generic_rest_source (
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS next_page_path TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS secret_ref TEXT;
 
--- Reusable auth, separate from any one source (the n8n/Activepieces
--- idea): connect three endpoints on the same API and configure the
--- credential once, not three times. A source either references a
--- connection by name *or* declares its own inline auth_header_name/
--- auth_header_value — never both (enforced in `register_source`), so
--- there's exactly one place a given source's credential actually lives.
+-- Reusable REST connection credentials table.
 CREATE TABLE IF NOT EXISTS generic_rest_connection (
     tenant_id TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -52,60 +48,29 @@ CREATE TABLE IF NOT EXISTS generic_rest_connection (
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS secret_ref TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS connection_name TEXT;
 
--- OAuth2 client_credentials as a second connection auth type, alongside
--- the static header. Centralized here (not on generic_rest_source)
--- because token refresh needs to be shared across every source that
--- points at the same connection, and across Connectivity replicas —
--- the same reason the header secret is already centralized here.
--- oauth2_client_secret is the raw-value counterpart to the existing
--- `secret_ref` column (secret_ref wins when set), same relationship
--- auth_header_value already has to it — one connection, one secret,
--- regardless of which auth_type it's storing.
+-- OAuth2 client credentials support.
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS auth_type TEXT NOT NULL DEFAULT 'header';
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_token_url TEXT;
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_client_id TEXT;
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_client_secret TEXT;
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_scope TEXT;
--- Persisted cache, not per-process memory: shared across replicas so
--- only one of them actually calls the token endpoint per refresh.
+-- Persisted cache for OAuth2 tokens.
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_cached_token TEXT;
 ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_token_expires_at TIMESTAMPTZ;
 
--- Scheduling (the Kestra idea: decouple "when" from "how") — an
--- optional interval, not a cron expression. A non-technical admin
--- configures "every N minutes" without learning cron syntax, and it's
--- one less dependency (no croniter) for a background loop to need.
--- `main.py`'s scheduler task compares this against `sync_run.finished_at`
--- (already recorded by every sync regardless of trigger) rather than a
--- second last-run column here — one source of truth for "when did this
--- last actually sync", not two that could drift apart.
+-- Scheduling interval in minutes (compared against sync_run.finished_at).
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS schedule_interval_minutes INTEGER;
 
--- Incremental sync (the Meltano/Singer idea: a minimal resume state) —
--- `cursor_property` names the field to watch in each record (e.g.
--- "updated_at"); `incremental_param` names the query parameter this
--- connector adds to ask the API for only what changed since
--- `last_cursor_value`. The admin sets the first two; `last_cursor_value`
--- is system-managed (computed after every fetch), never admin-entered —
--- there being nothing meaningful for a human to type into "the last
--- value we happened to see" ahead of the first sync. Whether this
--- actually reduces load on the *source* depends on that API respecting
--- an added query parameter it may never have heard of; if it doesn't,
--- the connector still asks for (and safely re-processes) everything —
--- graceful degradation, never silent data loss.
+-- Incremental sync configuration and system-managed cursor tracking.
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS cursor_property TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS incremental_param TEXT;
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS last_cursor_value TEXT;
 
--- Workspace the source lands datasets into (ADR 026 multi-tenant). NULL
--- means "use caller/env default at sync time" for rows created before this
--- column existed; new registrations always store an explicit workspace_id.
+-- Target workspace for multi-tenant isolation.
 ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS workspace_id TEXT;
 """
 
-# Columns safe to hand back to a caller — never auth_header_value itself,
-# only whether one is set, so an edit form can say "leave blank to keep
-# the existing value" instead of implying there's nothing there yet.
+# Columns safe to return to caller (excludes raw credential values).
 _PUBLIC_COLUMNS = (
     "tenant_id, name, workspace_id, base_url, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
     "record_path, next_page_path, connection_name, schedule_interval_minutes, "
@@ -118,11 +83,7 @@ _CONNECTION_PUBLIC_COLUMNS = (
     "created_by_urn, created_at"
 )
 
-# A page pointing back to an already-visited URL (misconfiguration, or an
-# API that never actually terminates its `next` chain) would otherwise
-# hang a sync forever — this is what actually bounds that, not merely a
-# generous-sounding limit. Any real paginated source in this build's
-# demo scale finishes in 1-2 pages; 100 is headroom, not a target.
+# Maximum page count safety limit to prevent pagination infinite loops.
 _MAX_PAGES = 100
 
 
@@ -167,18 +128,7 @@ async def register_connection(
     oauth2_client_secret: Optional[str] = None,
     oauth2_scope: Optional[str] = None,
 ) -> dict:
-    """A real upsert (same `name` again updates it) — same intent
-    `register_source` already covers for its own secret, but resolved
-    in Python here rather than SQL `COALESCE`: historically
-    `auth_header_value` was `NOT NULL` (a connection *is* a stored
-    secret), and Postgres validates `NOT NULL` against the raw proposed
-    row *before* conflict resolution ever runs, so passing a literal
-    `NULL` for it failed outright even when `ON CONFLICT DO UPDATE`
-    would otherwise have coalesced it away — confirmed directly against
-    Postgres, not assumed. Resolving "omitted means keep the existing
-    secret" here, before the value ever reaches SQL, sidesteps that
-    entirely; the same treatment now applies to `oauth2_client_secret`.
-    """
+    """Register or update a REST connection credential."""
     if auth_type not in _VALID_CONNECTION_AUTH_TYPES:
         raise SourceConfigError(f"invalid auth_type: {auth_type!r} (must be one of {sorted(_VALID_CONNECTION_AUTH_TYPES)})")
     if auth_type == "header" and not auth_header_name:
@@ -271,17 +221,7 @@ async def register_source(
     incremental_param: Optional[str] = None,
     reserved_dataset_names: frozenset[str] = frozenset(),
 ) -> dict:
-    """Same dataset-ownership guard `plugin_registry.register_plugin`
-    already enforces (a name can't shadow a reserved stream dataset or an
-    active plugin visible to this tenant), checked here too since this
-    registry is an equally real claimant on the same `dataset` namespace
-    `run_sync` dispatches over.
-
-    `connection_name` and inline `auth_header_name`/`auth_header_value`
-    are mutually exclusive — a source's credential lives in exactly one
-    place, never both at once (which one would `fetch_for_dataset` even
-    trust if they disagreed?).
-    """
+    """Verify dataset name availability and validate REST source parameters."""
     if connection_name and (auth_header_name or auth_header_value):
         raise SourceConfigError(
             "a source can use a named connection or its own inline auth header, not both — "
@@ -315,6 +255,13 @@ async def register_source(
     if conflicting_sql_source is not None:
         raise SourceConflictError(f"dataset {name!r} is already claimed by active SQL source {conflicting_sql_source!r}")
 
+    conflicting_object_source = await pool.fetchval(
+        "SELECT name FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+        tenant_id, name,
+    )
+    if conflicting_object_source is not None:
+        raise SourceConflictError(f"dataset {name!r} is already claimed by active object source {conflicting_object_source!r}")
+
     await pool.execute(
         """
         INSERT INTO generic_rest_source
@@ -325,9 +272,7 @@ async def register_source(
             workspace_id = EXCLUDED.workspace_id,
             base_url = EXCLUDED.base_url,
             auth_header_name = EXCLUDED.auth_header_name,
-            -- Never echoed back to a client (see `_PUBLIC_COLUMNS`), so an
-            -- edit that doesn't resend it must not blank out the existing
-            -- secret — only overwrite when a new value is actually given.
+            -- Retain existing secret if omitted on edit.
             auth_header_value = COALESCE(EXCLUDED.auth_header_value, generic_rest_source.auth_header_value),
             record_path = EXCLUDED.record_path,
             next_page_path = EXCLUDED.next_page_path,
@@ -335,9 +280,7 @@ async def register_source(
             schedule_interval_minutes = EXCLUDED.schedule_interval_minutes,
             cursor_property = EXCLUDED.cursor_property,
             incremental_param = EXCLUDED.incremental_param,
-            -- last_cursor_value deliberately absent here: it's resume
-            -- state computed by `fetch_for_dataset`, not a form field, so
-            -- re-submitting the edit form must never reset it to NULL.
+            -- Preserve system-managed last_cursor_value during edit.
             status = 'active'
         """,
         tenant_id, name, workspace_id, base_url, auth_header_name, auth_header_value, record_path, next_page_path,
@@ -368,13 +311,7 @@ async def list_all_scheduled_sources(pool: asyncpg.Pool) -> list[dict]:
 
 
 async def set_source_status(pool: asyncpg.Pool, tenant_id: str, name: str, status: str) -> Optional[dict]:
-    """Disable/enable without deleting: `is_registered`/`fetch_for_dataset`
-    both already gate on `status = 'active'`, the same status-column
-    contract `plugin_registry.set_plugin_status` uses — a disabled source
-    takes effect on the very next sync attempt, no restart needed, and
-    its configuration (URL, auth, record_path) is preserved for
-    re-enabling later rather than lost.
-    """
+    """Set active/disabled status for a REST source."""
     await pool.execute(
         "UPDATE generic_rest_source SET status = $1 WHERE tenant_id = $2 AND name = $3", status, tenant_id, name
     )
@@ -422,14 +359,8 @@ def _extract_records(body: Any, record_path: Optional[str]) -> list[dict]:
     return data
 
 
-def _extract_next_url(body: Any, next_page_path: str) -> Optional[str]:
-    """`null`/missing at the path means "no more pages" — the DRF
-    convention (`"next": null` on the last page) this feature targets —
-    so that's a normal stop, not an error. Anything present but not a
-    string (e.g. the admin pointed `next_page_path` at the wrong field)
-    is a real misconfiguration worth failing loudly on, the same
-    treatment `_extract_records` already gives a bad `record_path`.
-    """
+def _extract_next_url(body: Any, next_page_path: str, *, origin_url: str) -> Optional[str]:
+    """Extract next page URL from paginated response, enforcing same-origin safety."""
     data: Any = body
     for key in next_page_path.split("."):
         if not isinstance(data, dict) or key not in data:
@@ -441,7 +372,20 @@ def _extract_next_url(body: Any, next_page_path: str) -> Optional[str]:
         raise SourceFetchError(
             f"next_page_path {next_page_path!r}: expected a URL string or null, got {data!r}"
         )
-    return data
+    next_url = urlunsplit(urlsplit(urljoin(origin_url, data)))
+    if not same_origin(origin_url, next_url):
+        next_origin = urlsplit(next_url)
+        origin = urlsplit(origin_url)
+        raise SourceFetchError(
+            f"next_page_path {next_page_path!r} resolved to a different origin "
+            f"({next_origin.scheme}://{next_origin.hostname}) than the configured source "
+            f"({origin.scheme}://{origin.hostname}) — refusing to forward credentials off-host"
+        )
+    try:
+        assert_http_url(next_url)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
+    return next_url
 
 
 def _coerce_cursor(value: Any) -> Any:
@@ -484,12 +428,10 @@ def _add_query_param(url: str, key: str, value: str) -> str:
     return urlunsplit(parsed._replace(query=urlencode(query)))
 
 
-# Cached token must still have this many seconds left before use — never
-# start a page-fetch loop (which can take a while over _MAX_PAGES pages)
-# with a token already on the edge of expiring mid-flight.
+# Refresh the token this many seconds before it actually expires, rather
+# than cutting it as close as possible.
 _OAUTH2_REFRESH_MARGIN_SECONDS = 60
-# RFC 6749 recommends but does not require `expires_in`; this is only a
-# floor for providers that omit it, not a real-world expectation.
+# Fallback TTL when the IdP's token response omits expires_in.
 _OAUTH2_DEFAULT_TTL_SECONDS = 300
 
 
@@ -509,6 +451,10 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
     if connection["oauth2_scope"]:
         form["scope"] = connection["oauth2_scope"]
 
+    try:
+        assert_http_url(connection["oauth2_token_url"])
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(connection["oauth2_token_url"], data=form)
     if response.status_code >= 400:
@@ -566,11 +512,12 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
 
     records: list[dict] = []
     url: Optional[str] = row["base_url"]
-    # Only the *first* page's URL carries the incremental filter — a
-    # `next_page_path` link is the API's own follow-up URL, which either
-    # already encodes its own continuation state or doesn't care about
-    # this parameter at all; re-appending it to every page risks a
-    # duplicate/conflicting query parameter for no benefit.
+    try:
+        assert_http_url(url)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
+    origin_url = url
+    # Append incremental parameter only to the first page request.
     if row["incremental_param"] and row["last_cursor_value"] is not None:
         url = _add_query_param(url, row["incremental_param"], row["last_cursor_value"])
     pages_fetched = 0
@@ -585,14 +532,19 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
                     "never resolves to null; a real connector plugin may be a better fit for this API"
                 )
             # Auth header applied to every page, not just the first — the
-            # next-page URL is usually on the same host/API and needs the
-            # same credential, and re-sending an unnecessary header on a
-            # same-origin request is harmless.
+            # next-page URL needs the same credential. `_extract_next_url`
+            # pins the origin check to the *configured* `base_url`, not the
+            # previous page's URL, so a malicious page N can't widen the
+            # trusted origin for page N+1.
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             body = response.json()
             records.extend(_extract_records(body, row["record_path"]))
-            url = _extract_next_url(body, row["next_page_path"]) if row["next_page_path"] else None
+            url = (
+                _extract_next_url(body, row["next_page_path"], origin_url=row["base_url"])
+                if row["next_page_path"]
+                else None
+            )
 
     if row["cursor_property"]:
         new_cursor = _compute_new_cursor(records, row["cursor_property"], row["last_cursor_value"])

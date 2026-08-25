@@ -51,6 +51,16 @@ def _grant_project_access(token: str, project_name: str, principal_urn: str, rel
     assert status == 200, body
 
 
+def _revoke_project_access(token: str, project_name: str, principal_urn: str, relation: str = "viewer") -> None:
+    status, body = _request(
+        "POST",
+        f"{IDENTITY}/projects/{project_name}/principals/{principal_urn}/access/revoke",
+        token=token,
+        body={"relation": relation},
+    )
+    assert status == 200, body
+
+
 def _wait_until(fn, deadline_seconds: float = 20.0) -> None:
     """Grants propagate to Knowledge's authz decisions asynchronously."""
     deadline = time.monotonic() + deadline_seconds
@@ -118,17 +128,24 @@ def test_project_only_grant_reaches_a_project_scoped_object_type_without_any_wor
     status, denied = _request("GET", ontology_url("/objects/InventoryLevel"), token=alice_token)
     assert status == 403, denied
 
-    _grant_project_access(msmith_token, project_name, f"hl:{TENANT_ID}:global:user:alice")
+    alice_urn = f"hl:{TENANT_ID}:global:user:alice"
+    _grant_project_access(msmith_token, project_name, alice_urn)
+    try:
+        def _alice_can_read_inventory_level() -> None:
+            status, body = _request("GET", ontology_url("/objects/InventoryLevel"), token=alice_token)
+            assert status == 200, body
 
-    def _alice_can_read_inventory_level() -> None:
-        status, body = _request("GET", ontology_url("/objects/InventoryLevel"), token=alice_token)
-        assert status == 200, body
+        _wait_until(_alice_can_read_inventory_level)
 
-    _wait_until(_alice_can_read_inventory_level)
-
-    status, denied = _request("GET", ontology_url("/objects/Customer"), token=alice_token)
-    assert status == 403, denied
-    assert "rebac_denied" in denied["detail"], denied
+        status, denied = _request("GET", ontology_url("/objects/Customer"), token=alice_token)
+        assert status == 403, denied
+        assert "rebac_denied" in denied["detail"], denied
+    finally:
+        # alice is a shared "zero grants" persona other test files rely
+        # on (test_search.py::test_rebac_denied_principal_cannot_search_at_all
+        # in particular) — leaving this grant in place breaks that
+        # invariant for every test that runs after this one.
+        _revoke_project_access(msmith_token, project_name, alice_urn)
 
 
 def test_publishing_with_an_unknown_project_urn_is_rejected(jdoe_token: str, msmith_token: str) -> None:

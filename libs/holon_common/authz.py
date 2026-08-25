@@ -32,6 +32,7 @@ from prometheus_client import Counter
 from .auth import Principal
 from .audit import emit_audit
 from .observability import CircuitBreaker
+from .spicedb_id import spicedb_object_id
 
 logger = logging.getLogger("holon_common.authz")
 
@@ -210,7 +211,7 @@ class PermissionClient:
         which `principal_urn` has `permission`.
 
         Returns SpiceDB object IDs (`spicedb_object_id(urn)`), not URNs —
-        the `:`/`.` encoding is not reversible. Callers match against
+        the encoding is not reversible. Callers match against
         `spicedb_object_id(known_urn)`.
 
         Used by Knowledge search to derive ReBAC entitlement tokens
@@ -219,7 +220,7 @@ class PermissionClient:
         body = {
             "resourceObjectType": resource_type,
             "permission": permission,
-            "subject": {"object": {"objectType": "principal", "objectId": _object_id(principal_urn)}},
+            "subject": {"object": {"objectType": "principal", "objectId": spicedb_object_id(principal_urn)}},
             "consistency": {"fullyConsistent": True},
         }
 
@@ -249,17 +250,17 @@ class PermissionClient:
             permissionship = result.get("permissionship") or ""
             # CheckPermission uses PERMISSIONSHIP_HAS_PERMISSION;
             # LookupResources uses LOOKUP_PERMISSIONSHIP_HAS_PERMISSION.
+            # Empty permissionship is fail-closed — never treat an unknown
+            # wire shape as a grant.
             if resource_id and "HAS_PERMISSION" in permissionship and "NO_PERMISSION" not in permissionship:
-                ids.add(resource_id)
-            elif resource_id and permissionship == "":
                 ids.add(resource_id)
         return ids
 
     async def check_rebac(self, principal_urn: str, resource_type: str, resource_urn: str, permission: str) -> bool:
         body = {
-            "resource": {"objectType": resource_type, "objectId": _object_id(resource_urn)},
+            "resource": {"objectType": resource_type, "objectId": spicedb_object_id(resource_urn)},
             "permission": permission,
-            "subject": {"object": {"objectType": "principal", "objectId": _object_id(principal_urn)}},
+            "subject": {"object": {"objectType": "principal", "objectId": spicedb_object_id(principal_urn)}},
             "consistency": {"fullyConsistent": True},
         }
 
@@ -436,14 +437,6 @@ class PermissionClient:
             reason=decision.reason,
         )
         return decision
-
-
-def spicedb_object_id(urn: str) -> str:
-    """SpiceDB object IDs disallow ':' and '.' — URNs use both freely
-    (e.g. RelationType `Order.customer`). A plain, deterministic swap
-    keeps the mapping obvious without adding a lookup table.
-    """
-    return urn.replace(":", "_").replace(".", "_")
 
 
 def _subject(subject_type: str, subject_urn: str, optional_subject_relation: Optional[str] = None) -> dict:
