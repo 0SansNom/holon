@@ -27,7 +27,20 @@ from holon_common import (
 from holon_common.audit import clear_durable_audit_hooks
 from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
 from holon_common.authz import PermissionClient
-from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
+from holon_common.principal_status import (
+    consume_identity_auth_events,
+    hydrate_revocation_snapshot,
+    make_principal_status_consumer,
+)
+from holon_common.readiness import (
+    check_iceberg_catalog,
+    check_kafka_producer,
+    check_opa,
+    check_opensearch,
+    check_postgres,
+    check_spicedb,
+    report_ready,
+)
 
 from . import (
     actions,
@@ -145,6 +158,7 @@ async def lifespan(app: FastAPI):
         KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
     )
     authz_cache_invalidation_task = asyncio.create_task(_consume_identity_events(authz_cache_consumer))
+    await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
 
     expiry_task = asyncio.create_task(actions.sweep_expired_approvals_forever(app.state.pool, WORKSPACE_ID))
 
@@ -188,5 +202,13 @@ async def live() -> dict:
 
 @app.get("/ready")
 async def ready() -> dict:
-    await app.state.pool.fetchval("SELECT 1")
-    return {"status": "ok"}
+    return await report_ready(
+        [
+            check_postgres(app.state.pool),
+            check_spicedb(SPICEDB_URL, SPICEDB_PRESHARED_KEY),
+            check_opa(OPA_URL),
+            check_kafka_producer(app.state.producer),
+            check_opensearch(OPENSEARCH_URL, OPENSEARCH_PASSWORD),
+            check_iceberg_catalog(ICEBERG_CONFIG["catalog_uri"], ICEBERG_CONFIG["warehouse"]),
+        ]
+    )

@@ -50,6 +50,7 @@ x-app-env: &app-env
   HOLON_PLUGIN_ENTRY_PREFIXES: ${HOLON_PLUGIN_ENTRY_PREFIXES:-app.plugins.,app.tool_plugins.,holon_test_plugins.}
   # Local compose Postgres/source-s3/reviews-api/oauth2-idp are RFC1918; production leaves this unset (fail closed).
   HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,source-s3,reviews-api,oauth2-idp}
+  HOLON_IDENTITY_URL: http://identity:8000
 
 services:
 
@@ -368,6 +369,12 @@ services:
         condition: service_started
       redpanda:
         condition: service_healthy
+      spicedb:
+        condition: service_started
+      opa:
+        condition: service_started
+      identity:
+        condition: service_started
 
   knowledge:
     build:
@@ -414,6 +421,8 @@ services:
         condition: service_started
       opensearch:
         condition: service_healthy
+      identity:
+        condition: service_started
 
   automation:
     build:
@@ -439,9 +448,15 @@ services:
         condition: service_healthy
       redpanda:
         condition: service_healthy
+      spicedb:
+        condition: service_started
+      opa:
+        condition: service_started
       knowledge:
         condition: service_started
       intelligence:
+        condition: service_started
+      identity:
         condition: service_started
 
   intelligence:
@@ -500,7 +515,13 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      spicedb:
+        condition: service_started
+      opa:
+        condition: service_started
       knowledge:
+        condition: service_started
+      identity:
         condition: service_started
 
   experience:
@@ -536,6 +557,10 @@ services:
       connectivity:
         condition: service_started
       spicedb:
+        condition: service_started
+      opa:
+        condition: service_started
+      identity:
         condition: service_started
 
 volumes:

@@ -19,6 +19,7 @@ from holon_common import (
     Principal,
     active_jwt,
     assert_production_posture,
+    build_urn,
     configure_json_logging,
     create_pool,
     install_error_handlers,
@@ -26,6 +27,7 @@ from holon_common import (
     instrument_tracing,
     make_principal_dependency,
     outbox,
+    retry_with_backoff,
     run_migrations,
 )
 from holon_common.audit import clear_durable_audit_hooks
@@ -34,8 +36,13 @@ from holon_common.audit_store import (
     install_durable_audit,
     list_events_page,
 )
-
-from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
+from holon_common.authz import PermissionClient
+from holon_common.principal_status import (
+    consume_identity_auth_events,
+    hydrate_revocation_snapshot,
+    make_principal_status_consumer,
+)
+from holon_common.readiness import check_kafka_producer, check_opa, check_postgres, check_spicedb, report_ready
 
 from . import agent_chain_trigger, workflow
 
@@ -51,6 +58,9 @@ CONNECTIVITY_URL = os.environ["HOLON_CONNECTIVITY_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
 OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
+SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
+SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
+OPA_URL = os.environ["HOLON_OPA_URL"]
 
 
 @asynccontextmanager
@@ -65,6 +75,8 @@ async def lifespan(app: FastAPI):
 
     clear_durable_audit_hooks()
     install_durable_audit(app.state.pool)
+
+    app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
     await app.state.producer.start()
@@ -97,7 +109,8 @@ async def lifespan(app: FastAPI):
     status_consumer = make_principal_status_consumer(
         KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
     )
-    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer))
+    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
+    await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
 
     yield
 
@@ -109,6 +122,7 @@ async def lifespan(app: FastAPI):
     await agent_chain_consumer.stop()
     await consumer.stop()
     await app.state.producer.stop()
+    await app.state.authz.aclose()
     await app.state.pool.close()
 
 
@@ -117,6 +131,17 @@ instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
+
+
+async def _authorize_workspace(principal: Principal, permission: str) -> None:
+    decision = await app.state.authz.authorize(
+        principal,
+        resource_type="workspace",
+        resource_urn=build_urn(principal.tenant_id, "global", "workspace", WORKSPACE_ID),
+        permission=permission,
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 @app.get("/health")
@@ -131,8 +156,14 @@ async def live() -> dict:
 
 @app.get("/ready")
 async def ready() -> dict:
-    await app.state.pool.fetchval("SELECT 1")
-    return {"status": "ok"}
+    return await report_ready(
+        [
+            check_postgres(app.state.pool),
+            check_spicedb(SPICEDB_URL, SPICEDB_PRESHARED_KEY),
+            check_opa(OPA_URL),
+            check_kafka_producer(app.state.producer),
+        ]
+    )
 
 
 @app.get("/audit-events")
@@ -146,6 +177,7 @@ async def list_automation_audit_events(
     pageToken: str | None = None,
 ) -> dict:
     """Durable Automation audit (workflows, agent-chain triggers)."""
+    await _authorize_workspace(principal, "approve")
     return await list_events_page(
         app.state.pool,
         principal.tenant_id,
@@ -161,6 +193,7 @@ async def list_automation_audit_events(
 @app.get("/workflows/{approval_id}")
 async def get_workflow_execution(approval_id: int, principal: Principal = Depends(current_principal)) -> dict:
     """Fetch workflow execution record by approval ID."""
+    await _authorize_workspace(principal, "read")
     execution = await workflow.get_workflow_execution(app.state.pool, approval_id)
     if execution is None or execution.get("tenant_id") != principal.tenant_id:
         raise HolonError.not_found(

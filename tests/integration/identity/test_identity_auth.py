@@ -65,6 +65,10 @@ def test_login_cookie_auth_whoami_and_logout() -> None:
     assert status == 200, body
     assert "Max-Age=0" in headers.get("Set-Cookie", "")
 
+    status, body, _ = _raw_request("GET", "/whoami", headers=cookie_header)
+    assert status == 401, body
+    assert body.get("errorName") == "TokenRevoked"
+
     status, body, _ = _raw_request("GET", "/whoami")
     assert status == 401, body
 

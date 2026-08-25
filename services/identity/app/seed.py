@@ -13,67 +13,6 @@ import asyncpg
 from holon_common import build_urn
 from holon_common.spicedb_id import index_by_spicedb_object_id
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS tenant (
-    tenant_id TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active'
-);
-
-CREATE TABLE IF NOT EXISTS workspace (
-    workspace_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL REFERENCES tenant(tenant_id),
-    display_name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active'
-);
-
-CREATE TABLE IF NOT EXISTS principal (
-    urn TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    on_behalf_of TEXT,
-    country TEXT,
-    client_secret TEXT NOT NULL DEFAULT 'unset',
-    status TEXT NOT NULL DEFAULT 'active',
-    oidc_sub TEXT
-);
-
--- additive migrations for databases seeded before these columns existed
-ALTER TABLE principal ADD COLUMN IF NOT EXISTS country TEXT;
-ALTER TABLE principal ADD COLUMN IF NOT EXISTS client_secret TEXT NOT NULL DEFAULT 'unset';
-ALTER TABLE principal ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
-ALTER TABLE principal ADD COLUMN IF NOT EXISTS oidc_sub TEXT;
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
-ALTER TABLE workspace ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
-
--- Org/Space/Project hierarchy — one tier below Workspace
-CREATE TABLE IF NOT EXISTS project (
-    urn TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS principal_oidc_sub_uidx
-    ON principal (oidc_sub) WHERE oidc_sub IS NOT NULL;
-
--- OIDC authorization state table for PKCE authentication
-CREATE TABLE IF NOT EXISTS oidc_pending_state (
-    state TEXT PRIMARY KEY,
-    verifier TEXT NOT NULL,
-    redirect_uri TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS saml_seen_assertion (
-    assertion_id TEXT PRIMARY KEY,
-    seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-
 # hashlib.scrypt needs an OpenSSL build with scrypt support — absent on
 # e.g. macOS's LibreSSL-linked system Python. pbkdf2_hmac has no such gap
 # (pure-Python fallback built into hashlib itself) and is still a NIST-
@@ -133,10 +72,6 @@ def project_urn(tenant_id: str, workspace_id: str, name: str) -> str:
 
 VALID_WORKSPACE_RELATIONS = {"viewer", "editor", "admin"}
 VALID_PROJECT_RELATIONS = {"viewer", "editor", "admin"}
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(_DDL)
 
 
 async def ensure_instance_bootstrap(

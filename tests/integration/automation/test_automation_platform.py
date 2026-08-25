@@ -93,3 +93,21 @@ def test_workflow_engine_records_a_compensated_execution(jdoe_token: str, msmith
 def test_unknown_approval_is_404(jdoe_token: str) -> None:
     status, body = _request("GET", f"{AUTOMATION}/workflows/999999", token=jdoe_token)
     assert status == 404, body
+
+
+def test_workflow_read_requires_workspace_read(alice_token: str) -> None:
+    status, body = _request("GET", f"{AUTOMATION}/workflows/1", token=alice_token)
+    assert status == 403, body
+
+
+def test_workflow_read_rejects_anonymous() -> None:
+    status, body = _request("GET", f"{AUTOMATION}/workflows/1")
+    assert status == 401, body
+
+
+def test_audit_events_require_workspace_approve(jdoe_token: str, msmith_token: str) -> None:
+    status, body = _request("GET", f"{AUTOMATION}/audit-events", token=jdoe_token)
+    assert status == 403, body
+    status, body = _request("GET", f"{AUTOMATION}/audit-events", token=msmith_token, unwrap_pages=False)
+    assert status == 200, body
+    assert "data" in body

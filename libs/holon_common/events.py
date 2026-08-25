@@ -6,6 +6,7 @@ Application code only ever talks to this interface.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -98,6 +99,12 @@ class EventProducer:
             key_serializer=lambda k: k.encode("utf-8") if k is not None else None,
         )
         await _start_with_retry(self._producer, what="EventProducer")
+
+    async def ping(self, *, timeout: float = 1.5) -> None:
+        """Metadata round-trip used by `/ready`. Does not publish."""
+        if self._producer is None:
+            raise RuntimeError("EventProducer.start() must be called before ping()")
+        await asyncio.wait_for(self._producer.partitions_for("holon-ready-probe"), timeout=timeout)
 
     async def stop(self) -> None:
         if self._producer is not None:

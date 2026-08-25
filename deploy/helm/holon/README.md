@@ -43,8 +43,8 @@ least:
 
 | Key | Used by |
 |---|---|
-| `HOLON_JWT_SECRET` | every service (HS256) |
-| `HOLON_JWT_PRIVATE_KEYS` / `HOLON_JWT_PUBLIC_KEYS` | every service when `jwt.algorithm=RS256` |
+| `HOLON_JWT_SECRET` | every service (HS256 — `values.yaml` default) |
+| `HOLON_JWT_PRIVATE_KEYS` / `HOLON_JWT_PUBLIC_KEYS` | every service when `jwt.algorithm=RS256` (`values-production.yaml` requires this) |
 | `HOLON_SPICEDB_PRESHARED_KEY` | every service |
 | `POSTGRES_PASSWORD` | every service |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | connectivity, knowledge, intelligence (S3/MinIO) |
@@ -76,8 +76,8 @@ you've wired the app side to fetch from Vault directly instead.
 - **No load / soak suite** in CI — e2e is compose HTTP pytest only. Treat
   green CI as correctness, not capacity.
 - **JWT** — ConfigMap sets `HOLON_JWT_ALG` from `jwt.algorithm` (default
-  HS256). RS256 keys live in `existingSecret`; set `jwt.requireAsymmetric`
-  to force posture checks.
+  HS256 in `values.yaml`). The production overlay sets RS256 and
+  `jwt.requireAsymmetric: true`; keys live in `existingSecret`.
 - **Observability** — `observability.serviceMonitor` /
   `observability.prometheusRule` are off by default (need Prometheus
   Operator CRDs). Standalone YAML: `deploy/observability/`.
