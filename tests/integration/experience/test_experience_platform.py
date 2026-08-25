@@ -29,10 +29,15 @@ def _token_for(principal_urn: str) -> str:
 
 def test_experience_probes():
     """Verify health, live, and ready endpoints."""
-    for endpoint in ["/health", "/live", "/ready"]:
+    for endpoint in ["/health", "/live"]:
         status, body = _request("GET", f"{EXPERIENCE}{endpoint}")
         assert status == 200
         assert body == {"status": "ok"}
+    status, body = _request("GET", f"{EXPERIENCE}/ready")
+    assert status == 200, body
+    assert body["status"] == "ok"
+    assert body["checks"]["postgres"] == "ok"
+    assert body["checks"]["spicedb"] == "ok"
 
 
 def test_experience_config():

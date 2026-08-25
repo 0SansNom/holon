@@ -32,6 +32,7 @@ from holon_common import (
     clear_session_cookie,
     configure_json_logging,
     create_pool,
+    decode_token,
     install_error_handlers,
     instrument_cors,
     instrument_metrics,
@@ -45,7 +46,9 @@ from holon_common import (
     set_session_cookie,
 )
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
-from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
+from holon_common.audit_store import install_durable_audit
+from holon_common.auth import COOKIE_NAME
+from holon_common.readiness import check_kafka_producer, check_opa, check_postgres, check_spicedb, report_ready
 
 from . import federation
 from . import oidc as oidc_client
@@ -58,7 +61,6 @@ from .seed import (
     create_tenant,
     create_workspace,
     ensure_instance_bootstrap,
-    ensure_schema,
     get_project,
     get_tenant,
     get_workspace,
@@ -94,11 +96,13 @@ OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
-    async with app.state.pool.acquire() as conn:
-        await ensure_schema(conn)
-        await ensure_audit_schema(conn)
-        await outbox.ensure_schema(conn)
+    # Identity-owned tables live in app/migrations (0000_baseline + 0001–0002).
+    # Shared holon_common helpers (audit/outbox) are included in 0000.
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+
+    from .token_revocation import hydrate_local_denylist_from_db
+
+    await hydrate_local_denylist_from_db(app.state.pool)
 
     clear_durable_audit_hooks()
     install_durable_audit(app.state.pool)
@@ -137,6 +141,10 @@ _base_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS, che
 
 async def current_principal(request: Request) -> Principal:
     principal = await _base_principal(request)
+    from .token_revocation import is_jti_revoked_in_db
+
+    if principal.jti and await is_jti_revoked_in_db(app.state.pool, principal.jti):
+        raise HolonError.unauthorized("TokenRevoked", "token has been revoked")
     row = await app.state.pool.fetchrow("SELECT status, tenant_id FROM principal WHERE urn = $1", principal.urn)
     if row is None or row["status"] != "active":
         mark_principal_disabled(principal.urn)
@@ -272,8 +280,14 @@ async def live() -> dict:
 
 @app.get("/ready")
 async def ready() -> dict:
-    await app.state.pool.fetchval("SELECT 1")
-    return {"status": "ok"}
+    return await report_ready(
+        [
+            check_postgres(app.state.pool),
+            check_spicedb(SPICEDB_URL, SPICEDB_PRESHARED_KEY),
+            check_opa(OPA_URL),
+            check_kafka_producer(app.state.producer),
+        ]
+    )
 
 
 @app.get("/principals", response_model=list[Principal])
@@ -369,7 +383,34 @@ async def login(request: TokenRequest, response: Response) -> dict:
 
 
 @app.post("/logout")
-async def logout(response: Response) -> dict:
+async def logout(request: Request, response: Response) -> dict:
+    authorization = request.headers.get("authorization")
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ")
+    else:
+        token = request.cookies.get(COOKIE_NAME)
+    if token:
+        try:
+            session = decode_token(token, JWT_SECRET, secrets=JWT_SECRETS)
+        except HolonError:
+            session = None
+        if session is not None and session.jti:
+            import jwt as pyjwt
+            from datetime import datetime, timezone
+
+            from .token_revocation import enqueue_token_revoked
+
+            claims = pyjwt.decode(token, options={"verify_signature": False})
+            expires_at = datetime.fromtimestamp(int(claims["exp"]), tz=timezone.utc)
+            await enqueue_token_revoked(
+                app.state.pool,
+                jti=session.jti,
+                principal_urn=session.urn,
+                expires_at=expires_at,
+                actor=session,
+                tenant_id=session.tenant_id,
+                workspace_id=WORKSPACE_ID,
+            )
     clear_session_cookie(response)
     return {"status": "ok"}
 
@@ -664,6 +705,21 @@ async def saml_metadata() -> Response:
 @app.get("/whoami", response_model=Principal)
 async def whoami(principal: Principal = Depends(current_principal)) -> Principal:
     return principal
+
+
+@app.get("/internal/revocation-snapshot")
+async def revocation_snapshot(request: Request) -> dict:
+    """Durable denylist for other services to hydrate after a restart.
+
+    Service-account / agent JWT only — a user token must not list every
+    disabled principal. Identity itself loads this from Postgres on boot.
+    """
+    principal = await _base_principal(request)
+    if principal.type not in {"service_account", "agent"}:
+        raise HolonError.forbidden("SnapshotForbidden", "revocation snapshot is internal")
+    from .token_revocation import load_revocation_snapshot
+
+    return await load_revocation_snapshot(app.state.pool)
 
 
 @app.get("/.well-known/jwks.json")

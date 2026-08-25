@@ -45,7 +45,12 @@ from holon_common.audit_store import (
     list_events_page,
 )
 from holon_common.authz import PermissionClient
-from holon_common.principal_status import consume_identity_auth_events, make_principal_status_consumer
+from holon_common.readiness import check_kafka_producer, check_opa, check_postgres, check_qdrant, check_spicedb, report_ready
+from holon_common.principal_status import (
+    consume_identity_auth_events,
+    hydrate_revocation_snapshot,
+    make_principal_status_consumer,
+)
 
 from .knowledge_urls import holon_url
 from . import agent_runtime, evaluation, model_registry, spend_limits, tool_plugin_registry, vector_store
@@ -188,6 +193,7 @@ async def lifespan(app: FastAPI):
         KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
     )
     status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
+    await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
 
     yield
 
@@ -256,8 +262,16 @@ async def live() -> dict:
 
 @app.get("/ready")
 async def ready() -> dict:
-    await app.state.pool.fetchval("SELECT 1")
-    return {"status": "ok", "intelligence_enabled": bool(getattr(app.state, "intelligence_enabled", True))}
+    return await report_ready(
+        [
+            check_postgres(app.state.pool),
+            check_spicedb(SPICEDB_URL, SPICEDB_PRESHARED_KEY),
+            check_opa(OPA_URL),
+            check_kafka_producer(app.state.producer),
+            check_qdrant(QDRANT_URL),
+        ],
+        extra={"intelligence_enabled": bool(getattr(app.state, "intelligence_enabled", True))},
+    )
 
 
 @app.get("/audit-events")

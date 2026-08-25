@@ -110,6 +110,12 @@ class IdentityPrincipalStatusChangedV1(_Payload):
     status: str
 
 
+@register("identity.token.revoked", version=1)
+class IdentityTokenRevokedV1(_Payload):
+    jti: str
+    principal_urn: str
+
+
 @register("automation.workflow.completed", version=1)
 class AutomationWorkflowCompletedV1(_Payload):
     workflow_name: str
