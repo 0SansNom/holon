@@ -5,18 +5,7 @@ An enterprise knowledge platform that connects and organizes information from di
 
 ## Where this actually stands
 
-The ontology/governance/security core is real and tested against the
-live stack, not mocked: masking is verified to actually strip
-confidential fields for an unauthorized principal, not just labeled as
-enforced; event-sourcing convergence is polled for and confirmed, not
-assumed; the no-code connector and self-serve ObjectType creation are
-exercised end to end.
-
-It is **not** production-ready as-is. Scope is **OSS self-host** (see
-[ADR 026](docs/adr/026-oss-self-host-scope.md)): we ship branchable
-artefacts; we never operate inside a customer's SI. Multi-org
-(**filiales** as `tenant`s on one instance) is in scope; SaaS pooled
-multi-customer hosting is not.
+It is **not** production-ready as-is.
 
 Known gaps, in the order they'd actually bite for a self-hosting
 enterprise:
@@ -24,30 +13,13 @@ enterprise:
 - **Empty instance only** — Identity bootstraps one admin + tenant/workspace
   from env (`HOLON_TENANT_ID` / `HOLON_WORKSPACE_ID`, default workspace
   `main`); no bundled demo. Ontology, connectors, and extra principals
-  are created through APIs (or CI fixtures — see
-  [docs/ops/seed-data.md](docs/ops/seed-data.md)).
-- **SSO / secrets / JWT ops** — OIDC, SAML SP, and SCIM provisioning
-  (day-2 deprovisioning included — see [ADR 028](docs/adr/028-saml-scim-sso.md))
-  + `SecretProvider` + JWT `kid` rotation and optional RS256
-  (`HOLON_JWT_REQUIRE_ASYMMETRIC`) are in-tree; Vault/IdP wiring and key
-  custody are yours. Prefer connector `secret_ref`. SAML Single Logout
-  and the full SCIM filter grammar are deliberately not implemented.
+  are created through APIs.
 - **Intelligence is experimental** — leave
   `HOLON_INTELLIGENCE_ENABLED=false` in prod (posture-enforced). Joblib
   model upload and tool-plugin register are refused in production;
   tool-plugin `entry_point`s are prefix-allowlisted. Prefer
   `HOLON_LLM_PROVIDER=fake` locally; set
   `services.intelligence.runtimeClassName` (gVisor) in Helm.
-- **Capacity & HA are yours.** CI is compose HTTP pytest only — no
-  soak/chaos suite. Enable `HOLON_SERVING_STORE_REQUIRE_MATERIALIZED` in
-  prod (posture + Helm overlay). Backup/DR tooling and HA data-plane are
-  **your** SI.
-- **Operator pack** — runbooks in `docs/ops/` (deploy, backup-restore,
-  seed-data, observability), [`SECURITY.md`](SECURITY.md), Helm under
-  `deploy/helm/holon/`, Prometheus artefacts under `deploy/observability/`,
-  API overview in [`docs/api/overview.md`](docs/api/overview.md),
-  API error contract in [`docs/api/errors.md`](docs/api/errors.md),
-  `.github/workflows/publish.yml` for OCI+SBOM.
 
 Services expose `/metrics` (Prometheus text) and optional OTLP traces
 (`HOLON_OTLP_ENDPOINT`; unset = tracing off). SLO recording rules, alerts,
@@ -88,8 +60,7 @@ After a **fresh** volume set, Identity creates tenant `acme`, workspace
 `HOLON_BOOTSTRAP_ADMIN_SECRET` you set — sign in as that URN with that
 secret (UI at `http://localhost:8004`, or Vite below). There is no
 dev-login shortcut: local behaves the same as production here, and
-`HOLON_BOOTSTRAP_ADMIN_SECRET` is required in every environment — see
-[docs/ops/seed-data.md](docs/ops/seed-data.md).
+`HOLON_BOOTSTRAP_ADMIN_SECRET` is required in every environment.
 
 The platform starts **without** demo ObjectTypes or connectors. Create
 them via the APIs, or for local/CI only:

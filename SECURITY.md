@@ -58,17 +58,15 @@ Local `docker-compose.yml` is a **dev** stack: OpenSearch
 `discovery.type=single-node` and `plugins.security.disabled=true`,
 optional empty OTLP, and `HOLON_ENV` left empty so production posture
 checks are a no-op. There is no dev-login shortcut — bootstrap requires
-`HOLON_BOOTSTRAP_ADMIN_SECRET` in every environment, local included; see
-[docs/ops/seed-data.md](docs/ops/seed-data.md). Do not treat compose
-defaults as a production posture.
+`HOLON_BOOTSTRAP_ADMIN_SECRET` in every environment, local included.
+Do not treat compose defaults as a production posture.
 
 ## Known residual risks
 
 - Example/test connector plugins live under `tests/fixtures/plugins/`
   (test-only fixtures, mounted read-only into the dev services) —
   registered via `POST /plugins` by test provisioning only.
-  Filiales use `/sources` / plugins. See
-  [docs/ops/seed-data.md](docs/ops/seed-data.md).
+  Filiales use `/sources` / plugins.
 - Intelligence remains experimental: even with the flag off, do not enable
   `HOLON_ALLOW_JOBLIB_MODELS` or `HOLON_ALLOW_TOOL_PLUGIN_REGISTER` in
   production (posture refuses both). Prefer gVisor
