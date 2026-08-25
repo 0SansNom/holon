@@ -14,7 +14,13 @@ import pyarrow.json as pajson
 import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
-from holon_common.connector_safety import ConnectorSafetyError, assert_connector_host, assert_connector_secret_ref
+from holon_common.connector_safety import (
+    ConnectorSafetyError,
+    assert_connector_host,
+    assert_connector_secret_ref,
+    assert_no_inline_connector_secret,
+    assert_production_requires_secret_ref,
+)
 from holon_common.secrets import resolve_optional
 
 DDL = """
@@ -112,19 +118,23 @@ async def register_connection(
 ) -> dict:
     """Register or update an object storage connection credential."""
     hostname = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}").hostname
+    existing = await pool.fetchrow(
+        "SELECT secret_access_key, secret_ref FROM object_connection WHERE tenant_id = $1 AND name = $2",
+        tenant_id, name,
+    )
+    is_update = existing is not None
     try:
         assert_connector_host(hostname or "")
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
+        assert_no_inline_connector_secret(secret_access_key, field="secret_access_key")
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
-
-    if secret_access_key is None and secret_ref is None:
-        existing = await pool.fetchrow(
-            "SELECT secret_access_key, secret_ref FROM object_connection WHERE tenant_id = $1 AND name = $2",
-            tenant_id, name,
-        )
-        if existing is not None:
-            secret_access_key, secret_ref = existing["secret_access_key"], existing["secret_ref"]
+    if secret_access_key is None and secret_ref is None and existing is not None:
+        secret_access_key, secret_ref = existing["secret_access_key"], existing["secret_ref"]
+    try:
+        assert_production_requires_secret_ref(secret_ref, is_update=is_update)
+    except ConnectorSafetyError as exc:
+        raise SourceConfigError(str(exc)) from exc
 
     await pool.execute(
         """
