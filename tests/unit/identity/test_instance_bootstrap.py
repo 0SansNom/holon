@@ -183,7 +183,7 @@ def test_reset_secret_updates_existing_bootstrap_admin(monkeypatch):
     monkeypatch.setenv("HOLON_BOOTSTRAP_ADMIN_SECRET", "new-secret")
     monkeypatch.setenv("HOLON_BOOTSTRAP_ADMIN_RESET_SECRET", "true")
     admin_urn = "hl:acme:global:user:admin"
-    oid = admin_urn.replace(":", "_").replace(".", "_")
+    oid = spicedb_object_id(admin_urn)
 
     async def fetchrow(query, *args):
         if "FROM tenant" in query:
