@@ -6,10 +6,9 @@ import json
 import time
 import urllib.error
 import urllib.request
-import uuid
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
 
 
 def _token_for(principal_urn: str) -> str:
@@ -45,10 +44,6 @@ def orders_synced(jdoe_token: str) -> dict:
     status, result = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "orders"})
     assert status == 200, result
     return result
-
-
-def _unique_name(prefix: str) -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
 def test_forward_reference_is_rejected_at_definition_time(jdoe_token: str) -> None:
