@@ -53,12 +53,20 @@ def _identity_validation_token() -> str:
 
 
 @router.get("/catalog/datasets")
-async def get_datasets(principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def get_datasets(
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> list[dict]:
+    await _authorize_workspace_read(principal, workspace_id)
     return await catalog.list_datasets(core.pool, principal.tenant_id)
 
 
 @router.get("/catalog/datasets/{name}/preview")
-async def preview_dataset(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
+async def preview_dataset(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
     """One sample row's column names — what a "Create Object Type" form
     suggests a property mapping from, instead of asking a non-technical
     admin to type raw JSON keys from memory. Auth-only, like every other
@@ -66,9 +74,13 @@ async def preview_dataset(name: str, principal: Principal = Depends(core.current
     data the PDP has anything to enforce on, the sample value shown is
     illustrative only (never asserted to be safe to persist anywhere).
     """
+    await _authorize_workspace_read(principal, workspace_id)
     try:
-        rows = await asyncio.to_thread(resolver.fetch_generic, name, **core.ICEBERG_CONFIG)
-    except NoSuchTableError:
+        rows = await asyncio.to_thread(resolver.fetch_generic, name, **core.iceberg_kwargs(principal.tenant_id))
+    except (NoSuchTableError, ValueError):
+        # ValueError: `name` isn't even a legal Iceberg identifier
+        # (holon_common.iceberg_ident) — such a dataset could never
+        # have been synced, same "not found" outcome as NoSuchTableError.
         raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced")
     if not rows:
         return {"columns": []}
@@ -87,14 +99,24 @@ async def get_dataset_versions(name: str, principal: Principal = Depends(core.cu
 
 
 @router.get("/catalog/datasets/{name}/stats")
-async def get_dataset_stats(name: str, principal: Principal = Depends(core.current_principal)) -> dict:
+async def get_dataset_stats(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
     """The Iceberg table's real declared schema plus per-column stats
     (null/distinct counts, min/max) — heavier than `/preview` (a full
     scan + DuckDB aggregation, not one sample row), so its own endpoint.
     """
+    await _authorize_workspace_read(principal, workspace_id)
     try:
-        return await asyncio.to_thread(resolver.dataset_schema_and_stats, name, **core.ICEBERG_CONFIG)
-    except NoSuchTableError:
+        return await asyncio.to_thread(
+            resolver.dataset_schema_and_stats, name, **core.iceberg_kwargs(principal.tenant_id)
+        )
+    except (NoSuchTableError, ValueError):
+        # ValueError: `name` isn't even a legal Iceberg identifier
+        # (holon_common.iceberg_ident) — such a dataset could never
+        # have been synced, same "not found" outcome as NoSuchTableError.
         raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced")
 
 
@@ -126,6 +148,7 @@ async def generate_join_dataset(
         result = await asyncio.to_thread(
             join_datasets.create_empty_join_table,
             request.name,
+            tenant_id=principal.tenant_id,
             source_column=request.source_column,
             target_column=request.target_column,
             **core.ICEBERG_CONFIG,
@@ -213,6 +236,17 @@ async def _authorize_ontology_governance(principal: Principal, workspace_id: str
         resource_type="workspace",
         resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
         permission="approve",
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_workspace_read(principal: Principal, workspace_id: str) -> None:
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="workspace",
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
+        permission="read",
     )
     if not decision.allowed:
         raise HolonError.forbidden("PermissionDenied", decision.reason)
@@ -319,7 +353,6 @@ async def _seed_relation_type_authz(*, tenant_id: str, workspace_id: str, urn: s
     except Exception as exc:
         logger.exception("SpiceDB parent_workspace write failed for RelationType %s — compensating PG delete", urn)
         try:
-            # Bypass active-status guard for compensating delete.
             await core.pool.execute("DELETE FROM relation_type WHERE urn = $1", urn)
         except Exception:
             logger.exception(
@@ -418,7 +451,6 @@ async def create_object_type(request: CreateObjectTypeRequest, principal: Princi
             error_name="ObjectTypeAlreadyExists" if "already exists" in str(exc) else "ObjectTypeValidationFailed",
         ) from exc
 
-    # Write parent_workspace relationship in SpiceDB; delete Postgres row on failure to avoid orphans.
     try:
         await core.authz.write_relationship(
             resource_type="object_type",
@@ -976,11 +1008,7 @@ class ActionTypeRequest(BaseModel):
     submission_criteria: list[dict] = []
     function_side_effect: Optional[str] = None
     writeback_dataset: Optional[str] = None
-    # Function-backed Actions: exactly one of edits/edit_function, checked
-    # in `ontology.create_action_type`, not here.
     edit_function: Optional[str] = None
-    # Configure/Sections: purely a display grouping for the invocation
-    # form, structurally validated in `ontology.create_action_type`.
     sections: list[dict] = []
     type_classes: Optional[list[str]] = None
     lifecycle_status: str = "experimental"
@@ -2608,7 +2636,6 @@ async def evaluate_object_set(name: str, principal: Principal = Depends(core.cur
     if obj_set is None:
         raise HolonError.not_found('ObjectSetNotFound', f"unknown object set: {name}")
     if obj_set.get("visibility") == "hidden":
-        # Still readable by admins with ontology approve; others get 404.
         try:
             await _authorize_ontology_governance(principal, workspace_id)
         except HolonError:

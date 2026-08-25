@@ -1,18 +1,4 @@
-"""No-code SQL source registry — Postgres-wire connector registry.
-
-Targets the Postgres wire protocol specifically: PostgreSQL, Amazon
-Redshift, and CockroachDB all speak it, so one connector (via `asyncpg`,
-already a Connectivity dependency for its own DB — no new dependency)
-covers three real products.
-
-Mirrors `generic_source_registry.py`'s shape for the same reason that
-registry has it: `run_sync` dispatches over one shared `dataset`
-namespace every registry is an equal claimant on. A connection is
-mandatory for every source here (unlike the REST connector's optional
-inline auth) — a SQL source almost always shares its database with
-several sibling tables, so requiring the credential to be registered
-once, up front, is the natural default rather than an added mode.
-"""
+"""No-code SQL source registry for Postgres-wire databases."""
 
 from __future__ import annotations
 
@@ -21,7 +7,9 @@ from typing import Any, Optional
 
 import asyncpg
 
+from holon_common.connector_safety import ConnectorSafetyError, assert_connector_host, assert_connector_secret_ref
 from holon_common.secrets import resolve_optional
+from holon_common.sql_ident import quote_identifier, require_identifier
 
 DDL = """
 CREATE TABLE IF NOT EXISTS sql_connection (
@@ -55,10 +43,21 @@ CREATE TABLE IF NOT EXISTS sql_source (
 );
 """
 
-# Never bindable as a query parameter (identifiers aren't values), so a
-# table_name is validated against this instead of being trusted as-is.
-# Optionally schema-qualified (`public.orders`).
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
+_FORBIDDEN_STMT = re.compile(
+    r"\b(insert|update|delete|truncate|alter|drop|create|grant|revoke|call|execute)\b",
+    re.IGNORECASE,
+)
+_COPY_STMT = re.compile(r"(^\s*copy\b|\bcopy\s+\S+\s+(from|to)\b)", re.IGNORECASE)
+_FORBIDDEN_FUNCS = re.compile(
+    r"\b(pg_read_\w+|pg_ls_\w+|pg_file_\w+|pg_write_\w+|lo_import|lo_export|lo_get|lo_put|"
+    r"lo_from_bytea|lo_create|lo_unlink|dblink\w*|pg_sleep)\s*\(",
+    re.IGNORECASE,
+)
+_SELECT_INTO = re.compile(
+    r"\binto\s+(temp(orary)?\s+)?(table\s+)?[\"']?[A-Za-z_]",
+    re.IGNORECASE,
+)
+_FOR_LOCK = re.compile(r"\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b", re.IGNORECASE)
 
 _PUBLIC_CONNECTION_COLUMNS = (
     "tenant_id, name, host, port, database, username, (password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
@@ -95,22 +94,26 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
 
 
-def _quote_identifier(table_name: str) -> str:
-    """Wraps each dot-separated part in double quotes — safe only because
-    the caller has already validated `table_name` against `_IDENTIFIER_RE`,
-    which rejects anything containing a quote, whitespace, or semicolon."""
-    return ".".join(f'"{part}"' for part in table_name.split("."))
+_quote_identifier = quote_identifier
 
 
 def _require_select_only(query: str) -> None:
     stripped = query.strip().rstrip(";").strip()
     if ";" in stripped:
         raise SourceConfigError("query must be a single SELECT statement — no semicolons")
-    if not stripped[:6].upper() == "SELECT":
-        raise SourceConfigError("query must start with SELECT — this connector is read-only")
+    head = stripped.split(None, 1)[0].upper() if stripped else ""
+    if head not in {"SELECT", "WITH"}:
+        raise SourceConfigError("query must start with SELECT or WITH — this connector is read-only")
+    if (
+        _FORBIDDEN_STMT.search(stripped)
+        or _COPY_STMT.search(stripped)
+        or _FORBIDDEN_FUNCS.search(stripped)
+        or _FOR_LOCK.search(stripped)
+        or _SELECT_INTO.search(stripped)
+    ):
+        raise SourceConfigError("query must be a read-only SELECT — writes, locks, and file helpers are not allowed")
 
 
-# ---- connections --------------------------------------------------------
 
 
 async def register_connection(
@@ -126,12 +129,12 @@ async def register_connection(
     password: Optional[str] = None,
     secret_ref: Optional[str] = None,
 ) -> dict:
-    """A real upsert (same `name` again updates it). Omitted `password`
-    keeps the existing one — same "resolve in Python before it reaches
-    SQL" treatment `generic_source_registry.register_connection` already
-    gives its own secrets, for the same reason (an edit that doesn't
-    resend the secret must not blank it out).
-    """
+    """Register or update a SQL connection credential."""
+    try:
+        assert_connector_host(host)
+        assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceConfigError(str(exc)) from exc
     if password is None and secret_ref is None:
         existing = await pool.fetchrow(
             "SELECT password, secret_ref FROM sql_connection WHERE tenant_id = $1 AND name = $2",
@@ -183,7 +186,6 @@ async def delete_connection(pool: asyncpg.Pool, tenant_id: str, name: str) -> No
     await pool.execute("DELETE FROM sql_connection WHERE tenant_id = $1 AND name = $2", tenant_id, name)
 
 
-# ---- sources --------------------------------------------------------------
 
 
 async def register_source(
@@ -200,21 +202,19 @@ async def register_source(
     cursor_property: Optional[str] = None,
     reserved_dataset_names: frozenset[str] = frozenset(),
 ) -> dict:
-    """Same dataset-ownership guard `generic_source_registry.register_source`
-    already enforces — this registry is an equal claimant on the same
-    `dataset` namespace `run_sync` dispatches over.
-
-    Exactly one of `table_name` / `query` — same "which one would
-    `fetch_for_dataset` even trust" reasoning as that registry's
-    `connection_name` vs. inline-auth mutual exclusion.
-    """
+    """Verify dataset name availability and validate SQL source parameters."""
     if bool(table_name) == bool(query):
         raise SourceConfigError("exactly one of table_name or query must be set")
-    if table_name and not _IDENTIFIER_RE.match(table_name):
-        raise SourceConfigError(
-            f"invalid table_name {table_name!r} — must be a plain identifier, optionally schema-qualified "
-            "(e.g. 'orders' or 'public.orders'), no quotes/whitespace/punctuation"
-        )
+    if table_name:
+        try:
+            require_identifier(table_name, what="table_name")
+        except ValueError as exc:
+            raise SourceConfigError(str(exc)) from exc
+    if cursor_property:
+        try:
+            require_identifier(cursor_property, what="cursor_property")
+        except ValueError as exc:
+            raise SourceConfigError(str(exc)) from exc
     if query:
         _require_select_only(query)
     if await get_connection(pool, tenant_id, connection_name) is None:
@@ -243,6 +243,13 @@ async def register_source(
     )
     if conflicting_rest_source is not None:
         raise SourceConflictError(f"dataset {name!r} is already claimed by active REST source {conflicting_rest_source!r}")
+
+    conflicting_object_source = await pool.fetchval(
+        "SELECT name FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+        tenant_id, name,
+    )
+    if conflicting_object_source is not None:
+        raise SourceConflictError(f"dataset {name!r} is already claimed by active object source {conflicting_object_source!r}")
 
     await pool.execute(
         """
@@ -331,6 +338,10 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     )
     if connection is None:
         raise SourceFetchError(f"source {name!r} references connection {row['connection_name']!r}, which no longer exists")
+    try:
+        assert_connector_host(connection["host"])
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
     password = resolve_optional(connection["secret_ref"]) or connection["password"]
 
     try:
@@ -346,16 +357,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
                 sql = f"SELECT * FROM {_quote_identifier(row['table_name'])}"
                 args: list[Any] = []
                 if row["cursor_property"] and row["last_cursor_value"] is not None:
-                    # last_cursor_value is stored as TEXT (it started life
-                    # as whatever type the cursor column is), so a plain
-                    # `$1` bind bare-compares as text against e.g. a
-                    # timestamp/numeric column — Postgres refuses that
-                    # outright, and even where it didn't, text ordering
-                    # silently disagrees with numeric/date ordering
-                    # ("10" < "9"), which would silently drop rows rather
-                    # than error. Casting to the column's own type (looked
-                    # up from the catalog, not admin input) makes the
-                    # comparison exact instead of approximate.
+                    # Cast last_cursor_value text to column data type for accurate comparison
                     column_type = await conn.fetchval(
                         "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
                         "WHERE attrelid = $1::regclass AND attname = $2 AND NOT attisdropped",
@@ -366,7 +368,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
                             f"source {name!r}: cursor_property {row['cursor_property']!r} "
                             f"not found on table {row['table_name']!r}"
                         )
-                    sql += f' WHERE "{row["cursor_property"]}" > $1::text::{column_type}'
+                    sql += f" WHERE {quote_identifier(row['cursor_property'])} > $1::text::{column_type}"
                     args.append(row["last_cursor_value"])
             else:
                 sql = row["query"]

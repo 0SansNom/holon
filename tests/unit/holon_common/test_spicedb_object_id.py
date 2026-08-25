@@ -16,14 +16,25 @@ _prom.Histogram = lambda *a, **k: types.SimpleNamespace(observe=lambda *a, **k: 
 _prom.generate_latest = lambda *a, **k: b""
 sys.modules.setdefault("prometheus_client", _prom)
 
-from holon_common.authz import _subject, spicedb_object_id  # noqa: E402
+from holon_common.authz import _subject  # noqa: E402
+from holon_common.spicedb_id import index_by_spicedb_object_id, spicedb_object_id  # noqa: E402
 
 
-def test_spicedb_object_id_strips_colon_and_dot() -> None:
-    assert spicedb_object_id("hl:acme:main:object-type:Customer") == "hl_acme_main_object-type_Customer"
+def test_spicedb_object_id_is_injective_for_dot_vs_underscore() -> None:
+    assert spicedb_object_id("hl:acme:main:object-type:Customer") == "hl_cacme_cmain_cobject-type_cCustomer"
+    dotted = spicedb_object_id("hl:acme:global:user:jane.doe")
+    underscored = spicedb_object_id("hl:acme:global:user:jane_doe")
+    assert dotted != underscored
     assert spicedb_object_id("hl:acme:main:relation-type:Order.customer") == (
-        "hl_acme_main_relation-type_Order_customer"
+        "hl_cacme_cmain_crelation-type_cOrder_dcustomer"
     )
+
+
+def test_index_by_spicedb_object_id() -> None:
+    urn = "hl:acme:global:user:jane.doe"
+    rows = [{"urn": urn, "display_name": "Jane"}]
+    by_id = index_by_spicedb_object_id(rows)
+    assert by_id[spicedb_object_id(urn)]["display_name"] == "Jane"
 
 
 def test_lookup_permissionship_names_are_accepted() -> None:
@@ -47,4 +58,4 @@ def test_subject_includes_optional_relation_for_group_grants() -> None:
     assert "optionalRelation" not in direct
     inherited = _subject("principal", "hl:acme:global:group:readers", "member")
     assert inherited["optionalRelation"] == "member"
-    assert inherited["object"]["objectId"] == "hl_acme_global_group_readers"
+    assert inherited["object"]["objectId"] == "hl_cacme_cglobal_cgroup_creaders"

@@ -26,20 +26,17 @@ logs:
 ps:
 	$(COMPOSE) ps
 
-# Loads test-only fixture data into every fake external source system
-# (integration tests / local connector development). None of this runs on
-# a plain `make up` any more — Postgres source_erp, Mongo support_desk,
-# the CSV/reviews-api/Kafka-stream fixtures all opt in here explicitly.
-# Platform principals/plugins/ObjectTypes are never auto-seeded — see
-# `make provision-test-fixtures` for CI only.
+# Seed test-only fixture data into external source systems
 seed:
 	$(COMPOSE) exec -T postgres psql -U holon -d source_erp < tests/fixtures/sql-seed/source_erp.sql
 	$(COMPOSE) exec -T mongodb mongosh support_desk --quiet < tests/fixtures/mongo-init/init.js
 	$(COMPOSE) --profile test-fixtures up -d reviews-api
+	$(COMPOSE) --profile test-fixtures up -d oauth2-idp
 	$(COMPOSE) --profile test-fixtures run --rm csv-seed
+	$(COMPOSE) --profile test-fixtures run --rm source-s3-seed
 	$(COMPOSE) --profile test-fixtures run --rm inventory-stream-seed
 
-# CI / pytest fixtures via public APIs. Not a product feature.
+# Provision test fixtures via public APIs (CI)
 provision-test-fixtures:
 	python3 scripts/provision_test_fixtures.py
 

@@ -1,11 +1,14 @@
 """Tests for the no-code REST connector's OAuth2 client_credentials
 connection auth type.
 
-No mock OAuth2 server needed: Identity already implements a real
-client_credentials token endpoint (`POST /api/oauth2/token`) and
-`GET /principals` is a real JSON-array, bearer-auth-gated endpoint —
-together they exercise the full client_credentials + bearer-attach loop
-against real running infra, not a stub.
+Against `oauth2-idp`, a dedicated fake external IdP fixture
+(`tests/fixtures/oauth2-idp/server.py`) — deliberately not Holon's own
+Identity service: `holon_common.connector_safety` blocks every
+platform-internal hostname (identity, connectivity, knowledge, ...) by
+design, so a tenant connector must never be able to reach the
+platform's own control plane. `oauth2-idp` exercises the same real
+client_credentials + bearer-attach loop, just against a genuinely
+separate, self-contained fake external system.
 """
 
 from __future__ import annotations
@@ -29,8 +32,11 @@ _request = client.request
 
 DB_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/holon_connectivity"
 
-# Connectivity's own network view of Identity, not the test runner's.
-IDENTITY_INTERNAL = "http://identity:8000"
+# Connectivity's own network view of oauth2-idp, not the test runner's.
+OAUTH2_IDP_INTERNAL = "http://oauth2-idp:8000"
+# Must match tests/fixtures/oauth2-idp/server.py's CLIENT_ID/CLIENT_SECRET.
+OAUTH2_IDP_CLIENT_ID = "test-oauth2-client"
+OAUTH2_IDP_CLIENT_SECRET = "test-oauth2-secret"
 
 
 @pytest.fixture(scope="session")
@@ -39,15 +45,6 @@ def msmith_token() -> str:
         return client.token_for(f"hl:{TENANT_ID}:global:user:msmith")
     except TimeoutError as exc:
         pytest.fail(str(exc))
-
-
-def _create_service_account(msmith_token: str, local_name: str) -> str:
-    status, created = _request(
-        "POST", f"{IDENTITY}/principals", token=msmith_token,
-        body={"tenant_id": TENANT_ID, "type": "service_account", "local_name": local_name, "display_name": "OAuth2 test SA"},
-    )
-    assert status == 201, created
-    return created["client_secret"]
 
 
 def _oauth2_expires_at(connection_name: str):
@@ -65,18 +62,15 @@ def _oauth2_expires_at(connection_name: str):
 
 
 def test_oauth2_connection_authenticates_and_syncs_real_principal_rows(msmith_token: str) -> None:
-    local_name = _unique_name("oauth2sa")
-    client_secret = _create_service_account(msmith_token, local_name)
-
-    connection_name = _unique_name("identity_oauth2")
+    connection_name = _unique_name("oauth2_idp_conn")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=msmith_token,
         body={
             "name": connection_name,
             "auth_type": "oauth2_client_credentials",
-            "oauth2_token_url": f"{IDENTITY_INTERNAL}/api/oauth2/token",
-            "oauth2_client_id": local_name,
-            "oauth2_client_secret": client_secret,
+            "oauth2_token_url": f"{OAUTH2_IDP_INTERNAL}/token",
+            "oauth2_client_id": OAUTH2_IDP_CLIENT_ID,
+            "oauth2_client_secret": OAUTH2_IDP_CLIENT_SECRET,
         },
     )
     assert status == 200, connection
@@ -84,10 +78,10 @@ def test_oauth2_connection_authenticates_and_syncs_real_principal_rows(msmith_to
     assert "oauth2_client_secret" not in connection, connection  # never echoed back
     assert connection["has_oauth2_client_secret"] is True, connection
 
-    source_name = _unique_name("identity_principals")
+    source_name = _unique_name("oauth2_idp_principals")
     status, registration = _request(
         "POST", f"{CONNECTIVITY}/sources", token=msmith_token,
-        body={"name": source_name, "base_url": f"{IDENTITY_INTERNAL}/principals", "connection_name": connection_name},
+        body={"name": source_name, "base_url": f"{OAUTH2_IDP_INTERNAL}/principals", "connection_name": connection_name},
     )
     assert status == 200, registration
 
@@ -97,26 +91,23 @@ def test_oauth2_connection_authenticates_and_syncs_real_principal_rows(msmith_to
 
 
 def test_oauth2_wrong_client_secret_fails_sync_cleanly(msmith_token: str) -> None:
-    local_name = _unique_name("oauth2sabad")
-    _create_service_account(msmith_token, local_name)
-
-    connection_name = _unique_name("identity_oauth2_bad")
+    connection_name = _unique_name("oauth2_idp_conn_bad")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=msmith_token,
         body={
             "name": connection_name,
             "auth_type": "oauth2_client_credentials",
-            "oauth2_token_url": f"{IDENTITY_INTERNAL}/api/oauth2/token",
-            "oauth2_client_id": local_name,
+            "oauth2_token_url": f"{OAUTH2_IDP_INTERNAL}/token",
+            "oauth2_client_id": OAUTH2_IDP_CLIENT_ID,
             "oauth2_client_secret": "definitely-not-the-real-secret",
         },
     )
     assert status == 200, connection
 
-    source_name = _unique_name("identity_principals_bad")
+    source_name = _unique_name("oauth2_idp_principals_bad")
     status, registration = _request(
         "POST", f"{CONNECTIVITY}/sources", token=msmith_token,
-        body={"name": source_name, "base_url": f"{IDENTITY_INTERNAL}/principals", "connection_name": connection_name},
+        body={"name": source_name, "base_url": f"{OAUTH2_IDP_INTERNAL}/principals", "connection_name": connection_name},
     )
     assert status == 200, registration
 
@@ -126,26 +117,23 @@ def test_oauth2_wrong_client_secret_fails_sync_cleanly(msmith_token: str) -> Non
 
 
 def test_oauth2_token_is_cached_between_syncs(msmith_token: str) -> None:
-    local_name = _unique_name("oauth2sacache")
-    client_secret = _create_service_account(msmith_token, local_name)
-
-    connection_name = _unique_name("identity_oauth2_cache")
+    connection_name = _unique_name("oauth2_idp_conn_cache")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=msmith_token,
         body={
             "name": connection_name,
             "auth_type": "oauth2_client_credentials",
-            "oauth2_token_url": f"{IDENTITY_INTERNAL}/api/oauth2/token",
-            "oauth2_client_id": local_name,
-            "oauth2_client_secret": client_secret,
+            "oauth2_token_url": f"{OAUTH2_IDP_INTERNAL}/token",
+            "oauth2_client_id": OAUTH2_IDP_CLIENT_ID,
+            "oauth2_client_secret": OAUTH2_IDP_CLIENT_SECRET,
         },
     )
     assert status == 200, connection
 
-    source_name = _unique_name("identity_principals_cache")
+    source_name = _unique_name("oauth2_idp_principals_cache")
     status, registration = _request(
         "POST", f"{CONNECTIVITY}/sources", token=msmith_token,
-        body={"name": source_name, "base_url": f"{IDENTITY_INTERNAL}/principals", "connection_name": connection_name},
+        body={"name": source_name, "base_url": f"{OAUTH2_IDP_INTERNAL}/principals", "connection_name": connection_name},
     )
     assert status == 200, registration
 
