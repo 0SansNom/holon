@@ -13,6 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "identity"))
 
+from holon_common.spicedb_id import spicedb_object_id
 from app.seed import _verify_client_secret_hash, ensure_instance_bootstrap  # noqa: E402
 
 
@@ -67,7 +68,7 @@ def test_empty_db_creates_tenant_workspace_admin_and_grants():
 
 def test_usable_admin_skips_principal_create_but_touches_parent_tenant():
     admin_urn = "hl:acme:global:user:jdoe"
-    oid = admin_urn.replace(":", "_").replace(".", "_")
+    oid = spicedb_object_id(admin_urn)
 
     async def fetchrow(query, *args):
         if "FROM tenant" in query:
