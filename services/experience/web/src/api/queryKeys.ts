@@ -83,6 +83,10 @@ export const queryKeys = {
   kafkaStreams: () => ["kafkaStreams"] as const,
   syncs: () => ["syncs"] as const,
   connections: () => ["connections"] as const,
+  sqlConnections: () => ["sqlConnections"] as const,
+  sqlSources: () => ["sqlSources"] as const,
+  objectConnections: () => ["objectConnections"] as const,
+  objectSources: () => ["objectSources"] as const,
   writeTargets: () => ["writeTargets"] as const,
   pipelines: () => ["pipelines"] as const,
   pipeline: (name: string) => ["pipeline", name] as const,
@@ -90,6 +94,7 @@ export const queryKeys = {
 
   resourceTags: () => ["resourceTags"] as const,
   tools: () => ["tools"] as const,
+  bootstrapConfig: () => ["bootstrapConfig"] as const,
 } as const;
 
 export type BranchKind = "object_type" | ResourceBranchKind;

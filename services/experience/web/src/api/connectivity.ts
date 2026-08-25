@@ -78,6 +78,7 @@ export interface GenericConnection {
   name: string;
   auth_header_name: string;
   has_auth_header_value: boolean;
+  has_secret_ref?: boolean;
   created_by_urn: string;
   created_at: string;
 }
@@ -90,6 +91,103 @@ export interface RegisterConnectionRequest {
   // uses. Required in practice for a brand-new connection, enforced by
   // the create form, not by this type.
   auth_header_value?: string;
+  secret_ref?: string;
+}
+
+export interface SqlConnection {
+  tenant_id: string;
+  name: string;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  has_password: boolean;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSqlConnectionRequest {
+  name: string;
+  host: string;
+  port?: number;
+  database: string;
+  username: string;
+  password?: string;
+  secret_ref?: string;
+}
+
+export interface SqlSource {
+  tenant_id: string;
+  name: string;
+  workspace_id: string;
+  connection_name: string;
+  table_name: string | null;
+  query: string | null;
+  schedule_interval_minutes: number | null;
+  cursor_property: string | null;
+  last_cursor_value: string | null;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSqlSourceRequest {
+  name: string;
+  connection_name: string;
+  table_name?: string;
+  query?: string;
+  schedule_interval_minutes?: number;
+  cursor_property?: string;
+}
+
+export interface ObjectConnection {
+  tenant_id: string;
+  name: string;
+  endpoint: string;
+  region: string;
+  access_key_id: string;
+  path_style: boolean;
+  has_secret_access_key: boolean;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterObjectConnectionRequest {
+  name: string;
+  endpoint: string;
+  access_key_id: string;
+  region?: string;
+  path_style?: boolean;
+  secret_access_key?: string;
+  secret_ref?: string;
+}
+
+export interface ObjectSource {
+  tenant_id: string;
+  name: string;
+  workspace_id: string;
+  connection_name: string;
+  bucket: string;
+  object_key: string | null;
+  key_prefix: string | null;
+  format: "csv" | "ndjson" | "parquet" | string;
+  incremental: boolean;
+  last_synced_key: string | null;
+  schedule_interval_minutes: number | null;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterObjectSourceRequest {
+  name: string;
+  connection_name: string;
+  bucket: string;
+  format: string;
+  object_key?: string;
+  key_prefix?: string;
+  incremental?: boolean;
+  schedule_interval_minutes?: number;
 }
 
 export interface SyncResult {
@@ -197,6 +295,30 @@ export const connectivityApi = {
   listConnections: () => api.get<GenericConnection[]>(`${CONNECTIVITY_URL}/connections`),
   registerConnection: (body: RegisterConnectionRequest) => api.post<GenericConnection>(`${CONNECTIVITY_URL}/connections`, body),
   deleteConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/connections/${name}`),
+
+  listSqlConnections: () => api.get<SqlConnection[]>(`${CONNECTIVITY_URL}/sql-connections`),
+  registerSqlConnection: (body: RegisterSqlConnectionRequest) =>
+    api.post<SqlConnection>(`${CONNECTIVITY_URL}/sql-connections`, body),
+  deleteSqlConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sql-connections/${name}`),
+
+  listSqlSources: () => api.get<SqlSource[]>(`${CONNECTIVITY_URL}/sql-sources`),
+  registerSqlSource: (body: RegisterSqlSourceRequest) =>
+    api.post<SqlSource>(`${CONNECTIVITY_URL}/sql-sources`, body),
+  disableSqlSource: (name: string) => api.post<SqlSource>(`${CONNECTIVITY_URL}/sql-sources/${name}/disable`),
+  enableSqlSource: (name: string) => api.post<SqlSource>(`${CONNECTIVITY_URL}/sql-sources/${name}/enable`),
+  deleteSqlSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sql-sources/${name}`),
+
+  listObjectConnections: () => api.get<ObjectConnection[]>(`${CONNECTIVITY_URL}/object-connections`),
+  registerObjectConnection: (body: RegisterObjectConnectionRequest) =>
+    api.post<ObjectConnection>(`${CONNECTIVITY_URL}/object-connections`, body),
+  deleteObjectConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/object-connections/${name}`),
+
+  listObjectSources: () => api.get<ObjectSource[]>(`${CONNECTIVITY_URL}/object-sources`),
+  registerObjectSource: (body: RegisterObjectSourceRequest) =>
+    api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources`, body),
+  disableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/disable`),
+  enableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/enable`),
+  deleteObjectSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/object-sources/${name}`),
 
   listWriteTargets: () => api.get<WriteTarget[]>(`${CONNECTIVITY_URL}/write-targets`),
   registerWriteTarget: (body: RegisterWriteTargetRequest) =>

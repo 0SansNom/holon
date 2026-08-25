@@ -3,6 +3,10 @@ import {
   connectivityApi,
   type RegisterSourceRequest,
   type RegisterConnectionRequest,
+  type RegisterSqlConnectionRequest,
+  type RegisterSqlSourceRequest,
+  type RegisterObjectConnectionRequest,
+  type RegisterObjectSourceRequest,
   type RegisterWriteTargetRequest,
   type RegisterKafkaStreamRequest,
 } from "../connectivity";
@@ -139,6 +143,121 @@ export function useDeleteConnection() {
   return useMutation({
     mutationFn: (name: string) => connectivityApi.deleteConnection(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.connections() }),
+  });
+}
+
+export function useSqlConnections() {
+  return useSuspenseQuery({ queryKey: queryKeys.sqlConnections(), queryFn: connectivityApi.listSqlConnections });
+}
+
+export function useRegisterSqlConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterSqlConnectionRequest) => connectivityApi.registerSqlConnection(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sqlConnections() }),
+  });
+}
+
+export function useDeleteSqlConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteSqlConnection(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sqlConnections() }),
+  });
+}
+
+export function useSqlSources() {
+  return useSuspenseQuery({ queryKey: queryKeys.sqlSources(), queryFn: connectivityApi.listSqlSources });
+}
+
+export function useRegisterSqlSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterSqlSourceRequest) => connectivityApi.registerSqlSource(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sqlSources() }),
+  });
+}
+
+export function useDisableSqlSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disableSqlSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sqlSources() }),
+  });
+}
+
+export function useEnableSqlSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enableSqlSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sqlSources() }),
+  });
+}
+
+export function useDeleteSqlSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteSqlSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sqlSources() }),
+  });
+}
+
+export function useObjectConnections() {
+  return useSuspenseQuery({
+    queryKey: queryKeys.objectConnections(),
+    queryFn: connectivityApi.listObjectConnections,
+  });
+}
+
+export function useRegisterObjectConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterObjectConnectionRequest) => connectivityApi.registerObjectConnection(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectConnections() }),
+  });
+}
+
+export function useDeleteObjectConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteObjectConnection(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectConnections() }),
+  });
+}
+
+export function useObjectSources() {
+  return useSuspenseQuery({ queryKey: queryKeys.objectSources(), queryFn: connectivityApi.listObjectSources });
+}
+
+export function useRegisterObjectSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterObjectSourceRequest) => connectivityApi.registerObjectSource(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSources() }),
+  });
+}
+
+export function useDisableObjectSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disableObjectSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSources() }),
+  });
+}
+
+export function useEnableObjectSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enableObjectSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSources() }),
+  });
+}
+
+export function useDeleteObjectSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteObjectSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSources() }),
   });
 }
 
