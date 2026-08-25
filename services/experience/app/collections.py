@@ -6,32 +6,6 @@ from typing import Optional
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS collection (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (tenant_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS collection_member (
-    collection_id BIGINT NOT NULL REFERENCES collection(id) ON DELETE CASCADE,
-    resource_urn TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    added_by_urn TEXT NOT NULL,
-    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (collection_id, resource_urn)
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def create_collection(
     pool: asyncpg.Pool, *, tenant_id: str, name: str, description: str, created_by_urn: str
 ) -> dict:

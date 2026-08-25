@@ -11,7 +11,6 @@ import asyncpg
 
 from holon_common.plugin import (
     PluginConflictError,
-    ensure_schema as _shared_ensure_schema,
     find_active_by_manifest_field,
     get_registration,
     list_active_by_type,
@@ -20,10 +19,6 @@ from holon_common.plugin import (
 )
 
 BUILTIN_COMPONENT_NAMES = {"table", "detail", "kpi"}
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await _shared_ensure_schema(conn)
 
 
 async def register_ui_component_plugin(pool: asyncpg.Pool, *, entry_point: str) -> dict:
@@ -67,7 +62,6 @@ async def list_active_ui_component_plugins(pool: asyncpg.Pool) -> list[dict]:
 
 __all__ = [
     "BUILTIN_COMPONENT_NAMES",
-    "ensure_schema",
     "register_ui_component_plugin",
     "get_ui_component_registration",
     "set_ui_component_status",

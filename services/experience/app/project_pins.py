@@ -4,21 +4,6 @@ from __future__ import annotations
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS project_pin (
-    project_urn TEXT NOT NULL,
-    resource_urn TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    pinned_by_urn TEXT NOT NULL,
-    pinned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_urn, resource_urn)
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
 
 async def pin(pool: asyncpg.Pool, *, tenant_id: str, project_urn: str, resource_urn: str, pinned_by_urn: str) -> None:
     await pool.execute(
