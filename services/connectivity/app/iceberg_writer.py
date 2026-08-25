@@ -13,7 +13,7 @@ import pyarrow as pa
 from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import CommitStateUnknownException, NamespaceAlreadyExistsError, NoSuchTableError
 
-NAMESPACE = "raw"
+from holon_common.iceberg_ident import NAMESPACE, iceberg_legacy_identifier, iceberg_table_identifier
 _OVERWRITE_RETRIES = 4
 _OVERWRITE_RETRY_DELAY_SECONDS = 1.5
 
@@ -47,6 +47,7 @@ def write_snapshot(
     rows: list[dict],
     table_name: str,
     *,
+    tenant_id: str,
     catalog_uri: str,
     warehouse: str,
     s3_endpoint: str,
@@ -62,7 +63,7 @@ def write_snapshot(
     except NamespaceAlreadyExistsError:
         pass
 
-    identifier = (NAMESPACE, table_name)
+    identifier = _ensure_prefixed_identifier(catalog, tenant_id, table_name)
 
     if not rows and mode == "append":
         # Empty batch with append mode: return current table snapshot state unchanged
@@ -109,6 +110,26 @@ def write_snapshot(
         row_count=_total_records(snapshot, fallback=len(rows)),
         location=table.location(),
     )
+
+
+def _ensure_prefixed_identifier(catalog, tenant_id: str, table_name: str) -> tuple[str, str]:
+    """Rename `raw.<table>` → `raw.<tenant>__<table>` when the legacy
+    unprefixed table is the only one present (in-place upgrade).
+    """
+    new_id = iceberg_table_identifier(tenant_id, table_name)
+    try:
+        catalog.load_table(new_id)
+        return new_id
+    except NoSuchTableError:
+        pass
+    legacy_id = iceberg_legacy_identifier(table_name)
+    try:
+        catalog.rename_table(legacy_id, new_id)
+    except NoSuchTableError:
+        pass
+    except AttributeError:
+        pass
+    return new_id
 
 
 def _total_records(snapshot, *, fallback: int) -> int:
