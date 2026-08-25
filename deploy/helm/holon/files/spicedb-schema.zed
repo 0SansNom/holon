@@ -1,14 +1,6 @@
-// ReBAC schema — SAS v2 §8.1. Loaded by Identity at startup via WriteSchema.
-//
-// Deliberately: tenant membership alone does NOT grant workspace access.
-// A workspace's `read` permission comes only from an explicit `viewer` or
-// `editor` relation — this is what makes the check relational rather than
-// a flat tenant-string comparison (the thing this increment replaces).
+// ReBAC authorization schema.
 
-// Users, service accounts, agents, and groups share this type (SAS §1.4).
-// `member` is only written on group principals; a workspace/project grant
-// on a group uses `principal#member` so members inherit without a
-// per-user tuple (and a direct grant on a user is still just `principal`).
+// Users, service accounts, agents, and groups share this principal type.
 definition principal {
     relation member: principal
 }
@@ -28,14 +20,7 @@ definition workspace {
     permission approve = admin
 }
 
-// Org/Space/Project hierarchy — Project sits one tier below
-// Workspace, the same relative position Foundry's own Project sits below
-// Space. Deliberately cascading, not exclusive: a workspace-wide
-// editor/admin still has write/approve on every project inside it
-// (`parent_workspace->write`), while a project can *also* grant its own
-// direct roles to principals who aren't workspace-wide members (e.g. a
-// contractor scoped to one project only) — the union of both is what
-// `object_type`'s own permissions below inherit from.
+// Workspace and Project hierarchy definitions.
 definition project {
     relation parent_workspace: workspace
     relation viewer: principal | principal#member
@@ -51,22 +36,11 @@ definition object_type {
     relation parent_workspace: workspace
     relation parent_project: project
 
-    // A union, not an either/or: an ObjectType keeps its `parent_workspace`
-    // relation when it also gets scoped to a project (see `ontology.py`'s
-    // `_link_object_type_to_project`), so declaring a project scope only
-    // *adds* a narrower access path, it never silently revokes existing
-    // workspace-wide access. Every ObjectType seeded before  has no
-    // `parent_project` relation at all, so this is a no-op for them —
-    // existing behavior is unchanged.
     permission read = parent_workspace->read + parent_project->read
     permission write = parent_workspace->write + parent_project->write
     permission approve = parent_workspace->approve + parent_project->approve
 }
 
-// Shared Property Type — Foundry-parity resource ACL. Permissions cascade
-// from the owning workspace and an optional project pin (same parent_workspace
-// + parent_project union as object_type). Mutate paths authorize against this
-// URN after create seeds `parent_workspace`.
 definition shared_property_type {
     relation parent_workspace: workspace
     relation parent_project: project
@@ -76,9 +50,6 @@ definition shared_property_type {
     permission approve = parent_workspace->approve + parent_project->approve
 }
 
-// Value Type — Foundry space/project import parity. Same parent_workspace /
-// parent_project union as shared_property_type. Create seeds parent_workspace;
-// optional project pin imports the VT into a project scope.
 definition value_type {
     relation parent_workspace: workspace
     relation parent_project: project
@@ -88,9 +59,6 @@ definition value_type {
     permission approve = parent_workspace->approve + parent_project->approve
 }
 
-// RelationType (Foundry Link Type) — same parent_workspace / parent_project
-// union as shared_property_type. Create seeds parent_workspace; optional
-// project pin adds a narrower access path without revoking workspace-wide.
 definition relation_type {
     relation parent_workspace: workspace
     relation parent_project: project
@@ -100,13 +68,6 @@ definition relation_type {
     permission approve = parent_workspace->approve + parent_project->approve
 }
 
-// Application — same parent_workspace/parent_project union `object_type`
-// already has (added so Applications can be scoped into a Project too,
-// same "pin in project" prerequisite). Originally added workspace-only,
-// so `experience`'s own resources (previously gated only by "is this a
-// valid authenticated principal," no ReBAC check at all) got the same
-// real workspace read/write enforcement object_type already has; the
-// project tier is additive on top, never a replacement.
 definition application {
     relation parent_workspace: workspace
     relation parent_project: project
@@ -115,11 +76,7 @@ definition application {
     permission write = parent_workspace->write + parent_project->write
 }
 
-// Markings — flat clearance labels (not cascading like `project`).
-// Checked on top of object_type ReBAC: a principal needs ordinary
-// read/write *and* to satisfy each applied marking's category rule
-// (CONJUNCTIVE = all held in that category; DISJUNCTIVE = any one).
-// `admin` can grant/revoke holders and automatically satisfies `hold`.
+// Markings security labels.
 definition marking {
     relation holder: principal
     relation admin: principal

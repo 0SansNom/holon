@@ -67,6 +67,12 @@ def assert_production_posture(*, service_name: str) -> None:
             f"HOLON_ALLOW_USER_JWT_MINT must not be truthy on {service_name!r} in production (Identity only)"
         )
 
+    if _truthy("HOLON_ALLOW_LOCAL_USER_MINT"):
+        violations.append(
+            "HOLON_ALLOW_LOCAL_USER_MINT must not be truthy in production "
+            "(bypasses Identity-only user JWT minting)"
+        )
+
     if "knowledge" in name and not _truthy("HOLON_SERVING_STORE_REQUIRE_MATERIALIZED"):
         violations.append(
             "HOLON_SERVING_STORE_REQUIRE_MATERIALIZED should be truthy on Knowledge in production"

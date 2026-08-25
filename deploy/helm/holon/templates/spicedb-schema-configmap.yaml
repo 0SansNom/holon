@@ -1,9 +1,4 @@
-# identity/knowledge/experience all read HOLON_SPICEDB_SCHEMA_PATH at
-# startup (identity writes it to SpiceDB; knowledge/experience re-seed
-# their own authz relationships against it) — without this mounted, all
-# three crash on first boot. files/spicedb-schema.zed is the single
-# source of truth for the schema; the compose stack mounts this same
-# file directly.
+# Mount SpiceDB schema file for service startup and authorization seeding.
 apiVersion: v1
 kind: ConfigMap
 metadata:

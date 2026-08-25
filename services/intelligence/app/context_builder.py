@@ -18,10 +18,7 @@ from .vector_store import semantic_search
 
 logger = logging.getLogger("intelligence.context_builder")
 
-# Status-like values for a couple of illustrative ObjectTypes, mapped to
-# the property that holds them — the controlled vocabulary aggregation
-# questions are matched against. Narrow on purpose: a real per-tenant
-# equivalent would read this from ValueType/property metadata instead.
+# Controlled vocabulary property mappings
 _STATUS_VALUES_BY_OBJECT_TYPE = {
     "Order": ("status", ["pending", "shipped", "delivered"]),
     "SupportTicket": ("status", ["open", "closed"]),
@@ -118,17 +115,7 @@ async def _structural_aggregation(
 
 
 def _object_card(object_type: str, instance_id: str, data: dict) -> ContextItem:
-    """Object Card — deterministic textual rendering: the
-    same instance, version and rights always render the same text.
-
-    Indicates what's masked by permission — an agent unaware a field exists 
-    will invent one; an agent told a field exists but is forbidden correctly 
-    says 'I don't have access'. `data` comes straight from Knowledge's 
-    /objects/... endpoints, which mask confidential properties the 
-    caller's country doesn't clear. Rendered here as an explicit 
-    "forbidden" marker per field, never a bare `None` a model could 
-    mistake for "no value on record."
-    """
+    """Render deterministic textual representation of an object instance for LLM context."""
     masked_fields = set(data.get("_maskedFields") or [])
     fields = {
         k: v for k, v in data.items() if k not in ("materializedAt", "sourceLagSeconds", "degraded", "asOf", "_maskedFields")

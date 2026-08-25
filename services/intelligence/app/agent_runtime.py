@@ -20,9 +20,7 @@ from .llm_gateway import LLMClient
 
 logger = logging.getLogger("intelligence.agent_runtime")
 
-# Default budget values.
 DEFAULT_BUDGET = {"max_iterations": 10, "max_tool_calls": 25, "max_tokens": 50_000}
-# Hard ceiling — client-supplied budgets cannot exceed these (spend control).
 HARD_BUDGET_CAPS = {"max_iterations": 20, "max_tool_calls": 50, "max_tokens": 100_000}
 DEFAULT_TTL_SECONDS = 15 * 60  # interactive session
 
@@ -49,7 +47,6 @@ CREATE TABLE IF NOT EXISTS agent_turn (
 );
 """
 
-# Additive migration: loop-detection fields, added after `agent_session` already
 # shipped without them.
 _MIGRATIONS = """
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS causation_id TEXT;
@@ -57,11 +54,7 @@ ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS causation_depth INT NOT NULL 
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS chain_trigger BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS max_chain_depth INT NOT NULL DEFAULT 10;
 
---  (AIP-equivalent no-code tooling): an `agentApp` in Experience's
--- Application Builder compiles its declared tool allowlist/system-prompt
--- template into these two optional fields — `NULL` (the default) means
--- "behave exactly as before," so every pre-Phase-D caller of
--- `POST /sessions` is completely unaffected.
+-- Optional tool allowlist and custom system prompt for agent sessions.
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS allowed_tools JSONB;
 ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS system_prompt TEXT;
 """
@@ -96,8 +89,8 @@ async def create_session(
     allowed_tools: Optional[list[str]] = None,
     system_prompt: Optional[str] = None,
 ) -> dict:
+    max_chain_depth = min(max(1, max_chain_depth), 10)
     if chain_trigger and causation_depth > max_chain_depth:
-        # Enforce max_chain_depth circuit breaker for chained sessions.
         raise ValueError(
             f"refusing to start a chained agent session at causation_depth={causation_depth} "
             f"(max_chain_depth={max_chain_depth}) — loop guard"
@@ -142,7 +135,6 @@ async def get_transcript(pool: asyncpg.Pool, session_urn: str) -> list[dict]:
     rows = await pool.fetch(
         "SELECT role, content, recorded_at FROM agent_turn WHERE session_urn = $1 ORDER BY id", session_urn
     )
-    # asyncpg returns JSONB columns as unparsed strings; parse them into structured objects.
     return [{"role": row["role"], "content": json.loads(row["content"]), "recorded_at": row["recorded_at"]} for row in rows]
 
 
@@ -163,21 +155,7 @@ async def _list_tools(
     *,
     allowed_tool_names: Optional[list[str]] = None,
 ) -> tuple[list[dict], dict[str, dict]]:
-    """Compiles two sources into one tool list: Knowledge's real,
-    audited ontology Actions, and any active **agent tool plugin**
-    — a synthetic capability with no ontology
-    backing at all (see `tool_plugin_registry.py`'s module docstring).
-    Recomputed fresh every turn.
-
-    `allowed_tool_names` (an `agentApp`'s configured allowlist,
-    threaded down from `run_turn`'s session row) narrows the result to
-    just those names when given — `None` (every pre-Phase-D caller)
-    returns the full set exactly as before. Filters rather than errors on
-    an unknown name: validating that a declared name is real is
-    Experience's `application_builder.py`'s job at definition time
-    (`GET /tools`, the same list this function computes), not this
-    runtime call's.
-    """
+    """Compile allowed ontology actions and active tool plugins for an agent session."""
     response = await http.get(holon_url(knowledge_url, "/actions"), headers=headers)
     response.raise_for_status()
     tools, by_tool_name = [], {}
@@ -216,22 +194,13 @@ async def _list_tools(
 
 
 async def list_tools(pool: asyncpg.Pool, http: httpx.AsyncClient, knowledge_url: str, headers: dict) -> list[dict]:
-    """Public counterpart to `_list_tools`, for `GET /tools` —
-    the live tool-name catalog an `agentApp` surface's declared allowlist
-    is validated against, and generally useful for any caller wanting to
-    see what an agent could be configured to use, without needing the
-    internal `by_tool_name` dispatch table.
-    """
+    """Return list of available agent tools and plugins."""
     tools, _ = await _list_tools(pool, http, knowledge_url, headers)
     return tools
 
 
 async def _invoke_tool(http: httpx.AsyncClient, knowledge_url: str, headers: dict, entry: dict, tool_input: dict) -> dict:
-    """Dispatches on `entry["kind"]` — a real Knowledge Action re-hits the
-    real Action endpoint (a high-risk Action still only ever produces a
-    `pending` approval here, exactly as it would for a human caller);
-    an agent-tool plugin is loaded dynamically and invoked directly.
-    """
+    """Dispatch tool invocation to ontology Action API or tool plugin."""
     if entry["kind"] == "agent_tool_plugin":
         plugin = tool_plugin_registry.load_tool_plugin(entry["manifest"])
         body = await plugin.invoke(tool_input)
@@ -280,10 +249,7 @@ def _session_completed_event(session: dict, *, status: str, consumed: dict) -> E
 
 
 async def _finish_session(pool: asyncpg.Pool, session: dict, status: str, consumed: dict) -> None:
-    """Transactional outbox — every terminal session (completed or
-    aborted) publishes `intelligence.agent.session_completed` in the same
-    transaction as the status write.
-    """
+    """Record terminal session status and publish completion event to outbox."""
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "UPDATE agent_session SET status = $1, consumed = $2::jsonb, updated_at = now() WHERE urn = $3",

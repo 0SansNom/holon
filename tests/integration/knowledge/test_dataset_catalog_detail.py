@@ -1,4 +1,4 @@
-"""Catalog dataset detail — snapshot history and schema/stats (P1b)."""
+"""Catalog dataset detail — snapshot history and schema stats."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from conftest import CONNECTIVITY, _request, holon_url
 
 
 def _wait_for_version(jdoe_token: str, dataset_name: str, snapshot_id) -> list:
-    """Cataloguing happens asynchronously via Knowledge's Kafka consumer
-    — same convergence race as everywhere else in this suite.
-    """
+    """Wait for catalog dataset version to be processed."""
     deadline = time.monotonic() + 30
     versions: list = []
     while time.monotonic() < deadline:
@@ -25,10 +23,7 @@ def _wait_for_version(jdoe_token: str, dataset_name: str, snapshot_id) -> list:
 
 
 def test_dataset_versions_lists_full_snapshot_history(jdoe_token: str) -> None:
-    """`dataset_version` has always recorded one row per sync — this
-    just exposes it. Two syncs must show as two distinct versions,
-    newest first.
-    """
+    """Verify listing full snapshot history for a dataset."""
     status, first_sync = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "customers"})
     assert status == 200, first_sync
 
