@@ -14,32 +14,6 @@ from . import lineage, ontology, resolver, search, serving_store
 
 logger = logging.getLogger("knowledge.catalog")
 
-DDL = """
-CREATE TABLE IF NOT EXISTS dataset (
-    urn TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS dataset_version (
-    urn TEXT PRIMARY KEY,
-    dataset_urn TEXT NOT NULL REFERENCES dataset(urn),
-    tenant_id TEXT NOT NULL,
-    iceberg_namespace TEXT NOT NULL,
-    iceberg_table TEXT NOT NULL,
-    snapshot_id BIGINT NOT NULL,
-    row_count INTEGER NOT NULL,
-    location TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def list_datasets(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     rows = await pool.fetch(
         """

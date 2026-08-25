@@ -25,12 +25,10 @@ from .urns import (
     workspace_urn,
 )
 from .object_types import (
-    DDL,
     INITIAL_CLASSIFICATION,
     VALID_VISIBILITIES,
     create_object_type,
     delete_object_type,
-    ensure_schema,
     get_object_type,
     get_object_type_by_dataset,
     get_object_type_version,
@@ -139,7 +137,6 @@ from .resource_branching import (
 
 __all__ = [
     "INITIAL_CLASSIFICATION",
-    "DDL",
     "VALID_CARDINALITIES",
     "VALID_STORAGE_KINDS",
     "VALID_LIFECYCLE_STATUSES",
@@ -149,7 +146,6 @@ __all__ = [
     "object_type_urn",
     "relation_type_urn",
     "workspace_urn",
-    "ensure_schema",
     "create_object_type",
     "delete_object_type",
     "get_object_type_by_dataset",

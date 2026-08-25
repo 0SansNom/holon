@@ -11,7 +11,6 @@ import asyncpg
 
 from holon_common.plugin import (
     PluginConflictError,
-    ensure_schema as _shared_ensure_schema,
     find_active_by_manifest_field,
     get_registration,
     load_entry_point,
@@ -20,10 +19,6 @@ from holon_common.plugin import (
 )
 
 BUILTIN_FORMAT_NAMES = {"json"}
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await _shared_ensure_schema(conn)
 
 
 async def register_export_format_plugin(pool: asyncpg.Pool, *, entry_point: str) -> dict:
@@ -63,7 +58,6 @@ async def find_active_format(pool: asyncpg.Pool, format_name: str):
 
 __all__ = [
     "BUILTIN_FORMAT_NAMES",
-    "ensure_schema",
     "register_export_format_plugin",
     "get_export_format_registration",
     "set_export_format_status",

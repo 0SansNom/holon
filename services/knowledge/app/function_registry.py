@@ -11,7 +11,6 @@ import asyncpg
 
 from holon_common.plugin import (
     PluginConflictError,
-    ensure_schema as _shared_ensure_schema,
     find_active_by_manifest_field,
     get_registration,
     list_active_by_type,
@@ -19,10 +18,6 @@ from holon_common.plugin import (
     register as _shared_register,
     set_status,
 )
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await _shared_ensure_schema(conn)
 
 
 async def register_function_plugin(pool: asyncpg.Pool, *, entry_point: str) -> dict:
@@ -63,7 +58,6 @@ def load_function_plugin(manifest: dict):
 
 
 __all__ = [
-    "ensure_schema",
     "register_function_plugin",
     "get_function_plugin_registration",
     "set_function_plugin_status",

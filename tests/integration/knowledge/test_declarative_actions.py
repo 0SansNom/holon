@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from conftest import CONNECTIVITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
+from conftest import CONNECTIVITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url, resync_and_wait_for_instance
 
 REVIEWS_WITH_TAGS_API = "http://reviews-api:8000/reviews_with_tags.json"
 
@@ -36,6 +36,7 @@ def _register_sync_and_create_object_type(msmith_token: str, jdoe_token: str) ->
         },
     )
     assert status == 201, object_type
+    resync_and_wait_for_instance(token=jdoe_token, dataset=source_name, object_type=object_type_name)
     return object_type_name
 
 

@@ -11,23 +11,6 @@ from typing import Optional
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS business_glossary (
-    tenant_id TEXT NOT NULL,
-    term TEXT NOT NULL,
-    definition TEXT NOT NULL,
-    synonyms TEXT[] NOT NULL DEFAULT '{}',
-    related_object_type_urn TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, term)
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def list_terms(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     rows = await pool.fetch(
         "SELECT term, definition, synonyms, related_object_type_urn FROM business_glossary "

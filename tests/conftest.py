@@ -65,6 +65,28 @@ def holon_url(path: str = "") -> str:
     return f"{KNOWLEDGE}/api/holon{suffix}"
 
 
+def resync_and_wait_for_instance(
+    *,
+    token: str,
+    dataset: str,
+    object_type: str,
+    instance_id: str = "1",
+    timeout: float = 30,
+) -> dict:
+    """Re-sync so catalog materializes the ObjectType, then wait for a serving-store row."""
+    status, result = _request("POST", f"{CONNECTIVITY}/sync", token=token, body={"dataset": dataset})
+    assert status == 200, result
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        status, body = _request("GET", ontology_url(f"/objects/{object_type}/{instance_id}"), token=token)
+        last = (status, body)
+        if status == 200:
+            return body
+        time.sleep(1)
+    pytest.fail(f"serving store never materialized {object_type}/{instance_id}: {last}")
+
+
 def as_items(body):
     """Normalize collection responses to a list of instances."""
     if isinstance(body, list):

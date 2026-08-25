@@ -4,29 +4,6 @@ from __future__ import annotations
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS lineage_edge (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    source_urn TEXT NOT NULL,
-    target_urn TEXT NOT NULL,
-    relation TEXT NOT NULL,
-    source_column TEXT NOT NULL DEFAULT '',
-    target_property TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (source_urn, target_urn, relation)
-);
-
--- additive migrations for databases seeded before column-level lineage existed
-ALTER TABLE lineage_edge ADD COLUMN IF NOT EXISTS source_column TEXT NOT NULL DEFAULT '';
-ALTER TABLE lineage_edge ADD COLUMN IF NOT EXISTS target_property TEXT NOT NULL DEFAULT '';
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def record_edge(
     conn: asyncpg.Connection,
     tenant_id: str,
