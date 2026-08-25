@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from holon_common import (
     instrument_tracing,
     issue_token,
     make_principal_dependency,
+    mark_principal_disabled,
     outbox,
     retry_with_backoff,
     run_migrations,
@@ -64,7 +67,6 @@ from .seed import (
     list_tenants,
     list_workspaces,
     project_urn,
-    set_principal_status,
     set_tenant_status,
     set_workspace_status,
     tenant_urn,
@@ -130,8 +132,43 @@ instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
-current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
+_base_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS, check_disabled_denylist=False)
+
+
+async def current_principal(request: Request) -> Principal:
+    principal = await _base_principal(request)
+    row = await app.state.pool.fetchrow("SELECT status, tenant_id FROM principal WHERE urn = $1", principal.urn)
+    if row is None or row["status"] != "active":
+        mark_principal_disabled(principal.urn)
+        raise HolonError.unauthorized("PrincipalDisabled", "principal is disabled")
+    tenant = await get_tenant(app.state.pool, row["tenant_id"])
+    if tenant is None or tenant["status"] != "active":
+        raise HolonError.forbidden("TenantDisabled", "tenant is disabled")
+    return principal
+
+
 app.include_router(scim.router, prefix="/scim/v2")
+
+_AUTH_ATTEMPTS: OrderedDict[str, list[float]] = OrderedDict()
+_AUTH_WINDOW_SECONDS = 60.0
+_AUTH_MAX_ATTEMPTS = 10
+_AUTH_ATTEMPTS_MAX_KEYS = 4096
+
+
+def _rate_limit_auth(key: str) -> None:
+    from holon_common.security_posture import is_production
+
+    if not is_production():
+        return
+    now = time.monotonic()
+    hits = [t for t in _AUTH_ATTEMPTS.pop(key, []) if now - t < _AUTH_WINDOW_SECONDS]
+    if len(hits) >= _AUTH_MAX_ATTEMPTS:
+        _AUTH_ATTEMPTS[key] = hits
+        raise HolonError.rate_limited("RateLimited", "too many authentication attempts")
+    hits.append(now)
+    _AUTH_ATTEMPTS[key] = hits
+    while len(_AUTH_ATTEMPTS) > _AUTH_ATTEMPTS_MAX_KEYS:
+        _AUTH_ATTEMPTS.popitem(last=False)
 
 
 def _issue(principal: Principal, *, ttl_seconds: int | None = None) -> str:
@@ -169,10 +206,11 @@ async def _fetch_principal(pool: asyncpg.Pool, urn: str) -> Principal | None:
 
 async def _require_active_principal_row(urn: str) -> asyncpg.Record:
     row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
-    if row is None:
+    if row is None or row["status"] != "active":
         raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
-    if row["status"] != "active":
-        raise HolonError.forbidden('PrincipalDisabled', "principal is disabled")
+    tenant = await get_tenant(app.state.pool, row["tenant_id"])
+    if tenant is None or tenant["status"] != "active":
+        raise HolonError.unauthorized('InvalidCredentials', "invalid principal_urn or client_secret")
     return row
 
 
@@ -182,10 +220,7 @@ def _reject_group_authentication(row: asyncpg.Record) -> None:
 
 
 def _grant_subject_relation(target: Principal) -> str | None:
-    """A grant *on* a group is `group#member` so members inherit.
-
-    A grant on a user/agent/SA stays a direct `principal` userset.
-    """
+    """Map principal to SpiceDB userset (group#member vs principal directly)."""
     return "member" if target.type == "group" else None
 
 
@@ -199,8 +234,7 @@ async def _require_grant_target(urn: str, *, tenant_id: str) -> Principal:
 
 
 async def _authorize_bootstrap_governance(principal: Principal) -> None:
-    """Creating tenants (filiales) is instance-level: gated on approve of
-    the bootstrap workspace (ADR 026)."""
+    """Authorize tenant creation on the bootstrap workspace."""
     decision = await app.state.authz.authorize(
         principal,
         resource_type="workspace",
@@ -244,8 +278,7 @@ async def ready() -> dict:
 
 @app.get("/principals", response_model=list[Principal])
 async def list_principals(principal: Principal = Depends(current_principal)) -> list[Principal]:
-    """Authenticated-only: principals in the caller's tenant only
-    (multi-org isolation — ADR 026)."""
+    """List principals belonging to the caller's tenant."""
     rows = await app.state.pool.fetch(
         "SELECT * FROM principal WHERE tenant_id = $1 ORDER BY urn", principal.tenant_id
     )
@@ -254,13 +287,8 @@ async def list_principals(principal: Principal = Depends(current_principal)) -> 
 
 @app.post("/token")
 async def mint_token(request: TokenRequest) -> dict:
-    """`client_secret` verifies principal identity prior to issuing bearer tokens.
-
-    Unchanged, on purpose — this is the CLI/script/service-to-service
-    path (`HolonClient.token_for`, every test
-    fixture, internal service-account minting), none of which have a
-    cookie jar. `/login` below is the browser's own path.
-    """
+    """Register a new principal and issue API client credentials."""
+    _rate_limit_auth(request.principal_urn)
     row = await _require_active_principal_row(request.principal_urn)
     _reject_group_authentication(row)
     if not await verify_and_migrate_secret(app.state.pool, row, request.client_secret):
@@ -276,13 +304,7 @@ async def oauth2_token(
     client_secret: str = Form(...),
     scope: str = Form(""),
 ) -> dict:
-    """OAuth2 client_credentials token request — `application/x-www-form-urlencoded`,
-    per RFC 6749 §4.4.2 (every real OAuth2 provider requires this shape;
-    a JSON body is not spec-compliant here, unlike most of this API).
-
-    `client_id` may be a full principal URN or the local name (resolved
-    against the default tenant). Same JWT as `/token`.
-    """
+    """OAuth2 client_credentials token request (RFC 6749 §4.4.2)."""
     if grant_type != "client_credentials":
         raise HolonError.invalid_argument(
             "UnsupportedGrantType",
@@ -290,6 +312,7 @@ async def oauth2_token(
             grant_type=grant_type,
         )
     client_id = client_id.strip()
+    _rate_limit_auth(client_id)
     if client_id.startswith("hl:"):
         principal_urn = client_id
     else:
@@ -315,13 +338,9 @@ async def oauth2_token(
 
 @app.post("/login")
 async def login(request: TokenRequest, response: Response) -> dict:
-    """The browser's sign-in path — same credential check as `/token`,
-    but the issued JWT is set as an HttpOnly cookie instead of ever
-    appearing in a response body, so it's never reachable from page JS
-    (defeats XSS-based token theft, `localStorage`'s weakness — see
-    `holon_common.auth`'s `set_session_cookie`/module docstring).
-    """
+    """Browser login endpoint issuing an HttpOnly session cookie."""
     try:
+        _rate_limit_auth(request.principal_urn)
         row = await _require_active_principal_row(request.principal_urn)
         _reject_group_authentication(row)
         if not await verify_and_migrate_secret(app.state.pool, row, request.client_secret):
@@ -358,6 +377,31 @@ async def logout(response: Response) -> dict:
 _FEDERATED_ERROR_NAME = {"oidc": "OidcError", "saml": "SamlError"}
 
 
+async def _delete_relationship_or_reraise(
+    *,
+    resource_type: str,
+    resource_urn: str,
+    relation: str,
+    subject_urn: str,
+) -> None:
+    """Idempotently delete SpiceDB relationship, erroring on store unavailability."""
+    import httpx
+
+    try:
+        await app.state.authz.delete_relationship(
+            resource_type=resource_type,
+            resource_urn=resource_urn,
+            relation=relation,
+            subject_urn=subject_urn,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return
+        raise HolonError.unavailable("SpiceDbUnavailable", "authorization service error during grant sync") from exc
+    except httpx.RequestError as exc:
+        raise HolonError.unavailable("SpiceDbUnavailable", "authorization service unreachable during grant sync") from exc
+
+
 async def _complete_federated_login(
     *,
     protocol: str,
@@ -368,13 +412,7 @@ async def _complete_federated_login(
     workspace_roles: dict[str, str],
     frontend_redirect: str,
 ) -> RedirectResponse:
-    """Shared tail of every federated (OIDC/SAML) browser login: resolve
-    or JIT-provision the principal by its protocol's external id, sync
-    IdP group claims to workspace roles, audit, and set the session
-    cookie. `protocol` picks the linking column — OIDC keeps its own
-    `oidc_sub` (already shipped); SAML uses the shared `external_id`
-    anchor (migration 0002 — also used by SCIM's `externalId`).
-    """
+    """Complete federated OIDC/SAML login and issue session cookie."""
     lookup_column = "oidc_sub" if protocol == "oidc" else "external_id"
     audit_action = f"identity.{protocol}.login"
     error_name = _FEDERATED_ERROR_NAME[protocol]
@@ -402,16 +440,12 @@ async def _complete_federated_login(
                 display_name=display_name,
                 **{lookup_column: external_id},
             )
-        except asyncpg.UniqueViolationError:
-            created = dict(
-                await app.state.pool.fetchrow(
-                    "SELECT * FROM principal WHERE urn = $1",
-                    build_urn(tenant_id, "global", "user", local_name),
-                )
-            )
-            await app.state.pool.execute(
-                f"UPDATE principal SET {lookup_column} = $2 WHERE urn = $1", created["urn"], external_id
-            )
+        except asyncpg.UniqueViolationError as exc:
+            raise HolonError.conflict(
+                "FederatedLocalNameConflict",
+                f"{protocol} identity maps to local_name {local_name!r} which already exists; "
+                "refusing to attach this IdP subject to the existing principal",
+            ) from exc
         await app.state.authz.write_relationship(
             resource_type="tenant",
             resource_urn=tenant_urn(tenant_id),
@@ -420,7 +454,6 @@ async def _complete_federated_login(
         )
         row = await app.state.pool.fetchrow("SELECT * FROM principal WHERE urn = $1", created["urn"])
     else:
-        # Returning user: keep original DB tenant mapping
         if row["tenant_id"] != tenant_id:
             emit_audit(
                 category="identity",
@@ -441,6 +474,19 @@ async def _complete_federated_login(
 
     # Group → workspace relation sync (admin/editor/viewer). Highest privilege wins;
     # alternate relations on the same workspace are removed for this principal.
+    # Workspaces that disappeared from the IdP token are revoked (day-2 SSO).
+    desired_ids = set(workspace_roles)
+    for ws in await list_workspaces(app.state.pool, principal.tenant_id):
+        if ws["workspace_id"] in desired_ids:
+            continue
+        w_urn = workspace_urn(principal.tenant_id, ws["workspace_id"])
+        for relation in VALID_WORKSPACE_RELATIONS:
+            await _delete_relationship_or_reraise(
+                resource_type="workspace",
+                resource_urn=w_urn,
+                relation=relation,
+                subject_urn=principal.urn,
+            )
     synced: list[dict] = []
     for workspace_id, relation in workspace_roles.items():
         ws = await get_workspace(app.state.pool, workspace_id)
@@ -454,15 +500,12 @@ async def _complete_federated_login(
             subject_urn=principal.urn,
         )
         for other in VALID_WORKSPACE_RELATIONS - {relation}:
-            try:
-                await app.state.authz.delete_relationship(
-                    resource_type="workspace",
-                    resource_urn=w_urn,
-                    relation=other,
-                    subject_urn=principal.urn,
-                )
-            except Exception:
-                logger.debug("%s sync: no %s relation to delete on %s", protocol, other, workspace_id, exc_info=True)
+            await _delete_relationship_or_reraise(
+                resource_type="workspace",
+                resource_urn=w_urn,
+                relation=other,
+                subject_urn=principal.urn,
+            )
         synced.append({"workspaceId": workspace_id, "relation": relation})
         emit_audit(
             category="identity",
@@ -581,6 +624,18 @@ async def saml_acs(request: Request):
         )
         raise HolonError.unauthorized('SamlError', f"SAML assertion invalid: {exc}") from exc
 
+    assertion_id = claims.pop("_assertion_id", None)
+    if assertion_id:
+        await app.state.pool.execute(
+            "DELETE FROM saml_seen_assertion WHERE seen_at < now() - interval '1 day'"
+        )
+        inserted = await app.state.pool.fetchval(
+            "INSERT INTO saml_seen_assertion (assertion_id) VALUES ($1) "
+            "ON CONFLICT DO NOTHING RETURNING assertion_id",
+            assertion_id,
+        )
+        if inserted is None:
+            raise HolonError.unauthorized("SamlError", "SAML assertion replayed")
     tenant_id = federation.tenant_from_claims(claims, default_tenant=TENANT_ID)
     frontend = os.environ.get(
         "HOLON_SAML_POST_LOGIN_REDIRECT",
@@ -707,7 +762,6 @@ async def list_identity_audit_events(
     return {"data": rows, "nextPageToken": next_token, "pageSize": page_size}
 
 
-# ---- Multi-org provisioning (ADR 026) ---------------------------------
 
 
 class CreateTenantRequest(BaseModel):
@@ -905,7 +959,12 @@ async def principals_set_status(
         await _authorize_bootstrap_governance(principal)
     else:
         await _authorize_workspace_governance(principal, target.tenant_id, workspaces[0]["workspace_id"])
-    updated = await set_principal_status(app.state.pool, principal_urn, request.status)
+    updated = await _enqueue_principal_status_event(
+        target_principal_urn=principal_urn,
+        status=request.status,
+        actor=principal,
+        tenant_id=target.tenant_id,
+    )
     assert updated is not None
     return {k: updated[k] for k in ("urn", "type", "tenant_id", "display_name", "status")}
 
@@ -1018,12 +1077,7 @@ async def remove_group_member(
 async def _resolve_workspace_governance(
     principal: Principal, *, tenant_id: str, workspace_id: str | None
 ) -> tuple[str, str]:
-    """Authorize `approve` on a workspace in `tenant_id`.
-
-    Explicit `workspace_id` wins. Otherwise: bootstrap tenant → env
-    WORKSPACE_ID (keeps existing Admin UI / tests); other tenants → first
-    workspace the caller can approve.
-    """
+    """Authorize workspace governance permissions for a tenant."""
     if workspace_id:
         await _authorize_workspace_governance(principal, tenant_id, workspace_id)
         return tenant_id, workspace_id
@@ -1049,20 +1103,12 @@ async def _resolve_workspace_governance(
 
 
 async def _access_listing(resource_type: str, resource_urn: str, valid_relations: set[str]) -> list[dict]:
-    """The read side of ReBAC governance: enumerate a resource's direct
-    grants. SpiceDB object IDs store URNs with ':' swapped for '_', a
-    transform that is not naively reversible, so subject IDs are mapped
-    back through the principal table — which also enriches each entry
-    with the display fields an admin UI needs. A subject with no
-    principal row is an orphaned tuple (grant endpoints never validated
-    the target against the principal table); it is reported with null
-    display fields rather than silently dropped, so admins can still see
-    it — and revoke it, since the raw subject id contains no ':' and is
-    therefore round-trip safe as a `principal_urn`.
-    """
+    """Enumerate direct ReBAC grants on a resource."""
     relationships = await app.state.authz.read_relationships(resource_type=resource_type, resource_urn=resource_urn)
     rows = await app.state.pool.fetch("SELECT * FROM principal")
-    by_object_id = {r["urn"].replace(":", "_"): r for r in rows}
+    from holon_common.spicedb_id import index_by_spicedb_object_id
+
+    by_object_id = index_by_spicedb_object_id(rows)
 
     grants = []
     for rel in relationships:
@@ -1126,6 +1172,25 @@ async def _enqueue_permission_event(
             await outbox.enqueue(conn, event)
 
 
+async def _enqueue_principal_status_event(
+    *,
+    target_principal_urn: str,
+    status: str,
+    actor: Principal,
+    tenant_id: str,
+) -> dict | None:
+    from .status_events import enqueue_principal_status_event
+
+    return await enqueue_principal_status_event(
+        app.state.pool,
+        target_principal_urn=target_principal_urn,
+        status=status,
+        actor=actor,
+        tenant_id=tenant_id,
+        workspace_id=WORKSPACE_ID,
+    )
+
+
 async def _fanout_group_permission_event(
     group: Principal,
     *,
@@ -1137,10 +1202,7 @@ async def _fanout_group_permission_event(
     tenant_id: str,
     workspace_id: str | None = None,
 ) -> None:
-    """Group grants change every member's effective rights. Knowledge
-    caches decisions per acting principal — invalidate the members, not
-    just the group URN (which is never the actor on an object read).
-    """
+    """Invalidate ReBAC permission caches for group members."""
     members = await _access_listing("principal", group.urn, {"member"})
     for member in members:
         await _enqueue_permission_event(
@@ -1216,9 +1278,7 @@ async def grant_access(
 async def revoke_access(
     principal_urn: str, request: AccessRequest, principal: Principal = Depends(current_principal)
 ) -> dict:
-    """`delete_relationship` is the authoritative mutation — access is
-    already denied the moment SpiceDB confirms it.
-    """
+    """Revoke workspace access for a principal."""
     _validate_relation(request.relation)
     target = await _fetch_principal(app.state.pool, principal_urn)
     if target is None:
@@ -1279,10 +1339,7 @@ async def revoke_access(
 async def list_workspace_access(
     workspace_id: str | None = None, principal: Principal = Depends(current_principal)
 ) -> list[dict]:
-    """Who currently holds viewer/editor/admin on the workspace. Same
-    governance gate as the mutations (`approve`) — the membership list is
-    itself sensitive.
-    """
+    """List principals holding access relations on the workspace."""
     tid, wid = await _resolve_workspace_governance(
         principal, tenant_id=principal.tenant_id, workspace_id=workspace_id
     )
@@ -1300,11 +1357,7 @@ class CreateProjectRequest(BaseModel):
 
 @app.post("/projects", status_code=201)
 async def create_project_endpoint(request: CreateProjectRequest, principal: Principal = Depends(current_principal)) -> dict:
-    """Creating a project is workspace-tier governance (`approve`,
-    admin-only) — same tier as granting workspace access itself. Once
-    created, day-to-day project membership (`.../access/grant`) can be
-    delegated to a project-specific admin, not just workspace admins.
-    """
+    """Create a project within a workspace."""
     tid, wid = await _resolve_workspace_governance(
         principal, tenant_id=principal.tenant_id, workspace_id=None
     )
@@ -1337,11 +1390,7 @@ async def get_project_endpoint(name: str, principal: Principal = Depends(current
 
 
 async def _authorize_project_governance(principal: Principal, project_name: str) -> str:
-    """Cascading, same as `object_type`'s own SpiceDB permission formula:
-    a workspace admin can govern any project (`parent_workspace->approve`),
-    *and* a project can have its own directly-granted admin distinct from
-    anyone at the workspace tier — not an either/or, a union.
-    """
+    """Authorize project governance permissions."""
     projects = await list_projects(app.state.pool, principal.tenant_id)
     project = next((p for p in projects if p["name"] == project_name), None)
     if project is None:
@@ -1433,11 +1482,6 @@ async def revoke_project_access(
 
 @app.get("/projects/{name}/access")
 async def list_project_access(name: str, principal: Principal = Depends(current_principal)) -> list[dict]:
-    """Who currently holds viewer/editor/admin on the project — direct
-    grants only, exactly like the workspace listing; the workspace-tier
-    cascade stays visible through `GET /access`, not duplicated here.
-    `_authorize_project_governance` supplies both the 404 (unknown
-    project) and the 403 (caller lacks project `approve`).
-    """
+    """List principals with direct grants on the project."""
     p_urn = await _authorize_project_governance(principal, name)
     return await _access_listing("project", p_urn, VALID_PROJECT_RELATIONS)

@@ -1,19 +1,4 @@
-"""SCIM 2.0 provisioning server (RFC 7643/7644), mounted at `/scim/v2`
-(ADR 028 — supersedes the "SCIM full = later phase" line in ADR 026's
-SSO section).
-
-Closes the real gap OIDC-login group sync doesn't cover: proactive
-day-2 deprovisioning. A user disabled in the IdP does nothing to Holon
-under the OIDC-only flow until that user's own next login — which
-never happens once they're locked out upstream. `PATCH .../Users/{id}
-{"active": false}` here is how the IdP pushes that deactivation
-directly.
-
-Deliberately scoped down from the full spec: only the filter shapes
-real IdP connectors (Okta, Azure AD) actually send (`eq` on
-`userName`/`externalId`/`id`) are supported — the full SCIM filter
-grammar (`and`/`or`/`co`/`sw`/complex paths) is not implemented.
-"""
+"""SCIM 2.0 provisioning server (RFC 7643/7644), mounted at `/scim/v2`."""
 
 from __future__ import annotations
 
@@ -26,9 +11,10 @@ from urllib.parse import quote, unquote
 import asyncpg
 from fastapi import APIRouter, Depends, Request
 
-from holon_common import HolonError, build_urn
+from holon_common import HolonError, Principal, build_urn
 
-from .seed import insert_principal, set_principal_status, tenant_urn
+from .seed import insert_principal, tenant_urn
+from .status_events import enqueue_principal_status_event
 from .federation import urn_safe_local_name
 
 _USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
@@ -50,9 +36,7 @@ def scim_enabled() -> bool:
 
 
 def _scim_tenant_id() -> str:
-    """SCIM has no tenant concept of its own — one bearer token maps to
-    one IdP directory, which in Holon's multi-org model maps to one
-    tenant. Defaults to the bootstrap tenant."""
+    """Extract tenant ID for SCIM operations."""
     return os.environ.get("HOLON_SCIM_TENANT_ID") or os.environ["HOLON_TENANT_ID"]
 
 
@@ -76,7 +60,6 @@ def _scim_error(status_code: int, detail: str) -> HolonError:
     return HolonError(status_code=status_code, error_name="ScimError", detail=detail)
 
 
-# ---- filter parsing (eq only — see module docstring) -----------------
 
 _FILTER_RE = re.compile(r'^\s*(\w+)\s+eq\s+"([^"]*)"\s*$', re.IGNORECASE)
 
@@ -90,7 +73,6 @@ def parse_eq_filter(filter_str: Optional[str]) -> Optional[tuple[str, str]]:
     return match.group(1), match.group(2)
 
 
-# ---- User <-> principal mapping --------------------------------------
 
 
 def _user_resource(row: asyncpg.Record) -> dict[str, Any]:
@@ -110,9 +92,37 @@ async def _fetch_principal_row(pool: asyncpg.Pool, urn: str) -> Optional[asyncpg
     return await pool.fetchrow("SELECT * FROM principal WHERE urn = $1", urn)
 
 
+def _require_scim_tenant(row: asyncpg.Record) -> None:
+    if row["tenant_id"] != _scim_tenant_id():
+        raise _scim_error(404, "User not found")
+
+
 def _require_user_type(row: asyncpg.Record) -> None:
     if row["type"] != "user":
         raise _scim_error(404, "not a SCIM User (principal is a group/service-account/agent)")
+
+
+def _scim_actor() -> Principal:
+    tenant_id = _scim_tenant_id()
+    return Principal(
+        urn=build_urn(tenant_id, "global", "service-account", "scim-provisioner"),
+        type="service_account",
+        tenant_id=tenant_id,
+        display_name="SCIM Provisioner",
+    )
+
+
+async def _set_status_or_fail(pool: asyncpg.Pool, urn: str, status: str) -> None:
+    updated = await enqueue_principal_status_event(
+        pool,
+        target_principal_urn=urn,
+        status=status,
+        actor=_scim_actor(),
+        tenant_id=_scim_tenant_id(),
+        workspace_id=os.environ["HOLON_WORKSPACE_ID"],
+    )
+    if updated is None:
+        raise _scim_error(500, "failed to persist principal status change")
 
 
 @router.get("/Users")
@@ -174,7 +184,7 @@ async def create_user(request: Request, body: dict) -> dict:
         raise _scim_error(409, "a User with this userName already exists") from exc
 
     if not active:
-        await set_principal_status(pool, created["urn"], "disabled")
+        await _set_status_or_fail(pool, created["urn"], "disabled")
         created["status"] = "disabled"
 
     await request.app.state.authz.write_relationship(
@@ -189,14 +199,13 @@ async def get_user(request: Request, scim_id: str) -> dict:
     row = await _fetch_principal_row(request.app.state.pool, unquote(scim_id))
     if row is None:
         raise _scim_error(404, "User not found")
+    _require_scim_tenant(row)
     _require_user_type(row)
     return _user_resource(row)
 
 
 def _active_from_patch(body: dict) -> Optional[bool]:
-    """Handles both PATCH shapes real IdPs send: a per-attribute
-    `{"op": "replace", "path": "active", "value": false}` operation, and
-    Okta's path-less `{"op": "replace", "value": {"active": false}}`."""
+    """Extract active status from SCIM PATCH payload."""
     for op in body.get("Operations", []):
         path = (op.get("path") or "").lower()
         value = op.get("value")
@@ -214,11 +223,13 @@ async def patch_user(request: Request, scim_id: str, body: dict) -> dict:
     row = await _fetch_principal_row(pool, urn)
     if row is None:
         raise _scim_error(404, "User not found")
+    _require_scim_tenant(row)
     _require_user_type(row)
 
     active = _active_from_patch(body)
     if active is not None:
-        await set_principal_status(pool, urn, "active" if active else "disabled")
+        new_status = "active" if active else "disabled"
+        await _set_status_or_fail(pool, urn, new_status)
 
     row = await _fetch_principal_row(pool, urn)
     return _user_resource(row)
@@ -231,6 +242,7 @@ async def replace_user(request: Request, scim_id: str, body: dict) -> dict:
     row = await _fetch_principal_row(pool, urn)
     if row is None:
         raise _scim_error(404, "User not found")
+    _require_scim_tenant(row)
     _require_user_type(row)
 
     display_name = body.get("displayName") or (body.get("name") or {}).get("formatted")
@@ -241,7 +253,8 @@ async def replace_user(request: Request, scim_id: str, body: dict) -> dict:
         await pool.execute("UPDATE principal SET external_id = $2 WHERE urn = $1", urn, external_id)
     active = body.get("active")
     if active is not None:
-        await set_principal_status(pool, urn, "active" if active else "disabled")
+        new_status = "active" if active else "disabled"
+        await _set_status_or_fail(pool, urn, new_status)
 
     row = await _fetch_principal_row(pool, urn)
     return _user_resource(row)
@@ -249,31 +262,26 @@ async def replace_user(request: Request, scim_id: str, body: dict) -> dict:
 
 @router.delete("/Users/{scim_id}", status_code=204, response_model=None)
 async def delete_user(request: Request, scim_id: str) -> None:
-    """Soft-delete only — Holon has no principal-deletion API anywhere
-    else in the system either; SCIM DELETE maps to the same deactivation
-    PATCH already does. Most real connectors send PATCH active:false
-    instead of DELETE anyway."""
+    """Soft-delete SCIM user by setting status to disabled."""
     pool = request.app.state.pool
     urn = unquote(scim_id)
     row = await _fetch_principal_row(pool, urn)
     if row is None:
         raise _scim_error(404, "User not found")
+    _require_scim_tenant(row)
     _require_user_type(row)
-    await set_principal_status(pool, urn, "disabled")
+    await _set_status_or_fail(pool, urn, "disabled")
 
 
-# ---- Group <-> principal(type=group) mapping --------------------------
 
 
 async def _group_members(pool: asyncpg.Pool, authz, group_urn: str) -> list[dict[str, Any]]:
-    """SpiceDB object ids are URNs with `:` swapped for `_` — not
-    reversible in general (a `local_name` may itself contain `_`), so
-    this matches every known principal forward instead of trying to
-    reverse the transform (same approach `main.py::_access_listing`
-    already uses for the equivalent human-facing group-members read)."""
+    """Retrieve member principals for a group."""
     relationships = await authz.read_relationships(resource_type="principal", resource_urn=group_urn, relation="member")
     rows = await pool.fetch("SELECT urn, display_name FROM principal")
-    by_object_id = {r["urn"].replace(":", "_"): r for r in rows}
+    from holon_common.spicedb_id import index_by_spicedb_object_id
+
+    by_object_id = index_by_spicedb_object_id(rows)
     members = []
     for rel in relationships:
         subject = rel.get("subject", {}).get("object", {})
@@ -352,7 +360,8 @@ async def create_group(request: Request, body: dict) -> dict:
     )
     for member in body.get("members", []) or []:
         member_urn = unquote(member.get("value", ""))
-        if member_urn:
+        member_row = await _fetch_principal_row(pool, member_urn) if member_urn else None
+        if member_row is not None and member_row["tenant_id"] == tenant_id:
             await authz.write_relationship(
                 resource_type="principal", resource_urn=created["urn"], relation="member", subject_urn=member_urn,
             )
@@ -369,20 +378,22 @@ async def get_group(request: Request, scim_id: str) -> dict:
     row = await _fetch_principal_row(pool, urn)
     if row is None or row["type"] != "group":
         raise _scim_error(404, "Group not found")
+    if row["tenant_id"] != _scim_tenant_id():
+        raise _scim_error(404, "Group not found")
     members = await _group_members(pool, request.app.state.authz, urn)
     return _group_resource(row, members)
 
 
 @router.patch("/Groups/{scim_id}")
 async def patch_group(request: Request, scim_id: str, body: dict) -> dict:
-    """The one operation real IdPs actually send here: add/remove
-    `members`. Anything else in `Operations` is ignored rather than
-    rejected — unknown ops are common noise from connector probes."""
+    """Apply SCIM PATCH member updates to a group."""
     pool = request.app.state.pool
     authz = request.app.state.authz
     group_urn = unquote(scim_id)
     row = await _fetch_principal_row(pool, group_urn)
     if row is None or row["type"] != "group":
+        raise _scim_error(404, "Group not found")
+    if row["tenant_id"] != _scim_tenant_id():
         raise _scim_error(404, "Group not found")
 
     for op in body.get("Operations", []):
@@ -396,6 +407,9 @@ async def patch_group(request: Request, scim_id: str, body: dict) -> dict:
         for entry in values:
             member_urn = unquote(entry.get("value", "")) if isinstance(entry, dict) else unquote(str(entry))
             if not member_urn:
+                continue
+            member_row = await _fetch_principal_row(pool, member_urn)
+            if member_row is None or member_row["tenant_id"] != _scim_tenant_id():
                 continue
             if action == "add":
                 await authz.write_relationship(
@@ -411,7 +425,6 @@ async def patch_group(request: Request, scim_id: str, body: dict) -> dict:
     return _group_resource(row, members)
 
 
-# ---- discovery ---------------------------------------------------------
 
 
 @router.get("/ServiceProviderConfig")
