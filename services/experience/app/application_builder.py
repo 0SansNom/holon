@@ -42,29 +42,10 @@ CREATE TABLE IF NOT EXISTS application (
     promoted_at TIMESTAMPTZ,
     UNIQUE (tenant_id, name, version)
 );
-
--- ReBAC hardening: previously Applications had no URN and no SpiceDB
--- relation at all (any authenticated principal could read/write any
--- application). One URN per (tenant, name) — not per version, since a
--- version is an internal draft/promote detail, not a separately
--- addressable resource the way an ObjectType's URN@version is.
+-- ReBAC, project scoping, and session tracking fields for application definitions.
 ALTER TABLE application ADD COLUMN IF NOT EXISTS urn TEXT;
-
--- Project scoping — same single-valued-per-(tenant,name), not-per-
--- version shape as `urn` above (an Application's project membership is a
--- workspace-organization fact, not a governed/versioned one the way
--- ObjectType's project_urn is tied to its propose/publish lifecycle).
 ALTER TABLE application ADD COLUMN IF NOT EXISTS project_urn TEXT;
 
--- an `agentApp` session is opened under the single shared
--- `ingest-bot` agent identity (Intelligence's `POST /sessions` requires
--- the caller *be* the agent — a human principal never holds that
--- identity's credentials), so Experience must proxy every subsequent
--- turn using a freshly-minted token for that same identity. Without this
--- table, *any* authenticated principal who learned a `session_urn` could
--- drive *any other* principal's agentApp conversation, since the shared
--- agent identity alone can't distinguish who originally launched it —
--- `created_by_urn` is what `main.py`'s turn endpoint checks instead.
 CREATE TABLE IF NOT EXISTS agent_app_session (
     session_urn TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -204,16 +185,7 @@ async def _validate_definition(
     authorization: str,
     definition: dict,
 ) -> dict:
-    """An application can only declare ObjectTypes/Actions that genuinely
-    exist in Knowledge's ontology — the set of things it's even allowed to
-    bind to is bounded by the ontology API. Component names are checked the
-    identical way, against the UI component plugin registry or built-in components.
-    An `agentApp` surface's declared `tools` are checked the same way
-    again, against Intelligence's own live tool catalog (`GET /tools`) —
-    only if any are actually declared, the same "don't pay for a
-    cross-service call nothing referenced" discipline every other check
-    here already follows.
-    """
+    """Validate that application definition references valid ObjectTypes, Actions, components, and tools."""
     headers = {"Authorization": authorization}
     object_types = sorted(_referenced_object_types(definition))
     object_sets = sorted(_referenced_object_sets(definition))
@@ -335,12 +307,7 @@ async def _validate_definition(
 
 
 async def list_applications(pool: asyncpg.Pool, *, tenant_id: str) -> list[dict]:
-    """A real, previously-missing gap: an Application couldn't be
-    discovered at all without already knowing its name — every prior
-    verification in this build called `get_application` by a name it
-    already had from creating the app itself. Returns the latest version
-    of every distinct application name for this tenant.
-    """
+    """List latest versions of all applications for a tenant."""
     rows = await pool.fetch(
         """
         SELECT DISTINCT ON (name) *
@@ -363,12 +330,7 @@ async def list_applications(pool: asyncpg.Pool, *, tenant_id: str) -> list[dict]
 async def set_application_project(
     pool: asyncpg.Pool, *, tenant_id: str, name: str, project_urn: Optional[str]
 ) -> Optional[dict]:
-    """Direct set/clear — unlike ObjectType's `project_urn`, this isn't
-    tied to a propose/publish governance workflow (Applications have no
-    branching/versioned-governance lifecycle), so there's no draft to
-    stage it on. Applies to every version row for this name, same
-    "identity fact, not a per-version one" treatment `urn` already gets.
-    """
+    """Set or clear the project URN for an application."""
     await pool.execute(
         "UPDATE application SET project_urn = $1 WHERE tenant_id = $2 AND name = $3", project_urn, tenant_id, name,
     )
@@ -478,17 +440,7 @@ def resolve_object_app_object_set(application: dict) -> Optional[str]:
 
 
 def resolve_analytics_object_type(application: dict) -> Optional[str]:
-    """The **analytics** surface: a lightweight Contour/Code
-    Workbook equivalent — ad-hoc pivot/aggregate exploration, scoped to
-    one declared ObjectType per surface (`_referenced_object_types`
-    already picks this up generically via its `objectType` key, same as
-    `objectApp`, so dependency validation covers it for free). Unlike
-    `objectApp`'s single fixed read path, an analytics surface doesn't
-    pre-declare *which* query — `main.py`'s execute endpoint accepts any
-    `ExecutionRequest`-shaped body at request time, bounded only to this
-    declared ObjectType (and whatever Knowledge's own PDP allows for a
-    `join` target).
-    """
+    """Resolve declared ObjectType for analytics surface."""
     for surface in application["definition"].get("surfaces", []):
         if surface.get("type") == "analytics":
             return surface["objectType"]
@@ -496,11 +448,7 @@ def resolve_analytics_object_type(application: dict) -> Optional[str]:
 
 
 def resolve_agent_app_config(application: dict) -> Optional[dict]:
-    """The declared `tools`/`systemPrompt`/`budget` an `agentApp` surface
-    compiles into a session — already validated (real tool names, real
-    budget shape) at draft/promote time, so `main.py`'s "run" endpoints
-    can pass this straight through to Intelligence's `POST /sessions`.
-    """
+    """Resolve agentApp surface configuration (tools, system prompt, budget)."""
     surfaces = _agent_app_surfaces(application["definition"])
     return surfaces[0] if surfaces else None
 
