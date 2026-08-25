@@ -141,7 +141,6 @@ class HolonError(Exception):
             error_instance_id=error_instance_id,
         )
 
-    # ---- factories -------------------------------------------------------
 
     @classmethod
     def from_http(

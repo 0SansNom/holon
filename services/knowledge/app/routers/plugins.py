@@ -7,13 +7,25 @@ first extracted to calibrate the pattern for the rest.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from holon_common import HolonError
+from holon_common import HolonError, Principal
 from pydantic import BaseModel
 
-from .. import execution_adapter_registry, export_format_registry, function_registry
+from .. import execution_adapter_registry, export_format_registry, function_registry, ontology
 from .. import core
 
 router = APIRouter()
+
+
+async def _authorize_plugin(principal: Principal, workspace_id: str, permission: str) -> None:
+    """Workspace `permission` required to curate plugin registrations."""
+    decision = await core.authz.authorize(
+        principal,
+        resource_type="workspace",
+        resource_urn=ontology.workspace_urn(principal.tenant_id, workspace_id),
+        permission=permission,
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 class RegisterExecutionAdapterPluginRequest(BaseModel):
@@ -22,8 +34,11 @@ class RegisterExecutionAdapterPluginRequest(BaseModel):
 
 @router.post("/execution-adapter-plugins")
 async def register_execution_adapter_plugin(
-    body: RegisterExecutionAdapterPluginRequest, principal=Depends(core.current_principal)
+    body: RegisterExecutionAdapterPluginRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     try:
         return await execution_adapter_registry.register_execution_adapter_plugin(
             core.pool, entry_point=body.entry_point
@@ -33,7 +48,12 @@ async def register_execution_adapter_plugin(
 
 
 @router.get("/execution-adapter-plugins/{name}")
-async def get_execution_adapter_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def get_execution_adapter_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "read")
     registration = await execution_adapter_registry.get_execution_adapter_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('ExecutionAdapterPluginNotFound', f"no execution adapter plugin registered as {name!r}", name=name)
@@ -41,7 +61,12 @@ async def get_execution_adapter_plugin(name: str, principal=Depends(core.current
 
 
 @router.post("/execution-adapter-plugins/{name}/disable")
-async def disable_execution_adapter_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def disable_execution_adapter_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     registration = await execution_adapter_registry.get_execution_adapter_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('ExecutionAdapterPluginNotFound', f"no execution adapter plugin registered as {name!r}", name=name)
@@ -49,7 +74,12 @@ async def disable_execution_adapter_plugin(name: str, principal=Depends(core.cur
 
 
 @router.post("/execution-adapter-plugins/{name}/enable")
-async def enable_execution_adapter_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def enable_execution_adapter_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     registration = await execution_adapter_registry.get_execution_adapter_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('ExecutionAdapterPluginNotFound', f"no execution adapter plugin registered as {name!r}", name=name)
@@ -62,8 +92,11 @@ class RegisterExportFormatPluginRequest(BaseModel):
 
 @router.post("/export-format-plugins")
 async def register_export_format_plugin(
-    body: RegisterExportFormatPluginRequest, principal=Depends(core.current_principal)
+    body: RegisterExportFormatPluginRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     try:
         return await export_format_registry.register_export_format_plugin(core.pool, entry_point=body.entry_point)
     except export_format_registry.PluginConflictError as exc:
@@ -71,7 +104,12 @@ async def register_export_format_plugin(
 
 
 @router.get("/export-format-plugins/{name}")
-async def get_export_format_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def get_export_format_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "read")
     registration = await export_format_registry.get_export_format_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('ExportFormatPluginNotFound', f"no export format plugin registered as {name!r}", name=name)
@@ -79,7 +117,12 @@ async def get_export_format_plugin(name: str, principal=Depends(core.current_pri
 
 
 @router.post("/export-format-plugins/{name}/disable")
-async def disable_export_format_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def disable_export_format_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     registration = await export_format_registry.get_export_format_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('ExportFormatPluginNotFound', f"no export format plugin registered as {name!r}", name=name)
@@ -87,7 +130,12 @@ async def disable_export_format_plugin(name: str, principal=Depends(core.current
 
 
 @router.post("/export-format-plugins/{name}/enable")
-async def enable_export_format_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def enable_export_format_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     registration = await export_format_registry.get_export_format_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('ExportFormatPluginNotFound', f"no export format plugin registered as {name!r}", name=name)
@@ -100,8 +148,11 @@ class RegisterFunctionPluginRequest(BaseModel):
 
 @router.post("/function-plugins")
 async def register_function_plugin(
-    body: RegisterFunctionPluginRequest, principal=Depends(core.current_principal)
+    body: RegisterFunctionPluginRequest,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     try:
         return await function_registry.register_function_plugin(core.pool, entry_point=body.entry_point)
     except function_registry.PluginConflictError as exc:
@@ -109,7 +160,12 @@ async def register_function_plugin(
 
 
 @router.get("/function-plugins/{name}")
-async def get_function_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def get_function_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "read")
     registration = await function_registry.get_function_plugin_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('FunctionPluginNotFound', f"no function plugin registered as {name!r}", name=name)
@@ -117,7 +173,12 @@ async def get_function_plugin(name: str, principal=Depends(core.current_principa
 
 
 @router.post("/function-plugins/{name}/disable")
-async def disable_function_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def disable_function_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     registration = await function_registry.get_function_plugin_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('FunctionPluginNotFound', f"no function plugin registered as {name!r}", name=name)
@@ -125,7 +186,12 @@ async def disable_function_plugin(name: str, principal=Depends(core.current_prin
 
 
 @router.post("/function-plugins/{name}/enable")
-async def enable_function_plugin(name: str, principal=Depends(core.current_principal)) -> dict:
+async def enable_function_plugin(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    await _authorize_plugin(principal, workspace_id, "write")
     registration = await function_registry.get_function_plugin_registration(core.pool, name)
     if registration is None:
         raise HolonError.not_found('FunctionPluginNotFound', f"no function plugin registered as {name!r}", name=name)

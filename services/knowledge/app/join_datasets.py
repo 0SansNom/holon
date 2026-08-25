@@ -13,11 +13,10 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog
-from pyiceberg.exceptions import NamespaceAlreadyExistsError
+from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
 
 from holon_common import build_urn
-
-NAMESPACE = "raw"
+from holon_common.iceberg_ident import NAMESPACE, iceberg_legacy_identifier, iceberg_table_identifier
 _OVERWRITE_RETRIES = 4
 _OVERWRITE_RETRY_DELAY_SECONDS = 1.5
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -64,6 +63,7 @@ def sanitize_dataset_name(name: str) -> str:
 def create_empty_join_table(
     table_name: str,
     *,
+    tenant_id: str,
     source_column: str,
     target_column: str,
     catalog_uri: str,
@@ -104,7 +104,14 @@ def create_empty_join_table(
         ]
     )
     arrow_table = pa.Table.from_pylist([], schema=schema)
-    identifier = (NAMESPACE, table_name)
+    identifier = iceberg_table_identifier(tenant_id, table_name)
+    try:
+        catalog.load_table(identifier)
+    except NoSuchTableError:
+        try:
+            catalog.rename_table(iceberg_legacy_identifier(table_name), identifier)
+        except (NoSuchTableError, AttributeError):
+            pass
     table = catalog.create_table_if_not_exists(identifier, schema=schema)
 
     for attempt in range(1, _OVERWRITE_RETRIES + 1):

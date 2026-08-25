@@ -441,12 +441,7 @@ async def cascade_lifecycle_from_object_type(
     object_type_urn: str,
     lifecycle_status: str,
 ) -> int:
-    """Foundry: when an ObjectType becomes experimental, example, or deprecated,
-    linked RelationTypes are forced to the same status (prevents active links on
-    non-active types).
-
-    Returns the number of RelationType rows updated.
-    """
+    """Cascade lifecycle status updates from ObjectType to linked RelationTypes."""
     if lifecycle_status not in ("experimental", "deprecated", "example"):
         return 0
     if lifecycle_status in ("experimental", "example"):

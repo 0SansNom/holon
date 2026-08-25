@@ -323,7 +323,7 @@ async def list_shared_property_type_usage(pool: asyncpg.Pool, tenant_id: str, ap
 
 
 def _local_rule_from_spt(spt: dict) -> dict:
-    """Foundry delete-revert: SPT → regular local property type rule."""
+    """Convert SPT definition into local property type rule."""
     rule: dict[str, Any]
     if isinstance(spt.get("struct_properties"), dict) and spt["struct_properties"]:
         rule = {"kind": "struct", "properties": dict(spt["struct_properties"])}
@@ -495,9 +495,7 @@ async def _apply_detach_to_object_type(
 async def delete_shared_property_type(
     pool: asyncpg.Pool, *, tenant_id: str, api_name: str
 ) -> dict:
-    """Foundry parity: deleting a shared property reverts attached
-    ObjectType properties to regular (local) types, then removes the SPT.
-    """
+    """Delete shared property type and detach references from ObjectTypes."""
     current = await get_shared_property_type(pool, tenant_id, api_name)
     if current is None:
         raise ValueError(f"unknown shared property type: {api_name!r}")
