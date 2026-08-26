@@ -175,3 +175,68 @@ def test_identity_issuer_can_mint_any_authenticated_sa(monkeypatch) -> None:
         display_name="Bot",
     )
     assert issue_token(sa, "secret")
+
+
+@pytest.fixture(autouse=True)
+def _reset_revocation_denylists() -> None:
+    from holon_common.auth import reset_revocation_state
+
+    reset_revocation_state()
+    yield
+    reset_revocation_state()
+
+
+def test_issue_token_stamps_jti(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    monkeypatch.delenv("HOLON_JWT_ALG", raising=False)
+    p = Principal(urn="hl:a:global:user:x", type="user", tenant_id="a", display_name="X")
+    token = issue_token(p, "secret", allow_user=True)
+    decoded = decode_token(token, "secret")
+    assert decoded.jti
+    other = decode_token(issue_token(p, "secret", allow_user=True), "secret")
+    assert other.jti != decoded.jti
+
+
+def test_revoked_jti_is_rejected_by_principal_dependency(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    monkeypatch.delenv("HOLON_JWT_ALG", raising=False)
+    import asyncio
+
+    from holon_common.auth import make_principal_dependency, mark_jti_revoked
+
+    p = Principal(urn="hl:a:global:user:x", type="user", tenant_id="a", display_name="X")
+    token = issue_token(p, "secret", allow_user=True)
+    session = decode_token(token, "secret")
+    mark_jti_revoked(session.jti or "")
+    dep = make_principal_dependency("secret")
+
+    class _Request:
+        headers = {"authorization": f"Bearer {token}"}
+        cookies: dict = {}
+
+    with pytest.raises(HolonError) as exc:
+        asyncio.run(dep(_Request()))
+    assert exc.value.status_code == 401
+    assert exc.value.error_name == "TokenRevoked"
+
+
+def test_disabled_principal_is_rejected_by_principal_dependency(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    monkeypatch.delenv("HOLON_JWT_ALG", raising=False)
+    import asyncio
+
+    from holon_common.auth import make_principal_dependency, mark_principal_disabled
+
+    p = Principal(urn="hl:a:global:user:x", type="user", tenant_id="a", display_name="X")
+    token = issue_token(p, "secret", allow_user=True)
+    mark_principal_disabled(p.urn)
+    dep = make_principal_dependency("secret")
+
+    class _Request:
+        headers = {"authorization": f"Bearer {token}"}
+        cookies: dict = {}
+
+    with pytest.raises(HolonError) as exc:
+        asyncio.run(dep(_Request()))
+    assert exc.value.status_code == 401
+    assert exc.value.error_name == "PrincipalDisabled"

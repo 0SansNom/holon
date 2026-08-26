@@ -7,7 +7,8 @@
 #     --set ingress.host=holon.example.com \
 #     --set corsOrigins=https://holon.example.com
 #
-# Put HOLON_METRICS_TOKEN in existingSecret (not this file).
+# Put HOLON_METRICS_TOKEN, HOLON_JWT_PRIVATE_KEYS, and HOLON_JWT_PUBLIC_KEYS
+# in existingSecret (not this file).
 
 image:
   tag: "REPLACE_WITH_RELEASE_TAG" # never deploy `latest` to prod
@@ -50,14 +51,12 @@ networkPolicy:
     # allowPublicHttps: false.
     llmEgressCidrs: []
 
-# Prefer RS256 in real prod: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS
-# in existingSecret, then:
-# jwt:
-#   algorithm: RS256
-#   requireAsymmetric: true
+# RS256 is required by this overlay. Put HOLON_JWT_PRIVATE_KEYS and
+# HOLON_JWT_PUBLIC_KEYS (JSON kid→PEM maps) in existingSecret. HS256 is the
+# compose / values.yaml default only — do not weaken this overlay.
 jwt:
-  algorithm: HS256
-  requireAsymmetric: false
+  algorithm: RS256
+  requireAsymmetric: true
 
 # Prefer enabling once Prometheus Operator is installed and
 # HOLON_METRICS_TOKEN is in existingSecret:

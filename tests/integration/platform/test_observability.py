@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import urllib.error
 import urllib.request
 
@@ -13,6 +14,7 @@ SERVICES = {
     "knowledge": "http://localhost:8003",
     "experience": "http://localhost:8004",
     "automation": "http://localhost:8005",
+    "intelligence": "http://localhost:8006",
 }
 
 
@@ -29,6 +31,17 @@ def test_health_ready_live_are_distinct_routes(name: str, base_url: str) -> None
     for path in ("/health", "/ready", "/live"):
         status, _ = _get(f"{base_url}{path}")
         assert status == 200, (name, path)
+
+
+@pytest.mark.parametrize("name,base_url", SERVICES.items())
+def test_ready_probes_postgres_spicedb_and_opa(name: str, base_url: str) -> None:
+    status, body = _get(f"{base_url}/ready")
+    assert status == 200, (name, body)
+    parsed = json.loads(body.decode())
+    assert parsed["status"] == "ok", (name, parsed)
+    assert parsed["checks"]["postgres"] == "ok", (name, parsed)
+    assert parsed["checks"]["spicedb"] == "ok", (name, parsed)
+    assert parsed["checks"]["opa"] == "ok", (name, parsed)
 
 
 @pytest.mark.parametrize("name,base_url", SERVICES.items())

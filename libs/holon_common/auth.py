@@ -22,11 +22,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Mapping, Optional
+import uuid
+from typing import Any, Iterable, Mapping, Optional
 
 import jwt
 from fastapi import Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .errors import HolonError
 
@@ -34,11 +35,13 @@ COOKIE_NAME = "holon_session"
 SESSION_COOKIE_TTL_SECONDS = 3600
 SUPPORTED_JWT_ALGS = frozenset({"HS256", "RS256"})
 
-# Process-local denylist populated from identity.principal.status_changed
-# (and Identity's own status writes). JWT decode still trusts exp; this
-# closes the "disabled principal, live cookie" window on every service
-# that consumes the event — Identity also re-reads Postgres.
+# Process-local denylists populated from identity.principal.status_changed /
+# identity.token.revoked (and Identity's own writes). JWT decode still trusts
+# exp; these close the "disabled principal / logged-out session, live JWT"
+# window. Other services hydrate from Identity's snapshot on boot so a
+# restart does not revive revoked tokens. Identity also re-reads Postgres.
 _disabled_principal_urns: set[str] = set()
+_revoked_jtis: set[str] = set()
 
 
 def mark_principal_disabled(urn: str) -> None:
@@ -52,6 +55,31 @@ def mark_principal_enabled(urn: str) -> None:
 
 def is_principal_disabled(urn: str) -> bool:
     return urn in _disabled_principal_urns
+
+
+def mark_jti_revoked(jti: str) -> None:
+    if jti:
+        _revoked_jtis.add(jti)
+
+
+def is_jti_revoked(jti: str) -> bool:
+    return bool(jti) and jti in _revoked_jtis
+
+
+def replace_disabled_principal_urns(urns: Iterable[str]) -> None:
+    _disabled_principal_urns.clear()
+    _disabled_principal_urns.update(u for u in urns if u)
+
+
+def replace_revoked_jtis(jtis: Iterable[str]) -> None:
+    _revoked_jtis.clear()
+    _revoked_jtis.update(j for j in jtis if j)
+
+
+def reset_revocation_state() -> None:
+    """Test helper — empty both in-memory denylists."""
+    _disabled_principal_urns.clear()
+    _revoked_jtis.clear()
 
 
 def apply_principal_status_payload(payload: Mapping[str, Any]) -> None:
@@ -70,6 +98,11 @@ def apply_principal_status_payload(payload: Mapping[str, Any]) -> None:
         mark_principal_disabled(urn)
 
 
+def apply_token_revoked_payload(payload: Mapping[str, Any]) -> None:
+    """Apply `identity.token.revoked` to the process-local jti denylist."""
+    mark_jti_revoked(str(payload.get("jti") or ""))
+
+
 class Principal(BaseModel):
     urn: str
     type: str  # user | service_account | agent
@@ -77,6 +110,7 @@ class Principal(BaseModel):
     display_name: str
     on_behalf_of: Optional[str] = None
     country: Optional[str] = None
+    jti: Optional[str] = Field(default=None, exclude=True)
 
 
 def jwt_algorithm() -> str:
@@ -264,6 +298,7 @@ def issue_token(
         "display_name": principal.display_name,
         "on_behalf_of": principal.on_behalf_of,
         "country": principal.country,
+        "jti": str(uuid.uuid4()),
         "iat": now,
         "exp": now + ttl_seconds,
     }
@@ -303,6 +338,7 @@ def decode_token(token: str, secret: str, *, secrets: Optional[dict[str, str]] =
         display_name=payload["display_name"],
         on_behalf_of=payload.get("on_behalf_of"),
         country=payload.get("country"),
+        jti=payload.get("jti"),
     )
 
 
@@ -334,6 +370,8 @@ def make_principal_dependency(
         # Under RS256, decode_token ignores `secrets` and loads public keys
         # from the environment so verify-only pods need no private key.
         principal = decode_token(token, secret, secrets=secrets)
+        if principal.jti and is_jti_revoked(principal.jti):
+            raise HolonError.unauthorized("TokenRevoked", "token has been revoked")
         if check_disabled_denylist and is_principal_disabled(principal.urn):
             raise HolonError.unauthorized("PrincipalDisabled", "principal is disabled")
         if not principal.tenant_id:
