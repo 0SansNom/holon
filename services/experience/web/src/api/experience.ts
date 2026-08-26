@@ -33,7 +33,15 @@ export interface DashboardResponse {
   widgets: DashboardWidget[];
 }
 
+export interface BootstrapConfig {
+  tenant_id: string;
+  workspace_id: string;
+  intelligence_enabled: boolean;
+  require_connector_secret_ref: boolean;
+}
+
 export const experienceApi = {
+  getConfig: () => api.get<BootstrapConfig>(`${EXPERIENCE_URL}/api/config`),
   listApplications: () => api.get<Application[]>(`${EXPERIENCE_URL}/api/applications`),
   createOrUpdateApplication: (name: string, definition: ApplicationDefinition) =>
     api.post<Application>(`${EXPERIENCE_URL}/api/applications/${name}`, { definition }),

@@ -3,6 +3,14 @@ import { experienceApi, type ApplicationDefinition } from "../experience";
 import { queryKeys } from "../queryKeys";
 import { useOptionalSuspenseQuery } from "../optionalSuspenseQuery";
 
+export function useBootstrapConfig() {
+  return useQuery({
+    queryKey: queryKeys.bootstrapConfig(),
+    queryFn: experienceApi.getConfig,
+    staleTime: Infinity,
+  });
+}
+
 export function useApplications() {
   return useSuspenseQuery({ queryKey: queryKeys.applications(), queryFn: experienceApi.listApplications });
 }

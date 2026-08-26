@@ -185,6 +185,38 @@ def _assert_not_platform_secret_name(name: str) -> None:
             raise ConnectorSafetyError("secret_ref must not resolve a platform secret")
 
 
+def assert_no_inline_connector_secret(value: Optional[str], *, field: str) -> None:
+    """Refuse plaintext connector secrets in the request body when production.
+
+    Existing stored values may be kept on edit (caller omits the field).
+    Rotate them via secret_ref.
+    """
+    if value is None or not str(value).strip():
+        return
+    from .security_posture import is_production
+
+    if is_production():
+        raise ConnectorSafetyError(
+            f"{field} cannot be sent in the request body in production — use secret_ref"
+        )
+
+
+def assert_production_requires_secret_ref(ref: Optional[str], *, is_update: bool) -> None:
+    """Brand-new connector credentials in production must be a secret_ref.
+
+    Edits may omit the field to keep a previously stored value (plaintext
+    included) until the operator rotates onto secret_ref.
+    """
+    if is_update:
+        return
+    if ref is not None and str(ref).strip():
+        return
+    from .security_posture import is_production
+
+    if is_production():
+        raise ConnectorSafetyError("secret_ref is required in production")
+
+
 def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
     """Tenant-supplied secret_ref must not resolve platform credentials."""
     if ref is None or ref == "":

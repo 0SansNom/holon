@@ -12,7 +12,14 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 import asyncpg
 import httpx
 
-from holon_common.connector_safety import ConnectorSafetyError, assert_http_url, same_origin
+from holon_common.connector_safety import (
+    ConnectorSafetyError,
+    assert_connector_secret_ref,
+    assert_http_url,
+    assert_no_inline_connector_secret,
+    assert_production_requires_secret_ref,
+    same_origin,
+)
 from holon_common.secrets import resolve_optional
 
 DDL = """
@@ -79,6 +86,7 @@ _PUBLIC_COLUMNS = (
 
 _CONNECTION_PUBLIC_COLUMNS = (
     "tenant_id, name, auth_type, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
+    "(secret_ref IS NOT NULL) AS has_secret_ref, "
     "oauth2_token_url, oauth2_client_id, (oauth2_client_secret IS NOT NULL) AS has_oauth2_client_secret, oauth2_scope, "
     "created_by_urn, created_at"
 )
@@ -127,6 +135,7 @@ async def register_connection(
     oauth2_client_id: Optional[str] = None,
     oauth2_client_secret: Optional[str] = None,
     oauth2_scope: Optional[str] = None,
+    secret_ref: Optional[str] = None,
 ) -> dict:
     """Register or update a REST connection credential."""
     if auth_type not in _VALID_CONNECTION_AUTH_TYPES:
@@ -139,23 +148,37 @@ async def register_connection(
         )
 
     existing = await pool.fetchrow(
-        "SELECT auth_header_value, oauth2_client_secret FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
+        "SELECT auth_header_value, oauth2_client_secret, secret_ref FROM generic_rest_connection "
+        "WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
+    is_update = existing is not None
+    try:
+        assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
+        assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
+        assert_no_inline_connector_secret(oauth2_client_secret, field="oauth2_client_secret")
+    except ConnectorSafetyError as exc:
+        raise SourceConfigError(str(exc)) from exc
     if auth_header_value is None and existing is not None:
         auth_header_value = existing["auth_header_value"]
     if oauth2_client_secret is None and existing is not None:
         oauth2_client_secret = existing["oauth2_client_secret"]
-    if auth_type == "oauth2_client_credentials" and not oauth2_client_secret:
-        raise SourceConfigError("auth_type='oauth2_client_credentials' requires oauth2_client_secret")
+    if secret_ref is None and existing is not None:
+        secret_ref = existing["secret_ref"]
+    try:
+        assert_production_requires_secret_ref(secret_ref, is_update=is_update)
+    except ConnectorSafetyError as exc:
+        raise SourceConfigError(str(exc)) from exc
+    if auth_type == "oauth2_client_credentials" and not oauth2_client_secret and not secret_ref:
+        raise SourceConfigError("auth_type='oauth2_client_credentials' requires oauth2_client_secret or secret_ref")
 
     await pool.execute(
         """
         INSERT INTO generic_rest_connection (
             tenant_id, name, auth_type, auth_header_name, auth_header_value,
-            oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, created_by_urn
+            oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, secret_ref, created_by_urn
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
             auth_type = EXCLUDED.auth_type,
             auth_header_name = EXCLUDED.auth_header_name,
@@ -164,13 +187,14 @@ async def register_connection(
             oauth2_client_id = EXCLUDED.oauth2_client_id,
             oauth2_client_secret = EXCLUDED.oauth2_client_secret,
             oauth2_scope = EXCLUDED.oauth2_scope,
+            secret_ref = EXCLUDED.secret_ref,
             -- A re-registration changes credentials; the cached token
             -- from the old ones must not survive it.
             oauth2_cached_token = NULL,
             oauth2_token_expires_at = NULL
         """,
         tenant_id, name, auth_type, auth_header_name, auth_header_value,
-        oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, created_by_urn,
+        oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, secret_ref, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -222,6 +246,10 @@ async def register_source(
     reserved_dataset_names: frozenset[str] = frozenset(),
 ) -> dict:
     """Verify dataset name availability and validate REST source parameters."""
+    try:
+        assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
+    except ConnectorSafetyError as exc:
+        raise SourceConfigError(str(exc)) from exc
     if connection_name and (auth_header_name or auth_header_value):
         raise SourceConfigError(
             "a source can use a named connection or its own inline auth header, not both — "

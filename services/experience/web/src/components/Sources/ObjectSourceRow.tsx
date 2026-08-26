@@ -1,29 +1,30 @@
 import { useState } from "react";
 import { Alert, Button, Card, Switch, Tag } from "@blueprintjs/core";
-import { useSyncDataset, useDisableSource, useEnableSource, useDeleteSource } from "../../api/hooks";
+import { useSyncDataset, useDisableObjectSource, useEnableObjectSource, useDeleteObjectSource } from "../../api/hooks";
 import { ApiError } from "../../api/client";
-import type { GenericSource } from "../../api/connectivity";
+import type { ObjectSource } from "../../api/connectivity";
 import { nextSyncDescription } from "./shared";
 import { CreateObjectTypeDialog } from "./CreateObjectTypeDialog";
 
-export function SourceRow({
+export function ObjectSourceRow({
   source,
   lastSync,
   onEdit,
 }: {
-  source: GenericSource;
+  source: ObjectSource;
   lastSync: { rowCount: number; finishedAt: string } | undefined;
   onEdit: () => void;
 }) {
   const sync = useSyncDataset();
-  const disable = useDisableSource();
-  const enable = useEnableSource();
-  const del = useDeleteSource();
+  const disable = useDisableObjectSource();
+  const enable = useEnableObjectSource();
+  const del = useDeleteObjectSource();
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [creatingType, setCreatingType] = useState(false);
 
   const busy = sync.isPending || disable.isPending || enable.isPending || del.isPending;
+  const pathLabel = source.object_key ?? `${source.key_prefix}*`;
 
   async function syncNow() {
     setResult(null);
@@ -50,20 +51,24 @@ export function SourceRow({
       <div className="hl-source-row-header">
         <div>
           <strong>{source.name}</strong>
-          <div className="hl-mono hl-text-muted-sm hl-mt-xs">{source.base_url}</div>
+          <div className="hl-mono hl-text-muted-sm hl-mt-xs">
+            s3://{source.bucket}/{pathLabel}
+          </div>
           <div className="hl-tag-row hl-mt-xs">
-            {source.connection_name && <Tag minimal icon="link">{source.connection_name}</Tag>}
-            {!source.connection_name && source.auth_header_name && <Tag minimal icon="key">{source.auth_header_name}</Tag>}
-            {source.record_path && <Tag minimal icon="key-tab">{source.record_path}</Tag>}
-            {source.next_page_path && <Tag minimal icon="numbered-list">paginated</Tag>}
+            <Tag minimal icon="cloud">
+              {source.format}
+            </Tag>
+            <Tag minimal icon="link">
+              {source.connection_name}
+            </Tag>
+            {source.incremental && (
+              <Tag minimal icon="fast-forward">
+                incremental
+              </Tag>
+            )}
             {source.schedule_interval_minutes != null && (
               <Tag minimal icon="time">
                 every {source.schedule_interval_minutes}min
-              </Tag>
-            )}
-            {source.cursor_property && source.incremental_param && (
-              <Tag minimal icon="fast-forward" title={`Watches ${source.cursor_property}, sent as ${source.incremental_param}`}>
-                incremental
               </Tag>
             )}
           </div>
@@ -113,8 +118,8 @@ export function SourceRow({
         onCancel={() => setConfirmingDelete(false)}
       >
         <p>
-          Delete <strong>{source.name}</strong>? Its configuration is removed permanently — already-synced data in
-          Iceberg is not affected, but you'd need to reconnect from scratch to sync it again.
+          Delete <strong>{source.name}</strong>? Its configuration is removed permanently — already-synced Iceberg data
+          is kept.
         </p>
       </Alert>
       {creatingType && <CreateObjectTypeDialog datasetName={source.name} onClose={() => setCreatingType(false)} />}

@@ -1122,6 +1122,7 @@ class RegisterConnectionRequest(BaseModel):
     # Optional; if omitted on edit, existing secret is retained
     oauth2_client_secret: Optional[str] = None
     oauth2_scope: Optional[str] = None
+    secret_ref: Optional[str] = None
 
 
 @app.post("/connections")
@@ -1140,6 +1141,7 @@ async def register_connection(body: RegisterConnectionRequest, principal: Princi
             oauth2_client_id=body.oauth2_client_id,
             oauth2_client_secret=body.oauth2_client_secret,
             oauth2_scope=body.oauth2_scope,
+            secret_ref=body.secret_ref,
             created_by_urn=principal.urn,
         )
     except generic_source_registry.SourceConfigError as exc:

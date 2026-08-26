@@ -34,6 +34,7 @@ from holon_common import (
     parse_urn,
     retry_with_backoff,
     run_migrations,
+    is_production,
 )
 from holon_common.principal_status import (
     consume_identity_auth_events,
@@ -303,6 +304,7 @@ async def config() -> dict:
         "tenant_id": TENANT_ID,
         "workspace_id": WORKSPACE_ID,
         "intelligence_enabled": _intelligence_enabled(),
+        "require_connector_secret_ref": is_production(),
     }
 
 

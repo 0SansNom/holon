@@ -10,7 +10,7 @@ import {
   Icon,
   InputGroup,
 } from "@blueprintjs/core";
-import { useRegisterSource, useSyncDataset, useConnections } from "../../api/hooks";
+import { useRegisterSource, useSyncDataset, useConnections, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { GenericSource } from "../../api/connectivity";
 import { type AuthMethod, EMPTY_FORM, formFromSource } from "./shared";
@@ -30,9 +30,13 @@ export function ConnectSourceDialog({ editing, onClose }: { editing: GenericSour
   const register = useRegisterSource();
   const sync = useSyncDataset();
   const { data: connections } = useConnections();
+  const { data: bootstrap } = useBootstrapConfig();
+  const requireSecretRef = bootstrap?.require_connector_secret_ref === true;
 
   const busy = register.isPending || sync.isPending;
   const isEditing = editing !== null;
+  const authMethod: AuthMethod =
+    requireSecretRef && form.authMethod === "inline" ? "connection" : form.authMethod;
 
   async function connectAndSync() {
     setError(null);
@@ -40,9 +44,9 @@ export function ConnectSourceDialog({ editing, onClose }: { editing: GenericSour
       await register.mutateAsync({
         name: form.name,
         base_url: form.baseUrl,
-        connection_name: form.authMethod === "connection" ? form.connectionName || undefined : undefined,
-        auth_header_name: form.authMethod === "inline" ? form.authHeaderName || undefined : undefined,
-        auth_header_value: form.authMethod === "inline" ? form.authHeaderValue || undefined : undefined,
+        connection_name: authMethod === "connection" ? form.connectionName || undefined : undefined,
+        auth_header_name: authMethod === "inline" ? form.authHeaderName || undefined : undefined,
+        auth_header_value: authMethod === "inline" ? form.authHeaderValue || undefined : undefined,
         record_path: form.recordPath || undefined,
         next_page_path: form.nextPagePath || undefined,
         schedule_interval_minutes: form.scheduleIntervalMinutes ? Number(form.scheduleIntervalMinutes) : undefined,
@@ -119,15 +123,15 @@ export function ConnectSourceDialog({ editing, onClose }: { editing: GenericSour
         <FormGroup label="Authentication">
           <HTMLSelect
             fill
-            value={form.authMethod}
+            value={authMethod}
             onChange={(e) => setForm((f) => ({ ...f, authMethod: e.target.value as AuthMethod }))}
           >
             <option value="none">None</option>
             <option value="connection">Saved connection</option>
-            <option value="inline">One-time header</option>
+            {!requireSecretRef && <option value="inline">One-time header</option>}
           </HTMLSelect>
         </FormGroup>
-        {form.authMethod === "connection" && (
+        {authMethod === "connection" && (
           <FormGroup
             label="Connection"
             helperText={
@@ -150,7 +154,7 @@ export function ConnectSourceDialog({ editing, onClose }: { editing: GenericSour
             </HTMLSelect>
           </FormGroup>
         )}
-        {form.authMethod === "inline" && (
+        {authMethod === "inline" && (
           <>
             <FormGroup label="Auth header name" helperText='e.g. "Authorization" or "X-API-Key"'>
               <InputGroup
@@ -240,7 +244,7 @@ export function ConnectSourceDialog({ editing, onClose }: { editing: GenericSour
             <Button
               intent="primary"
               loading={busy}
-              disabled={!form.name || !form.baseUrl || (form.authMethod === "connection" && !form.connectionName)}
+              disabled={!form.name || !form.baseUrl || (authMethod === "connection" && !form.connectionName)}
               onClick={() => void connectAndSync()}
             >
               {isEditing ? "Save & sync" : "Connect & sync"}
