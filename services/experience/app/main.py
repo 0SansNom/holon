@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -40,14 +40,11 @@ from holon_common.principal_status import (
     hydrate_revocation_snapshot,
     make_principal_status_consumer,
 )
-from holon_common.readiness import check_kafka_bootstrap, check_opa, check_postgres, check_spicedb, report_ready
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
-from holon_common.audit_store import (
-    ensure_schema as ensure_audit_schema,
-    install_durable_audit,
-    list_events_page,
-)
+from holon_common.audit_store import install_durable_audit, list_events_page
+from holon_common.auth import COOKIE_NAME
 from holon_common.authz import PermissionClient
+from holon_common.readiness import check_kafka_bootstrap, check_opa, check_postgres, check_spicedb, report_ready
 
 from . import application_builder, project_pins, resource_tags, ui_component_registry
 from . import collections as resource_collections
@@ -102,13 +99,7 @@ async def lifespan(app: FastAPI):
     app.state.breaker = CircuitBreaker(name="experience-proxy", failure_threshold=5, cooldown_seconds=30.0)
 
     app.state.pool = await create_pool(DB_URL)
-    async with app.state.pool.acquire() as conn:
-        await application_builder.ensure_schema(conn)
-        await ui_component_registry.ensure_schema(conn)
-        await resource_tags.ensure_schema(conn)
-        await project_pins.ensure_schema(conn)
-        await resource_collections.ensure_schema(conn)
-        await ensure_audit_schema(conn)
+    # Experience-owned tables live in app/migrations/0000_baseline.sql.
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
     clear_durable_audit_hooks()
@@ -149,6 +140,23 @@ instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
+
+
+def _upstream_authorization(request: Request) -> Optional[str]:
+    """Forward the caller's JWT to Knowledge/Intelligence.
+
+    HTTP tests mint a Bearer token. The SPA only has the HttpOnly
+    `holon_session` cookie — without this rewrite, Application surfaces
+    hit Knowledge unauthenticated while Object Explorer (generic `_relay`)
+    still works.
+    """
+    authorization = request.headers.get("authorization")
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        return f"Bearer {cookie}"
+    return None
 
 
 async def _proxy(method: str, url: str, *, authorization: Optional[str] = None, json: Optional[dict] = None) -> Response:
@@ -244,17 +252,23 @@ async def proxy_identity(path: str, request: Request) -> Response:
 
 
 @app.api_route("/api/connectivity/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-async def proxy_connectivity(path: str, request: Request) -> Response:
+async def proxy_connectivity(
+    path: str, request: Request, _: Principal = Depends(current_principal)
+) -> Response:
     return await _relay(CONNECTIVITY_URL, path, request)
 
 
 @app.api_route("/api/knowledge/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-async def proxy_knowledge(path: str, request: Request) -> Response:
+async def proxy_knowledge(
+    path: str, request: Request, _: Principal = Depends(current_principal)
+) -> Response:
     return await _relay(KNOWLEDGE_URL, path, request)
 
 
 @app.api_route("/api/intelligence/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-async def proxy_intelligence(path: str, request: Request) -> Response:
+async def proxy_intelligence(
+    path: str, request: Request, _: Principal = Depends(current_principal)
+) -> Response:
     return await _relay(INTELLIGENCE_URL, path, request)
 
 
@@ -317,11 +331,13 @@ async def list_experience_audit_events(
 
 
 @app.get("/api/lineage/{urn:path}")
-async def get_lineage(urn: str, request: Request) -> Response:
+async def get_lineage(
+    urn: str, request: Request, _: Principal = Depends(current_principal)
+) -> Response:
     return await _proxy(
         "GET",
         f"{KNOWLEDGE_URL}/api/holon/lineage/{urn}",
-        authorization=request.headers.get("authorization"),
+        authorization=_upstream_authorization(request),
     )
 
 
@@ -441,7 +457,7 @@ async def create_or_update_application(
         if not decision.allowed:
             raise HolonError.forbidden("PermissionDenied", decision.reason)
 
-    authorization = http_request.headers.get("authorization", "")
+    authorization = _upstream_authorization(http_request) or ""
     try:
         result = await application_builder.create_or_update_draft(
             app.state.pool,
@@ -730,7 +746,7 @@ async def promote_application(
     name: str, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
     await _get_application_or_404(name, principal, permission="write")
-    authorization = http_request.headers.get("authorization", "")
+    authorization = _upstream_authorization(http_request) or ""
     try:
         result = await application_builder.promote(
             app.state.pool,
@@ -786,7 +802,7 @@ async def application_list_data(
     object_type = application_builder.resolve_object_app_object_type(application)
     if object_type is None:
         raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no objectApp surface")
-    authorization = http_request.headers.get("authorization")
+    authorization = _upstream_authorization(http_request)
     object_set = application_builder.resolve_object_app_object_set(application)
     if object_set:
         status_code, body = await _get_json(
@@ -818,7 +834,7 @@ async def application_detail_data(
     return await _proxy(
         "GET",
         f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{object_type}/{instance_id}",
-        authorization=http_request.headers.get("authorization"),
+        authorization=_upstream_authorization(http_request),
     )
 
 
@@ -844,7 +860,7 @@ async def application_invoke_action(
             action_name=action_name,
         )
 
-    authorization = http_request.headers.get("authorization")
+    authorization = _upstream_authorization(http_request)
     full_name = f"{object_type}.{action_name}"
     body = await http_request.json()
     return await _proxy(
@@ -861,7 +877,7 @@ async def application_dashboard(
 ) -> dict:
     """Fetch read-only widget data for application dashboard surface."""
     application = await _get_application_or_404(name, principal)
-    authorization = http_request.headers.get("authorization")
+    authorization = _upstream_authorization(http_request)
     widgets_out = []
     for widget in application_builder.get_dashboard_widgets(application):
         object_set = widget.get("objectSet")
@@ -952,7 +968,7 @@ async def application_analytics_execute(
             got_object_type=body.get("object_type"),
         )
     return await _proxy(
-        "POST", f"{KNOWLEDGE_URL}/api/holon/execute", authorization=http_request.headers.get("authorization"), json=body
+        "POST", f"{KNOWLEDGE_URL}/api/holon/execute", authorization=_upstream_authorization(http_request), json=body
     )
 
 
@@ -965,7 +981,9 @@ async def application_analytics_replay(
     if application_builder.resolve_analytics_object_type(application) is None:
         raise HolonError.invalid_argument('ApplicationSurfaceMissing', f"application {name!r} declares no analytics surface")
     return await _proxy(
-        "POST", f"{KNOWLEDGE_URL}/api/holon/execute/{plan_hash}/replay", authorization=http_request.headers.get("authorization")
+        "POST",
+        f"{KNOWLEDGE_URL}/api/holon/execute/{plan_hash}/replay",
+        authorization=_upstream_authorization(http_request),
     )
 
 
@@ -1001,7 +1019,7 @@ async def submit_application_form(
     return await _proxy(
         "POST",
         f"{KNOWLEDGE_URL}/api/ontologies/{WORKSPACE_ID}/objects/{object_type}/{instance_id}/actions/{local_action_name}",
-        authorization=http_request.headers.get("authorization"),
+        authorization=_upstream_authorization(http_request),
         json=submitted,
     )
 
@@ -1109,6 +1127,36 @@ async def enable_ui_component_plugin(name: str, principal: Principal = Depends(c
     return await ui_component_registry.set_ui_component_status(app.state.pool, name, "active")
 
 
+# Hashed Vite chunks under /assets/ can be cached forever. index.html and
+# unhashed files must revalidate — a cached shell after `npm run build`
+# points at deleted filenames.
+_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+_HTML_CACHE_CONTROL = "no-cache, must-revalidate"
+_STATIC_ASSET_SUFFIXES = {
+    ".css",
+    ".eot",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".map",
+    ".png",
+    ".svg",
+    ".ttf",
+    ".webp",
+    ".woff",
+    ".woff2",
+}
+
+
+def _looks_like_static_asset(full_path: str) -> bool:
+    if full_path.startswith("assets/"):
+        return True
+    return Path(full_path).suffix.lower() in _STATIC_ASSET_SUFFIXES
+
+
 @app.get("/{full_path:path}")
 async def spa(full_path: str) -> FileResponse:
     """SPA shell + static asset server.
@@ -1117,10 +1165,14 @@ async def spa(full_path: str) -> FileResponse:
     Serves the requested file if it exists under STATIC_DIR (built JS/CSS
     chunks, favicon, ...); otherwise falls back to index.html so the
     client-side router can render deep links (e.g. a hard refresh on
-    `/applications/foo`).
+    `/applications/foo`). Missing hashed assets return 404 — never HTML —
+    so a stale import does not execute the shell as a module.
     """
     index = STATIC_DIR / "index.html"
     candidate = (STATIC_DIR / full_path).resolve()
     if full_path and candidate.is_file() and STATIC_DIR.resolve() in candidate.parents:
-        return FileResponse(candidate)
-    return FileResponse(index)
+        cache = _ASSET_CACHE_CONTROL if full_path.startswith("assets/") else _HTML_CACHE_CONTROL
+        return FileResponse(candidate, headers={"Cache-Control": cache})
+    if _looks_like_static_asset(full_path):
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(index, headers={"Cache-Control": _HTML_CACHE_CONTROL})
