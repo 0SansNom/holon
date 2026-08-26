@@ -29,6 +29,7 @@ import {
 import { FormattedValue } from "../common/PropertyFormat";
 import { applyConditionalStyle, camelToSnake } from "../common/propertyFormatUtils";
 import { DetailPage } from "../common/PageLayout";
+import { TablePageSkeleton } from "../common/Skeleton";
 import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
 import { getErrorMessage } from "../../api/client";
 import {
@@ -91,7 +92,7 @@ export function ObjectTablePage() {
   });
   const navigate = useNavigate();
   const principalUrn = useAuthStore((s) => s.session?.principal.urn);
-  const { data: objectType } = useObjectType(type);
+  const { data: objectType, isPending: objectTypePending } = useObjectType(type);
   const { data: objectSets = [] } = useObjectSets();
   const { data: evaluated, isFetching: evaluating, error: evaluateError } = useEvaluateObjectSet(
     setName ?? "",
@@ -579,6 +580,10 @@ export function ObjectTablePage() {
   const actionBusy = invokeAction.isPending || invokeActionBatch.isPending;
   const comparePair =
     selectedRows.length >= 2 ? [selectedRows[0], selectedRows[1]] as const : null;
+
+  if (objectTypePending) {
+    return <TablePageSkeleton />;
+  }
 
   function exportCsv(scope: "visible" | "selected") {
     const exportRows =

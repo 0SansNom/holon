@@ -1,111 +1,85 @@
 # Holon
- 
-An enterprise knowledge platform that connects and organizes information from different systems into a unified business model. It provides a common way to understand and work with data, supports controlled actions and approvals when needed, enables workflows and search, and allows AI agents to work with the same information and business rules as human users.
 
+An operating system for enterprise information.
 
-## Where this actually stands
+Connect source systems. Model the business as objects, links, and
+actions. Humans and agents work through that model — same types, same
+rights, same approvals. Not a warehouse with a UI on top.
 
-It is **not** production-ready as-is.
+What that means in practice:
 
-Known gaps, in the order they'd actually bite for a self-hosting
-enterprise:
+- **Ontology** — ObjectTypes, links, properties, markings. The schema
+  is the product, not a side file.
+- **Governance** — ReBAC (SpiceDB) then ABAC (OPA). Confidential
+  fields are masked, not just labeled. Agents cannot exceed their
+  mandant.
+- **Actions** — mutations go through the ontology, with approval when
+  the Action says so, and sagas when a step must compensate.
+- **Applications** — a web UI and an application builder on the same
+  APIs people and agents call.
+- **Search** — one index over the ontology, tenant-scoped.
+- **Agents** — optional, experimental. They use the same tools and
+  policy as a human session.
 
-- **Empty instance only** — Identity bootstraps one admin + tenant/workspace
-  from env (`HOLON_TENANT_ID` / `HOLON_WORKSPACE_ID`, default workspace
-  `main`); no bundled demo. Ontology, connectors, and extra principals
-  are created through APIs.
-- **Intelligence is experimental** — leave
-  `HOLON_INTELLIGENCE_ENABLED=false` in prod (posture-enforced). Joblib
-  model upload and tool-plugin register are refused in production;
-  tool-plugin `entry_point`s are prefix-allowlisted. Prefer
-  `HOLON_LLM_PROVIDER=fake` locally; set
-  `services.intelligence.runtimeClassName` (gVisor) in Helm.
+One instance, N orgs (filiales). MIT.
 
-Services expose `/metrics` (Prometheus text) and optional OTLP traces
-(`HOLON_OTLP_ENDPOINT`; unset = tracing off). SLO recording rules, alerts,
-and a Grafana dashboard live under `deploy/observability/` (optional Helm
-`ServiceMonitor` / `PrometheusRule`) — see
-[`docs/ops/observability.md`](docs/ops/observability.md). Point your own
-observability stack at them.
+It is **not production-ready**. Empty instance on first boot; you
+create ontology, connectors, and principals through the APIs.
+Intelligence stays off in production (`HOLON_INTELLIGENCE_ENABLED=false`,
+enforced). See [`SECURITY.md`](SECURITY.md) and
+[`docs/ops/deploy.md`](docs/ops/deploy.md).
 
-## What's here
+## Services
 
-Six services, each its own FastAPI modulith with its own Postgres database:
+Six FastAPI services, each with its own Postgres:
 
 | Service | Port | Role |
 |---|---|---|
-| `identity` | 8001 | Principals, ReBAC/ABAC policy decisions, token issuance |
-| `connectivity` | 8002 | Source connectors (Postgres, MongoDB, REST, CSV/file, Kafka streaming) → Iceberg |
-| `knowledge` | 8003 | Ontology, ontology-governed reads/writes, Actions, execution engine, search |
-| `experience` | 8004 | The web UI (React SPA) and its Application Builder API |
-| `automation` | 8005 | Workflow engine — sagas and compensation for multi-step Actions |
-| `intelligence` | 8006 | LLM gateway, context builder, agent runtime, evaluation harness |
+| `identity` | 8001 | Principals, tokens, ReBAC/ABAC |
+| `connectivity` | 8002 | Connectors (Postgres, MongoDB, REST, SQL, Kafka) → Iceberg |
+| `knowledge` | 8003 | Ontology, governed reads/writes, Actions, search |
+| `experience` | 8004 | Web UI and Application Builder |
+| `automation` | 8005 | Workflows — sagas and compensation |
+| `intelligence` | 8006 | LLM gateway, agents (experimental) |
 
-Plus infrastructure: Postgres, MinIO (S3), Iceberg REST catalog, Redpanda
-(Kafka-compatible event bus), SpiceDB (ReBAC), OPA (ABAC), OpenSearch,
-and Qdrant (semantic index).
+Infra: Postgres, MinIO, Iceberg REST, Redpanda, SpiceDB, OPA,
+OpenSearch, Qdrant. Shared primitives in `libs/holon_common`.
 
-Shared code (URN scheme, event envelope, transactional outbox, auth
-primitives, plugin registry) lives in `libs/holon_common`.
-
-## Running it
+## Run
 
 ```bash
-cp .env.example .env   # set a real HOLON_BOOTSTRAP_ADMIN_SECRET — never commit .env
-docker compose up -d --build   # or `make up`
+cp .env.example .env   # set HOLON_BOOTSTRAP_ADMIN_SECRET — never commit .env
+docker compose up -d --build   # or make up
 ```
 
-After a **fresh** volume set, Identity creates tenant `acme`, workspace
-`main`, and bootstrap admin `hl:acme:global:user:admin` with the
-`HOLON_BOOTSTRAP_ADMIN_SECRET` you set — sign in as that URN with that
-secret (UI at `http://localhost:8004`, or Vite below). There is no
-dev-login shortcut: local behaves the same as production here, and
-`HOLON_BOOTSTRAP_ADMIN_SECRET` is required in every environment.
+Fresh volumes: Identity creates tenant `acme`, workspace `main`, admin
+`hl:acme:global:user:admin` with that secret. Sign in at
+`http://localhost:8004`. No dev-login shortcut.
 
-The platform starts **without** demo ObjectTypes or connectors. Create
-them via the APIs, or for local/CI only:
+No demo ontology is bundled. Local/CI only:
 
 ```bash
-make provision-test-fixtures   # principals / plugins / ObjectTypes via HTTP
-make seed                      # raw rows into external source_erp
-# then POST /sync (CI does this; see .github/workflows/tests.yml)
+make provision-test-fixtures
+make seed
 ```
 
-The frontend is served by `experience` at `http://localhost:8004`. For
-frontend-only iteration against the real backend (faster reload):
+Frontend-only against the stack: `cd services/experience/web && npm run dev`
+(`http://localhost:5173`).
 
-```bash
-cd services/experience/web
-npm install
-npm run dev   # http://localhost:5173, CORS to the services above
-```
-
-### Intelligence (optional)
-
-- Default local: leave `HOLON_INTELLIGENCE_ENABLED` unset/true and set
-  `HOLON_LLM_PROVIDER=fake` for no API spend (compose CI does this).
-- Real models: put funded `ANTHROPIC_API_KEY` (and `VOYAGE_API_KEY` if
-  `HOLON_EMBEDDING_PROVIDER=voyage`) in `.env`, set
-  `HOLON_LLM_PROVIDER=anthropic`.
-- Spend caps: `HOLON_INTELLIGENCE_RPM`,
-  `HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA` (see `.env.example`).
+Intelligence: `HOLON_LLM_PROVIDER=fake` locally. Real models need
+`ANTHROPIC_API_KEY` and `HOLON_LLM_PROVIDER=anthropic`. Leave it off
+in production.
 
 ## Tests
 
-Layout: [`tests/README.md`](tests/README.md) — `tests/unit/` (no stack) and
-`tests/integration/{service}/` (compose HTTP).
+[`tests/README.md`](tests/README.md)
 
 ```bash
 pip install -r tests/requirements.txt
-make test-unit                            # fast; no compose
-python3 -m pytest -q -m "not llm" tests   # full suite; needs stack
-python3 -m pytest -q -m llm tests         # needs real keys + stack
+make test-unit
+python3 -m pytest -q -m "not llm" tests   # needs the stack
 ```
-
-PR CI runs unit first (no stack), then compose e2e with
-`HOLON_LLM_PROVIDER=fake`, excluding metered LLM tests. Nightly metered
-agent runs live in `.github/workflows/llm-nightly.yml`.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — [`LICENSE`](LICENSE).

@@ -168,6 +168,12 @@ jobs:
       - name: Run the suite
         run: python3 -m pytest -q -m "not llm" tests
 
+      - name: Browser e2e (login + Object Explorer + Sources + Ontology)
+        working-directory: services/experience/web
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test
+
       - name: Service logs on failure
         if: failure()
         # No --tail limit: a 200-line-per-container cap was cutting logs
