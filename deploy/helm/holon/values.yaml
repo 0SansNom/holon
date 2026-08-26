@@ -87,7 +87,7 @@ corsOrigins: ""
 holonEnv: ""
 intelligenceEnabled: true
 llmProvider: anthropic
-servingStoreRequireMaterialized: false
+servingStoreRequireMaterialized: true
 
 # Optional Prometheus Operator CRs. Off by default — enable when your
 # cluster has ServiceMonitor / PrometheusRule CRDs. Artefacts also live

@@ -28,15 +28,11 @@ TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 
-# When true, a serving-store miss is a miss (404 / empty list) — never a
-# live Iceberg scan marked `degraded: true`. Production should set this
-# once materialization is the read path of record; leave false for
-# compose / early bootstrap where live fallback is useful.
-_REQUIRE_MATERIALIZED = os.environ.get("HOLON_SERVING_STORE_REQUIRE_MATERIALIZED", "").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-)
+# Instance reads are serving-store only. Iceberg is the warehouse
+# (catalog ingest → `serving_store.materialize`). A miss is a miss —
+# never a live scan marked `degraded: true`. Production posture still
+# requires HOLON_SERVING_STORE_REQUIRE_MATERIALIZED so the operator
+# flag matches this code path.
 
 ICEBERG_CONFIG = dict(
     catalog_uri=os.environ["HOLON_ICEBERG_CATALOG_URI"],
@@ -809,7 +805,7 @@ def _parse_struct_or_array(property_name: str, rule: dict, raw_value: Any) -> An
 
 async def _coerce_property_types(object_type_urn: str, rows: list[dict]) -> list[dict]:
     """Read-time struct/array parsing for `property_types` (see
-    `ontology/object_types.py`'s DDL comment) — operates on the row's
+    `0000_baseline.sql` / `object_type.property_types`) — operates on the row's
     *raw* source-column keys, the same keys `_resolve_one`/`_resolve_many`
     already return unchanged for every ordinary property (property_mapping
     is a declared/checked contract, not a runtime rename — see
@@ -898,16 +894,12 @@ async def _resolve_one(
     principal: Principal,
     as_of: Optional[datetime] = None,
 ) -> Optional[dict]:
-    """Serving-store read with a federated fallback: a miss
-    here means nothing has been materialized for this key yet, not that
-    the object doesn't exist — so degrade to a live scan via `resolver.py`
-    rather than a false 404 or a 500.
+    """Serving-store read. A miss here means nothing has been
+    materialized for this key yet — 404, not a live Iceberg scan.
 
     `as_of` historical read takes a different path entirely:
     a historical read either has recorded history to answer from or it
-    doesn't, so it bypasses *both* the live serving-store read and the
-    federated fallback above — degrading to "current" would silently answer
-    a different question than the one asked.
+    doesn't.
 
     Property masking (and, after it, derived-property computation) is
     applied here unconditionally — this function (and `_resolve_many`
@@ -933,22 +925,7 @@ async def _resolve_one(
         return (await _mask_and_derive(object_type_urn, principal, filtered))[0]
     if await serving_store.is_tombstoned(pool, object_type, tenant_id, instance_id):
         return None
-    if _REQUIRE_MATERIALIZED:
-        return None
-    try:
-        rows = await asyncio.to_thread(fetch_fn, **{id_kwarg: instance_id}, **iceberg_kwargs(tenant_id))
-    except NoSuchTableError:
-        return None
-    if not rows:
-        return None
-    row = dict(rows[0])
-    row["materializedAt"] = None
-    row["sourceLagSeconds"] = 0
-    row["degraded"] = True
-    filtered = await _filter_by_instance_markings(object_type_urn, tenant_id, principal, [row])
-    if not filtered:
-        return None
-    return (await _mask_and_derive(object_type_urn, principal, filtered))[0]
+    return None
 
 
 async def _resolve_many(
@@ -966,9 +943,8 @@ async def _resolve_many(
     """Resolve instances, optionally keyset-paged at the serving store.
 
     When `limit` is set, over-fetches from Postgres until `limit` rows
-    survive markings (or the store is exhausted). Iceberg fallback still
-    loads the filtered scan (push-down on id/fk) then slices in memory —
-    only used when the serving store is empty for that type.
+    survive markings (or the store is exhausted). A serving-store miss
+    is an empty list — Iceberg is not scanned for instance reads.
     """
     object_type_urn = await _object_type_urn_for(object_type, tenant_id)
 
@@ -1011,41 +987,4 @@ async def _resolve_many(
             if collected or probe:
                 return collected if limit is None else collected[:limit]
 
-    if _REQUIRE_MATERIALIZED:
-        return []
-
-    kwargs = {filter_kwarg: filter_value} if filter_kwarg else {}
-    try:
-        live_rows = await asyncio.to_thread(fetch_fn, **kwargs, **iceberg_kwargs(tenant_id))
-    except NoSuchTableError:
-        live_rows = []
-    tombstoned_ids = await serving_store.list_tombstoned_ids(pool, object_type, tenant_id)
-    result = []
-    for row in live_rows:
-        if str(row.get("id")) in tombstoned_ids:
-            continue
-        row = dict(row)
-        row["materializedAt"] = None
-        row["sourceLagSeconds"] = 0
-        row["degraded"] = True
-        result.append(row)
-    result = await _filter_by_instance_markings(object_type_urn, tenant_id, principal, result)
-    result = await _mask_and_derive(object_type_urn, principal, result)
-    if after_id is not None or limit is not None:
-        from . import paging as paging_mod
-
-        ordered = sorted(result, key=lambda r: paging_mod._sort_key(paging_mod.instance_id_of(r)))
-        start = 0
-        if after_id is not None:
-            after_key = paging_mod._sort_key(after_id)
-            for index, row in enumerate(ordered):
-                if paging_mod._sort_key(paging_mod.instance_id_of(row)) > after_key:
-                    start = index
-                    break
-            else:
-                start = len(ordered)
-        ordered = ordered[start:]
-        if limit is not None:
-            ordered = ordered[:limit]
-        return ordered
-    return result
+    return []

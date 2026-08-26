@@ -28,19 +28,6 @@ _ALLOWED_EDIT_KINDS = frozenset({
     "delete_object",
 })
 
-TOMBSTONE_DDL = """
-CREATE TABLE IF NOT EXISTS object_instance_tombstone (
-    tenant_id TEXT NOT NULL,
-    object_type TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    prior_data JSONB,
-    set_by_action_urn TEXT NOT NULL,
-    set_by_urn TEXT NOT NULL,
-    set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, object_type, instance_id)
-);
-"""
-
 
 def edit_kind(edit: dict) -> str:
     return edit.get("kind") or "modify_property"
@@ -178,8 +165,6 @@ async def apply_structural_edits(
 ) -> dict[str, Any]:
     """Apply create/delete link+object rules. Returns the `__structural__` payload."""
     from . import link_overlays
-
-    await conn.execute(TOMBSTONE_DDL)
 
     links: list[dict] = []
     objects: list[dict] = []

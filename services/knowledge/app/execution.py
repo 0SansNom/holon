@@ -18,24 +18,8 @@ from holon_common.sql_ident import quote_identifier
 
 from . import catalog, execution_adapter_registry, ontology, resolver
 
-DDL = """
-CREATE TABLE IF NOT EXISTS execution_run (
-    plan_hash TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    plan JSONB NOT NULL,
-    result JSONB NOT NULL,
-    row_count INTEGER NOT NULL,
-    executed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    cache_hits INTEGER NOT NULL DEFAULT 0
-);
-"""
-
 _VALID_OPERATIONS = ("filter", "count", "group_by", "join")
 _VALID_AGGREGATE_FUNCTIONS = ("count", "sum", "avg", "min", "max")
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 def _compute_plan_hash(*, object_type_urn: str, operation: str, **operation_fields) -> str:

@@ -46,16 +46,20 @@ def orders_synced(jdoe_token: str) -> dict:
 
 
 def _poll_materialized(jdoe_token: str, url: str) -> dict:
-    """Materialization runs asynchronously in the catalog consumer, same."""
+    """Materialization runs asynchronously in the catalog consumer."""
     deadline = time.monotonic() + 30
     body: dict = {}
+    status = 0
     while time.monotonic() < deadline:
         status, body = _request("GET", url, token=jdoe_token)
+        if status == 404:
+            time.sleep(1)
+            continue
         assert status == 200, body
         if body.get("degraded") is False:
             return body
         time.sleep(1)
-    pytest.fail(f"serving store never converged for {url}: {body}")
+    pytest.fail(f"serving store never converged for {url}: {status} {body}")
 
 
 def test_customer_read_is_materialized_with_freshness_metadata(jdoe_token: str, customers_synced: dict) -> None:

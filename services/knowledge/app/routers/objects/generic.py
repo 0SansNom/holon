@@ -6,10 +6,10 @@ are the most general shape in the package (a bare `/objects/{object_type}`
 and `/objects/{object_type}/{instance_id}`), and would shadow every
 specific route in `object_reads.py` if registered any earlier, including
 `/objects/Customer` itself. They only ever get reached for a name that
-isn't one of the six boot-known types, at which point
-`core._resolve_one`/`_resolve_many`'s own dynamic-URN fallback and
-`resolver.fetch_generic` take over. `_merge_declarative_edits` below
-overlays Action Type edits for every ObjectType.
+isn't one of the six boot-known types. Instance rows come from the
+serving store (`core._resolve_one` / `_resolve_many`); Iceberg is the
+warehouse behind catalog ingest, not a live read fallback.
+`_merge_declarative_edits` below overlays Action Type edits for every ObjectType.
 """
 
 from __future__ import annotations

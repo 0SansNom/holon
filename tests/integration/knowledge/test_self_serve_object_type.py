@@ -116,16 +116,15 @@ def test_full_self_serve_loop_source_to_browsable_and_searchable_object(jdoe_tok
     assert status == 200, listing
     assert type_name in [t["name"] for t in listing], listing
 
-    # Immediately readable
+    # Immediately readable as an ObjectType; instances appear after re-sync
+    # materializes into the serving store (Iceberg is not a live read path).
     status, body = _request("GET", ontology_url(f"/objects/{type_name}"), token=jdoe_token)
     assert status == 200, body
     rows = as_items(body)
-    assert len(rows) == 8, rows
-    assert all(row["degraded"] is True for row in rows), rows  # first sync predates the type — live federated read only
+    assert rows == [], rows
 
     status, one = _request("GET", ontology_url(f"/objects/{type_name}/1"), token=jdoe_token)
-    assert status == 200, one
-    assert one["id"] == 1, one
+    assert status == 404, one
 
     # Re-sync (now that the type exists) is what actually materializes
     # it into the fast-path store and indexes it into search
@@ -137,11 +136,14 @@ def test_full_self_serve_loop_source_to_browsable_and_searchable_object(jdoe_tok
     materialized = None
     while time.monotonic() < deadline:
         status, materialized = _request("GET", ontology_url(f"/objects/{type_name}/1"), token=jdoe_token)
+        if status == 404:
+            time.sleep(1)
+            continue
         assert status == 200, materialized
         if materialized["degraded"] is False:
             break
         time.sleep(1)
-    assert materialized["degraded"] is False, materialized
+    assert materialized and materialized.get("degraded") is False, materialized
     assert materialized["materializedAt"] is not None, materialized
 
     deadline = time.monotonic() + 30
@@ -220,11 +222,14 @@ def test_declared_confidential_column_is_actually_masked_for_an_abac_restricted_
     jdoe_row: dict = {}
     while time.monotonic() < deadline:
         status, jdoe_row = _request("GET", ontology_url(f"/objects/{type_name}/1"), token=jdoe_token)
+        if status == 404:
+            time.sleep(1)
+            continue
         assert status == 200, jdoe_row
         if jdoe_row.get("degraded") is False:
             break
         time.sleep(1)
-    assert jdoe_row["degraded"] is False, jdoe_row
+    assert jdoe_row.get("degraded") is False, jdoe_row
     assert jdoe_row["comment"] is not None, jdoe_row  # France, ABAC-unrestricted: sees it for real
 
     status, kenji_row = _request("GET", ontology_url(f"/objects/{type_name}/1"), token=kenji_token)
