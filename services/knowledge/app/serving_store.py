@@ -8,55 +8,6 @@ from typing import Optional
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS object_instance (
-    object_type TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    data JSONB NOT NULL,
-    source_snapshot_id BIGINT NOT NULL,
-    materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (object_type, tenant_id, instance_id)
-);
-
--- Bi-temporal instance history — transaction-time only. Append-only:
--- unlike `object_instance` above, rows here are never updated or deleted,
--- so "what did the system believe at time T" stays answerable indefinitely.
-CREATE TABLE IF NOT EXISTS object_instance_history (
-    object_type TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    data JSONB NOT NULL,
-    source_snapshot_id BIGINT NOT NULL,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Soft-delete markers written by declarative Action rules (`delete_object`).
--- Reads hide tombstoned ids even when the underlying row still exists.
-CREATE TABLE IF NOT EXISTS object_instance_tombstone (
-    tenant_id TEXT NOT NULL,
-    object_type TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    prior_data JSONB,
-    set_by_action_urn TEXT NOT NULL,
-    set_by_urn TEXT NOT NULL,
-    set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, object_type, instance_id)
-);
-
-CREATE INDEX IF NOT EXISTS object_instance_lookup
-    ON object_instance (object_type, tenant_id, instance_id);
-CREATE INDEX IF NOT EXISTS object_instance_history_as_of
-    ON object_instance_history (object_type, tenant_id, instance_id, recorded_at DESC);
-CREATE INDEX IF NOT EXISTS object_instance_tombstone_lookup
-    ON object_instance_tombstone (tenant_id, object_type, instance_id);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
-
 async def is_tombstoned(
     pool: asyncpg.Pool, object_type: str, tenant_id: str, instance_id
 ) -> bool:
@@ -71,8 +22,8 @@ async def is_tombstoned(
 
 
 async def list_tombstoned_ids(pool: asyncpg.Pool, object_type: str, tenant_id: str) -> set[str]:
-    """Bulk tombstone lookup for the live-Iceberg fallback path (`core._resolve_many`),
-    which has no serving-store row to filter through `NOT EXISTS` the way `list_instances`
+    """Bulk tombstone lookup when filtering a collection that has no
+    serving-store row to join through `NOT EXISTS` the way `list_instances`
     does — one query per collection instead of one per row.
     """
     rows = await pool.fetch(

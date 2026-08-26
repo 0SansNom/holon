@@ -21,7 +21,7 @@ transaction that undoes Step 1.
 
 **Package layout**: `hardcoded.py` keeps the shared `_event` helper;
 `declarative.py` owns Action Type apply/compensate; `approval.py`
-owns reject/expire/get/list. This `__init__.py` holds schema, shared
+owns reject/expire/get/list. This `__init__.py` holds shared
 `_get_action_definition`/`_apply_now` machinery, and entry points.
 """
 
@@ -65,7 +65,6 @@ from .timeline import list_instance_timeline
 from .wire import operation_id, resolve_target, success_envelope, validation_report
 
 __all__ = [
-    "ensure_schema",
     "ActionValidationError",
     "request_generic_action",
     "validate_generic_action",
@@ -85,73 +84,6 @@ __all__ = [
     "success_envelope",
     "validation_report",
 ]
-
-DDL = """
-CREATE TABLE IF NOT EXISTS action_invocation (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    action_name TEXT NOT NULL,
-    instance_urn TEXT NOT NULL,
-    actor_urn TEXT NOT NULL,
-    actor_type TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    invoked_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Undo/revert support — additive. `edits` is `{property: newValue}`;
--- `prior_values` is `{property: {"existed": bool, "value": ...}}`.
-ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS edits JSONB;
-ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS prior_values JSONB;
-ALTER TABLE action_invocation ADD COLUMN IF NOT EXISTS reverted_at TIMESTAMPTZ;
-
-CREATE TABLE IF NOT EXISTS action_approval (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    action_name TEXT NOT NULL,
-    instance_urn TEXT NOT NULL,
-    requested_by_urn TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '24 hours'),
-    decided_by_urn TEXT,
-    decided_at TIMESTAMPTZ,
-    decision_note TEXT
-);
-
-ALTER TABLE action_approval ADD COLUMN IF NOT EXISTS parameters JSONB NOT NULL DEFAULT '{}';
-
-CREATE TABLE IF NOT EXISTS saga_execution (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    approval_id BIGINT NOT NULL,
-    action_name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS object_instance_edit (
-    tenant_id TEXT NOT NULL,
-    object_type TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    property_name TEXT NOT NULL,
-    property_value JSONB NOT NULL,
-    set_by_action_urn TEXT NOT NULL,
-    set_by_urn TEXT NOT NULL,
-    set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, object_type, instance_id, property_name)
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    from ..action_structural import TOMBSTONE_DDL
-
-    await conn.execute(DDL)
-    await conn.execute(TOMBSTONE_DDL)
-
 
 async def _get_action_definition(pool: asyncpg.Pool, tenant_id: str, action_name: str) -> Optional[dict]:
     """Resolve an Action from the ontology `action_type` registry into the

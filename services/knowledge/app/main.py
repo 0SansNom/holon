@@ -25,7 +25,7 @@ from holon_common import (
     run_migrations,
 )
 from holon_common.audit import clear_durable_audit_hooks
-from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
+from holon_common.audit_store import install_durable_audit
 from holon_common.authz import PermissionClient
 from holon_common.principal_status import (
     consume_identity_auth_events,
@@ -46,17 +46,8 @@ from . import (
     actions,
     catalog,
     core,
-    execution,
-    execution_adapter_registry,
-    export_format_registry,
-    function_registry,
-    glossary,
-    lineage,
-    link_overlays,
     ontology,
-    query_log,
     search,
-    serving_store,
 )
 from .api import ApiPathRewriteMiddleware, ontologies_router
 from .api.public_only import PublicApiOnlyMiddleware
@@ -93,21 +84,8 @@ async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
     core.pool = app.state.pool
-    async with app.state.pool.acquire() as conn:
-        await catalog.ensure_schema(conn)
-        await lineage.ensure_schema(conn)
-        await ontology.ensure_schema(conn)
-        await link_overlays.ensure_schema(conn)
-        await actions.ensure_schema(conn)
-        await serving_store.ensure_schema(conn)
-        await execution.ensure_schema(conn)
-        await execution_adapter_registry.ensure_schema(conn)
-        await export_format_registry.ensure_schema(conn)
-        await function_registry.ensure_schema(conn)
-        await glossary.ensure_schema(conn)
-        await query_log.ensure_schema(conn)
-        await ensure_audit_schema(conn)
-        await outbox.ensure_schema(conn)
+    # Knowledge-owned tables live in app/migrations (0000_baseline + 0001–).
+    # Shared holon_common helpers (audit/outbox) are included in 0000.
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
     clear_durable_audit_hooks()

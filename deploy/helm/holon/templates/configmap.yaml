@@ -49,7 +49,7 @@ data:
   HOLON_SPICEDB_SCHEMA_PATH: {{ .Values.external.spicedbSchemaPath | default "/app/spicedb-schema.zed" | quote }}
   HOLON_INTELLIGENCE_ENABLED: {{ .Values.intelligenceEnabled | default true | quote }}
   HOLON_LLM_PROVIDER: {{ .Values.llmProvider | default "anthropic" | quote }}
-  HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: {{ .Values.servingStoreRequireMaterialized | default false | quote }}
+  HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: {{ .Values.servingStoreRequireMaterialized | default true | quote }}
   {{- if .Values.corsOrigins }}
   HOLON_CORS_ORIGINS: {{ .Values.corsOrigins | quote }}
   {{- end }}

@@ -9,7 +9,7 @@ import urllib.request
 import uuid
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url, resync_and_wait_for_instance
 
 
 def _token_for(principal_urn: str) -> str:
@@ -166,6 +166,8 @@ def test_self_serve_implementer_is_included_in_interface_objects(
         },
     )
     assert status == 201
+
+    resync_and_wait_for_instance(token=jdoe_token, dataset=source_name, object_type=object_type_name)
 
     interface_name = _unique_name("HasComment")
     status, _ = _request(

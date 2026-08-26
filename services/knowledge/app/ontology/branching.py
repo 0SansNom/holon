@@ -49,7 +49,7 @@ async def create_branch(
     """Wraps `propose_object_type_version` with a human-readable name and
     an owner. The review gate below relies on role separation (branch
     creation only needs workspace `write`/editor; review needs `approve`
-    /admin — enforced by `routers/ontology_admin.py`'s two different
+    /admin — enforced by `routers/ontology_admin`'s two different
     authorize calls, not a same-URN check here) — the exact same shape
     Actions already use for `action_approval`, just applied to ontology
     changes.
