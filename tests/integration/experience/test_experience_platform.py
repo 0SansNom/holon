@@ -50,6 +50,7 @@ def test_experience_config():
     assert "customer_object_type_urn" not in body
     assert "intelligence_enabled" in body
     assert isinstance(body["intelligence_enabled"], bool)
+    assert body["require_connector_secret_ref"] is False
 
 
 def test_experience_lineage_proxy(jdoe_token: str):

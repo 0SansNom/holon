@@ -39,6 +39,9 @@ export function nextSyncDescription(lastFinishedAt: string, intervalMinutes: num
 
 export const CLASSIFICATIONS = ["public", "internal", "confidential", "restricted"] as const;
 
+export const SECRET_REF_HELP =
+  "e.g. env:ERP_PASSWORD or vault:connectors/<tenant>/db#password — Holon stores the reference, not the secret.";
+
 export function formFromSource(source: GenericSource) {
   const authMethod: AuthMethod = source.connection_name ? "connection" : source.auth_header_name ? "inline" : "none";
   return {

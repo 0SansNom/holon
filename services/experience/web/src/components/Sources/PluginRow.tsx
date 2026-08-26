@@ -4,6 +4,7 @@ import { useSyncDataset, useDisablePlugin, useEnablePlugin, useSetPluginSchedule
 import { ApiError } from "../../api/client";
 import type { ConnectorPlugin } from "../../api/connectivity";
 import { nextSyncDescription } from "./shared";
+import { CreateObjectTypeDialog } from "./CreateObjectTypeDialog";
 
 export function PluginRow({
   plugin,
@@ -17,6 +18,7 @@ export function PluginRow({
   const enable = useEnablePlugin();
   const setSchedule = useSetPluginSchedule();
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [creatingType, setCreatingType] = useState(false);
   const [scheduleDraft, setScheduleDraft] = useState<string>(
     plugin.schedule_interval_minutes != null ? String(plugin.schedule_interval_minutes) : "",
   );
@@ -93,6 +95,9 @@ export function PluginRow({
             className="hl-switch-reset"
           />
           <div className="hl-source-row-buttons">
+            <Button small icon="cube-add" onClick={() => setCreatingType(true)} disabled={busy || !lastSync}>
+              Create Object Type
+            </Button>
             <InputGroup
               type="number"
               min={1}
@@ -120,6 +125,7 @@ export function PluginRow({
       {result && (
         <p className={`hl-text-muted-sm hl-mt-sm ${result.ok ? "hl-text-success" : "hl-text-danger"}`}>{result.message}</p>
       )}
+      {creatingType && <CreateObjectTypeDialog datasetName={datasetName} onClose={() => setCreatingType(false)} />}
     </Card>
   );
 }

@@ -14,13 +14,12 @@ import {
 import { useDatasetPreview, useCreateObjectType, useSyncDataset } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
-import type { GenericSource } from "../../api/connectivity";
 import { SkeletonBlock } from "../common/Skeleton";
 import { CLASSIFICATIONS, snakeToCamel, toPascalCase } from "./shared";
 
-export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSource; onClose: () => void }) {
-  const { data: preview, isLoading: previewLoading, error: previewError } = useDatasetPreview(source.name);
-  const [name, setName] = useState(toPascalCase(source.name));
+export function CreateObjectTypeDialog({ datasetName, onClose }: { datasetName: string; onClose: () => void }) {
+  const { data: preview, isLoading: previewLoading, error: previewError } = useDatasetPreview(datasetName);
+  const [name, setName] = useState(toPascalCase(datasetName));
   const [description, setDescription] = useState("");
   const [primaryKey, setPrimaryKey] = useState("id");
   const [titleKey, setTitleKey] = useState("");
@@ -84,7 +83,7 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
       });
       await createType.mutateAsync({
         name,
-        source_dataset_urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:dataset:${source.name}`,
+        source_dataset_urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:dataset:${datasetName}`,
         property_mapping: propertyMapping,
         description,
         column_classification: columnClassification,
@@ -92,7 +91,7 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
         title_key: titleKey || null,
         plural_display_name: pluralDisplayName || undefined,
       });
-      await sync.mutateAsync(source.name);
+      await sync.mutateAsync(datasetName);
       setCreated(name);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the Object Type");
@@ -131,7 +130,7 @@ export function CreateObjectTypeDialog({ source, onClose }: { source: GenericSou
     <Dialog isOpen title="Create Object Type" onClose={onClose} style={{ width: 580 }}>
       <DialogBody>
         <p className="hl-dialog-desc">
-          Turn <span className="hl-mono">{source.name}</span>'s synced data into a real, browsable Object Type —
+          Turn <span className="hl-mono">{datasetName}</span>'s synced data into a real, browsable Object Type —
           name its properties below, suggested from the columns actually in the data.
         </p>
         <FormGroup label="Object Type name">

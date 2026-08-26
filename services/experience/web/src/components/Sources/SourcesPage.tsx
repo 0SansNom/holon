@@ -12,13 +12,15 @@ const TAB_SKELETON = <RegistryTabSkeleton cards={3} />;
 export function SourcesPage() {
   const intent = usePaletteIntentStore((s) => s.intent);
   const [selectedTabId, setSelectedTabId] = useState<TabId>(() =>
-    intent === "create-connection" ? "connections" : "data-sources",
+    intent === "create-connection" || intent === "create-sql-connection" || intent === "create-object-connection"
+      ? "connections"
+      : "data-sources",
   );
 
   return (
     <RegistryPage
       title="Data Sources"
-      description="Connect REST APIs and connector plugins, manage credentials/schedules, writeback targets, and map synced datasets to ObjectTypes."
+      description="Connect REST, SQL, object storage, Kafka, and plugin sources; manage credentials and writeback; map synced datasets to ObjectTypes."
     >
       <Tabs id="sources-tabs" selectedTabId={selectedTabId} onChange={setSelectedTabId} renderActiveTabPanelOnly>
         <Tab id="data-sources" title="Data Sources" panel={<Suspense fallback={TAB_SKELETON}><DataSourcesTab /></Suspense>} />

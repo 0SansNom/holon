@@ -7,7 +7,13 @@ from typing import Any, Optional
 
 import asyncpg
 
-from holon_common.connector_safety import ConnectorSafetyError, assert_connector_host, assert_connector_secret_ref
+from holon_common.connector_safety import (
+    ConnectorSafetyError,
+    assert_connector_host,
+    assert_connector_secret_ref,
+    assert_no_inline_connector_secret,
+    assert_production_requires_secret_ref,
+)
 from holon_common.secrets import resolve_optional
 from holon_common.sql_ident import quote_identifier, require_identifier
 
@@ -130,18 +136,23 @@ async def register_connection(
     secret_ref: Optional[str] = None,
 ) -> dict:
     """Register or update a SQL connection credential."""
+    existing = await pool.fetchrow(
+        "SELECT password, secret_ref FROM sql_connection WHERE tenant_id = $1 AND name = $2",
+        tenant_id, name,
+    )
+    is_update = existing is not None
     try:
         assert_connector_host(host)
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
+        assert_no_inline_connector_secret(password, field="password")
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
-    if password is None and secret_ref is None:
-        existing = await pool.fetchrow(
-            "SELECT password, secret_ref FROM sql_connection WHERE tenant_id = $1 AND name = $2",
-            tenant_id, name,
-        )
-        if existing is not None:
-            password, secret_ref = existing["password"], existing["secret_ref"]
+    if password is None and secret_ref is None and existing is not None:
+        password, secret_ref = existing["password"], existing["secret_ref"]
+    try:
+        assert_production_requires_secret_ref(secret_ref, is_update=is_update)
+    except ConnectorSafetyError as exc:
+        raise SourceConfigError(str(exc)) from exc
 
     await pool.execute(
         """

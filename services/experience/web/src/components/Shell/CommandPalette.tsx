@@ -34,7 +34,30 @@ const ACTIONS: Array<{ id: string; label: string; icon: IconName; intent: Palett
   { id: "action-pipeline", label: "New Pipeline", icon: "add", intent: "create-pipeline", to: "/pipelines" },
   { id: "action-project", label: "New Project", icon: "add", intent: "create-project", to: "/admin" },
   { id: "action-connect-source", label: "Connect a source", icon: "add", intent: "connect-source", to: "/sources" },
-  { id: "action-connection", label: "New connection", icon: "add", intent: "create-connection", to: "/sources" },
+  { id: "action-connect-sql", label: "Connect SQL source", icon: "database", intent: "connect-sql-source", to: "/sources" },
+  {
+    id: "action-connect-object",
+    label: "Connect object storage",
+    icon: "cloud",
+    intent: "connect-object-source",
+    to: "/sources",
+  },
+  { id: "action-connect-stream", label: "New Kafka stream", icon: "pulse", intent: "connect-stream", to: "/sources" },
+  { id: "action-connection", label: "New REST connection", icon: "key", intent: "create-connection", to: "/sources" },
+  {
+    id: "action-sql-connection",
+    label: "New SQL connection",
+    icon: "database",
+    intent: "create-sql-connection",
+    to: "/sources",
+  },
+  {
+    id: "action-object-connection",
+    label: "New object connection",
+    icon: "cloud",
+    intent: "create-object-connection",
+    to: "/sources",
+  },
 ];
 
 interface PaletteItem {

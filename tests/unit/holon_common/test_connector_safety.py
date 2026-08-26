@@ -17,6 +17,8 @@ from holon_common.connector_safety import (  # noqa: E402
     assert_connector_secret_ref,
     assert_http_url,
     assert_kafka_topic,
+    assert_no_inline_connector_secret,
+    assert_production_requires_secret_ref,
     same_origin,
 )
 
@@ -136,6 +138,34 @@ def test_same_origin_normalizes_trailing_dot() -> None:
 def test_assert_http_url_rejects_non_http() -> None:
     with pytest.raises(ConnectorSafetyError):
         assert_http_url("ftp://files.example.com/x")
+
+
+def test_inline_secret_allowed_outside_production(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    assert_no_inline_connector_secret("super-secret", field="password")
+
+
+def test_inline_secret_blocked_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("HOLON_ENV", "production")
+    with pytest.raises(ConnectorSafetyError, match="secret_ref"):
+        assert_no_inline_connector_secret("super-secret", field="password")
+    assert_no_inline_connector_secret(None, field="password")
+    assert_no_inline_connector_secret("  ", field="password")
+
+
+def test_production_requires_secret_ref_on_create(monkeypatch) -> None:
+    monkeypatch.setenv("HOLON_ENV", "production")
+    with pytest.raises(ConnectorSafetyError, match="secret_ref is required"):
+        assert_production_requires_secret_ref(None, is_update=False)
+    with pytest.raises(ConnectorSafetyError, match="secret_ref is required"):
+        assert_production_requires_secret_ref("  ", is_update=False)
+    assert_production_requires_secret_ref("env:ERP_PASSWORD", is_update=False)
+    assert_production_requires_secret_ref(None, is_update=True)
+
+
+def test_production_secret_ref_not_required_outside_production(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    assert_production_requires_secret_ref(None, is_update=False)
 
 
 def test_unwrap_mapped_ip() -> None:

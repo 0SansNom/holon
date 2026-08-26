@@ -16,7 +16,12 @@ export type PaletteIntent =
   | "create-pipeline"
   | "create-project"
   | "connect-source"
-  | "create-connection";
+  | "connect-sql-source"
+  | "connect-object-source"
+  | "connect-stream"
+  | "create-connection"
+  | "create-sql-connection"
+  | "create-object-connection";
 
 interface PaletteIntentState {
   intent: PaletteIntent | null;
