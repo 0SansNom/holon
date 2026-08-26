@@ -33,7 +33,8 @@ bootstrap:
 
 secretBackend: kubernetes
 # Must include at least:
-#   HOLON_JWT_SECRET (HS256) — or HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS (RS256),
+#   HOLON_JWT_SECRET (HS256, values.yaml default) — or, for the production
+#   overlay, HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS (RS256),
 #   HOLON_SPICEDB_PRESHARED_KEY, POSTGRES_PASSWORD,
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (S3/MinIO — connectivity/knowledge/intelligence),
 #   HOLON_OPENSEARCH_PASSWORD (knowledge),
@@ -42,9 +43,9 @@ secretBackend: kubernetes
 #   HOLON_OIDC_CLIENT_SECRET (if oidc.enabled), VOYAGE_API_KEY (if HOLON_EMBEDDING_PROVIDER=voyage)
 existingSecret: holon-secrets
 
-# JWT algorithm. HS256 (default) uses HOLON_JWT_SECRET in existingSecret.
-# For RS256: put HOLON_JWT_PRIVATE_KEYS + HOLON_JWT_PUBLIC_KEYS in the secret,
-# set algorithm: RS256, and ideally requireAsymmetric: true.
+# JWT algorithm. HS256 (default here) uses HOLON_JWT_SECRET in existingSecret.
+# values-production.yaml requires RS256: put HOLON_JWT_PRIVATE_KEYS +
+# HOLON_JWT_PUBLIC_KEYS in the secret and keep requireAsymmetric: true.
 jwt:
   algorithm: HS256
   requireAsymmetric: false

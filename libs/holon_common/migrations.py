@@ -11,10 +11,11 @@ what it was missing, nothing more: a real place for a change that isn't
 purely additive (rename, drop, backfill, a data migration) to live,
 with a version so it's obvious what ran and when.
 
-Existing `ensure_schema()` calls are untouched and keep running first —
-they're the baseline every already-deployed database already has this
-governs schema changes from here forward only, not a retroactive
-rewrite of what's already shipped.
+Identity is migrations-first: domain `ensure_schema()` was removed there
+and the baseline is `services/identity/app/migrations/0000_baseline.sql`.
+Other services still call `ensure_schema()` at boot *before*
+`run_migrations`. This runner governs schema changes from here forward;
+it is not a retroactive rewrite of what's already shipped.
 
 Checksums: each applied file's SHA-256 is recorded. Editing an already-
 applied file fails boot instead of drifting silently.
