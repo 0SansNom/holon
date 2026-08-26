@@ -96,7 +96,7 @@ function EditCollectionsDialog({ urn, onClose }: { urn: string; onClose: () => v
 
 function EditCollectionsDialogBody({ urn, onClose }: { urn: string; onClose: () => void }) {
   const { data: allCollections } = useCollections();
-  const { data: memberOf } = useResourceCollections(urn);
+  const { data: memberOf = [] } = useResourceCollections(urn);
   const toggle = useToggleCollectionMember();
   const memberIds = new Set(memberOf.map((c) => c.id));
 

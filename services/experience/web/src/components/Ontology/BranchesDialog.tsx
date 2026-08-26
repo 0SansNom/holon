@@ -222,7 +222,7 @@ function BranchesDialogBody({
   currentDefinition: Record<string, unknown>;
 }) {
   const monacoTheme = useMonacoEditorTheme();
-  const { data: branches } = useBranches(kind, resourceName);
+  const { data: branches = [] } = useBranches(kind, resourceName);
   const createBranch = useCreateBranch(kind, resourceName);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);

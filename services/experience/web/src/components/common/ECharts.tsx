@@ -6,6 +6,9 @@ import { CanvasRenderer } from "echarts/renderers";
 
 echarts.use([BarChart, GaugeChart, PieChart, GridComponent, TooltipComponent, CanvasRenderer]);
 
+const Chart =
+  (EChartsReactCore as unknown as { default?: typeof EChartsReactCore }).default ?? EChartsReactCore;
+
 export const ECharts = (props: React.ComponentProps<typeof EChartsReactCore>) => (
-  <EChartsReactCore {...props} echarts={echarts} />
+  <Chart {...props} echarts={echarts} />
 );
