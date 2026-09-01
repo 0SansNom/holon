@@ -27,9 +27,8 @@ export function shouldUseServerPaging(opts: {
   setName?: string;
   listId?: string;
   predicateCount: number;
-  globalFilter: string;
 }): boolean {
-  return !opts.setName && !opts.listId && opts.predicateCount === 0 && opts.globalFilter.trim() === "";
+  return !opts.setName && !opts.listId && opts.predicateCount === 0;
 }
 
 export function visibleObjectSetsForType<T extends { name: string; object_type_urn: string; visibility?: string }>(

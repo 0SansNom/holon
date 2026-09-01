@@ -157,7 +157,7 @@ function ConfiguredWidget({ widget, ctx }: { widget: ObjectViewWidget; ctx: Obje
             onRevert={(invocationId) => ctx.onRevert?.(invocationId)}
           />
         ) : (
-          <p className="hl-text-muted">No timeline events.</p>
+          <p className="hl-text-muted">No activity on this object yet.</p>
         )}
       </section>
     );

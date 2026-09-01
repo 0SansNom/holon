@@ -1,149 +1,77 @@
 import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Button, Card, Checkbox, HTMLSelect, Tag } from "@blueprintjs/core";
+import { Button, Card, Checkbox, FormGroup, HTMLSelect, InputGroup, Tab, Tabs, Tag, type TabId } from "@blueprintjs/core";
 import { useObjectSets, useObjectTypes, useObjectTypeGroups } from "../../api/hooks";
 import { ClassificationBadge } from "../common/ClassificationBadge";
-import { CardGrid } from "../common/ListPrimitives";
+import { CardGrid, EmptyState } from "../common/ListPrimitives";
 import { RegistryPage } from "../common/PageLayout";
 import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 import { useObjectExplorerFavoritesStore } from "../../store/objectExplorerFavorites";
 import { objectSetBrowsePath, urnShortName } from "./objectExplorerUtils";
+import type { ObjectSet } from "../../api/knowledge";
+
+function matchesQuery(needle: string, name: string, extra?: string | null) {
+  if (!needle) return true;
+  return name.toLowerCase().includes(needle) || (extra?.toLowerCase().includes(needle) ?? false);
+}
 
 export function ObjectTypeListPage() {
   const { data } = useObjectTypes();
   const { data: groups } = useObjectTypeGroups();
   const { data: objectSets = [] } = useObjectSets();
   const [groupFilter, setGroupFilter] = useState("");
+  const [query, setQuery] = useState("");
   const [showEphemeral, setShowEphemeral] = useState(false);
+  const [catalogTab, setCatalogTab] = useState<TabId>("types");
   const favoriteNames = useObjectExplorerFavoritesStore((s) => s.objectTypes);
   const toggleFavorite = useObjectExplorerFavoritesStore((s) => s.toggleObjectType);
 
   const activeGroup = groups.find((g) => g.name === groupFilter);
+  const needle = query.trim().toLowerCase();
+
   const scopedTypes = activeGroup ? data.filter((ot) => activeGroup.object_types.includes(ot.name)) : data;
   const ephemeralTypeCount = scopedTypes.filter((ot) => isEphemeralTestName(ot.name)).length;
-  const visibleTypes = showEphemeral
-    ? scopedTypes
-    : scopedTypes.filter((ot) => !isEphemeralTestName(ot.name));
+  const visibleTypes = (showEphemeral ? scopedTypes : scopedTypes.filter((ot) => !isEphemeralTestName(ot.name))).filter(
+    (ot) => matchesQuery(needle, ot.name, ot.description),
+  );
 
   const favorites = useMemo(
-    () => data.filter((ot) => favoriteNames.includes(ot.name) && !isEphemeralTestName(ot.name)),
-    [data, favoriteNames],
+    () =>
+      data.filter(
+        (ot) =>
+          favoriteNames.includes(ot.name) &&
+          !isEphemeralTestName(ot.name) &&
+          matchesQuery(needle, ot.name, ot.description),
+      ),
+    [data, favoriteNames, needle],
   );
 
   const browseableSets = useMemo(() => {
     const filtered = objectSets.filter((os) => {
       if (os.visibility === "hidden") return false;
       if (!showEphemeral && isEphemeralTestName(os.name)) return false;
-      return true;
+      const typeName = urnShortName(os.object_type_urn);
+      return (
+        matchesQuery(needle, os.display_name || os.name, os.description) || matchesQuery(needle, os.name, typeName)
+      );
     });
     return filtered.sort((a, b) => {
       const rank = (v: string) => (v === "prominent" ? 0 : v === "normal" ? 1 : 2);
       return rank(a.visibility) - rank(b.visibility) || a.name.localeCompare(b.name);
     });
-  }, [objectSets, showEphemeral]);
+  }, [objectSets, showEphemeral, needle]);
 
   const ephemeralSetCount = objectSets.filter(
     (os) => os.visibility !== "hidden" && isEphemeralTestName(os.name),
   ).length;
   const ephemeralCount = ephemeralTypeCount + ephemeralSetCount;
+  const hasSetsCatalog = objectSets.some(
+    (os) => os.visibility !== "hidden" && (showEphemeral || !isEphemeralTestName(os.name)),
+  );
 
-  const prominentSets = browseableSets.filter((os) => os.visibility === "prominent").slice(0, 6);
-
-  return (
-    <RegistryPage
-      title="Objects"
-      description={
-        <>
-          Browse ObjectTypes and Object Sets. Star favorites for quick access. Groups filter the catalog — use the
-          group map below to jump between related types.
-        </>
-      }
-      trailing={
-        <div className="hl-flex-row hl-items-center hl-gap-sm">
-          {ephemeralCount > 0 ? (
-            <Checkbox
-              checked={showEphemeral}
-              label={`Show test leftovers (${ephemeralCount})`}
-              onChange={(e) => setShowEphemeral(e.currentTarget.checked)}
-              style={{ marginBottom: 0 }}
-            />
-          ) : null}
-          {groups.length > 0 ? (
-            <HTMLSelect value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
-              <option value="">All groups</option>
-              {groups.map((g) => (
-                <option key={g.name} value={g.name}>
-                  {g.name}
-                </option>
-              ))}
-            </HTMLSelect>
-          ) : null}
-        </div>
-      }
-    >
-      {favorites.length > 0 && (
-        <section className="hl-mb-lg">
-          <div className="hl-section-title hl-mb-sm">Favorites</div>
-          <CardGrid minWidth={240}>
-            {favorites.map((ot) => (
-              <ObjectTypeCard
-                key={ot.urn}
-                name={ot.name}
-                description={ot.description}
-                classification={ot.classification}
-                version={ot.version}
-                propertyCount={Object.keys(ot.property_mapping).length}
-                titleKey={ot.title_key}
-                primaryKey={ot.primary_key}
-                propertyPreview={Object.keys(ot.property_mapping).slice(0, 5)}
-                favorite
-                onToggleFavorite={() => toggleFavorite(ot.name)}
-              />
-            ))}
-          </CardGrid>
-        </section>
-      )}
-
-      {prominentSets.length > 0 && (
-        <section className="hl-mb-lg">
-          <div className="hl-section-title hl-mb-sm">Prominent Object Sets</div>
-          <CardGrid minWidth={240}>
-            {prominentSets.map((os) => {
-              const typeName = urnShortName(os.object_type_urn);
-              const path = objectSetBrowsePath(typeName, os.name);
-              return (
-                <Link
-                  key={os.urn}
-                  to={path.to}
-                  params={path.params}
-                  search={path.search}
-                  className="hl-link-reset"
-                >
-                  <Card interactive className="hl-h-full">
-                    <div className="hl-registry-card-header">
-                      <strong className="hl-registry-card-title" title={os.display_name || os.name}>
-                        {os.display_name || os.name}
-                      </strong>
-                      <Tag minimal intent="primary">
-                        prominent
-                      </Tag>
-                    </div>
-                    <div className="hl-tag-row hl-mt-xs">
-                      <Tag minimal>{typeName}</Tag>
-                      <Tag minimal intent={os.lifecycle_status === "active" ? "success" : "none"}>
-                        {os.lifecycle_status}
-                      </Tag>
-                    </div>
-                    {os.description && <p className="hl-card-desc">{os.description}</p>}
-                  </Card>
-                </Link>
-              );
-            })}
-          </CardGrid>
-        </section>
-      )}
-
-      {groups.length > 0 && (
+  const typesPanel = (
+    <>
+      {groups.length > 0 && !needle && (
         <section className="hl-mb-lg">
           <div className="hl-section-title hl-mb-sm">Group map</div>
           <div className="hl-oe-group-map">
@@ -178,52 +106,18 @@ export function ObjectTypeListPage() {
           </div>
         </section>
       )}
-
-      {browseableSets.length > 0 && (
-        <section className="hl-mb-lg">
-          <div className="hl-section-title hl-mb-sm">All Object Sets</div>
-          <CardGrid minWidth={240}>
-            {browseableSets.map((os) => {
-              const typeName = urnShortName(os.object_type_urn);
-              const path = objectSetBrowsePath(typeName, os.name);
-              return (
-                <Link
-                  key={os.urn}
-                  to={path.to}
-                  params={path.params}
-                  search={path.search}
-                  className="hl-link-reset"
-                >
-                  <Card interactive className="hl-h-full">
-                    <div className="hl-registry-card-header">
-                      <strong className="hl-registry-card-title" title={os.display_name || os.name}>
-                        {os.display_name || os.name}
-                      </strong>
-                      {os.visibility === "prominent" && (
-                        <Tag minimal intent="primary">
-                          prominent
-                        </Tag>
-                      )}
-                    </div>
-                    <div className="hl-tag-row hl-mt-xs">
-                      <Tag minimal>{typeName}</Tag>
-                      <Tag minimal intent={os.lifecycle_status === "active" ? "success" : "none"}>
-                        {os.lifecycle_status}
-                      </Tag>
-                    </div>
-                    {os.description && <p className="hl-card-desc">{os.description}</p>}
-                  </Card>
-                </Link>
-              );
-            })}
-          </CardGrid>
-        </section>
+      {activeGroup && <div className="hl-text-muted-sm hl-mb-sm">Group · {activeGroup.name}</div>}
+      {visibleTypes.length === 0 && (
+        <EmptyState>
+          {needle
+            ? browseableSets.length > 0
+              ? `No types match “${query.trim()}”. ${browseableSets.length} object sets do — switch tabs.`
+              : `No types or sets match “${query.trim()}”.`
+            : activeGroup
+              ? "No object types in this group."
+              : "No object types yet."}
+        </EmptyState>
       )}
-
-      <div className="hl-section-title hl-mb-sm">
-        Object types{activeGroup ? ` · ${activeGroup.name}` : ""}
-      </div>
-      {visibleTypes.length === 0 && <p className="hl-text-muted">No ObjectTypes in this group.</p>}
       <CardGrid minWidth={260}>
         {visibleTypes.map((ot) => (
           <ObjectTypeCard
@@ -241,7 +135,155 @@ export function ObjectTypeListPage() {
           />
         ))}
       </CardGrid>
+    </>
+  );
+
+  const setsPanel = (
+    <>
+      {browseableSets.length === 0 && (
+        <EmptyState>
+          {needle
+            ? visibleTypes.length > 0
+              ? `No object sets match “${query.trim()}”. ${visibleTypes.length} types do — switch tabs.`
+              : `No types or sets match “${query.trim()}”.`
+            : "No object sets yet."}
+        </EmptyState>
+      )}
+      <CardGrid minWidth={240}>
+        {browseableSets.map((os) => (
+          <ObjectSetCard key={os.urn} objectSet={os} />
+        ))}
+      </CardGrid>
+    </>
+  );
+
+  return (
+    <RegistryPage
+      title="Objects"
+      description="Browse object types and saved sets. Star the ones you use often — groups help you jump between related types."
+      trailing={
+        <div className="hl-flex-row hl-items-center hl-gap-sm">
+          {ephemeralCount > 0 ? (
+            <Checkbox
+              checked={showEphemeral}
+              label={`Show test leftovers (${ephemeralCount})`}
+              onChange={(e) => setShowEphemeral(e.currentTarget.checked)}
+              style={{ marginBottom: 0 }}
+            />
+          ) : null}
+          {groups.length > 0 && catalogTab !== "sets" ? (
+            <HTMLSelect value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
+              <option value="">All groups</option>
+              {groups.map((g) => (
+                <option key={g.name} value={g.name}>
+                  {g.name}
+                </option>
+              ))}
+            </HTMLSelect>
+          ) : null}
+        </div>
+      }
+    >
+      <FormGroup label="Filter this list" labelFor="objects-filter" className="hl-list-filter">
+        <InputGroup
+          id="objects-filter"
+          leftIcon="filter"
+          placeholder="Name or description…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </FormGroup>
+      {favorites.length > 0 && (
+        <section className="hl-mb-lg">
+          <div className="hl-section-title hl-mb-sm">Favorites</div>
+          <CardGrid minWidth={240}>
+            {favorites.map((ot) => (
+              <ObjectTypeCard
+                key={ot.urn}
+                name={ot.name}
+                description={ot.description}
+                classification={ot.classification}
+                version={ot.version}
+                propertyCount={Object.keys(ot.property_mapping).length}
+                titleKey={ot.title_key}
+                primaryKey={ot.primary_key}
+                propertyPreview={Object.keys(ot.property_mapping).slice(0, 5)}
+                favorite
+                onToggleFavorite={() => toggleFavorite(ot.name)}
+              />
+            ))}
+          </CardGrid>
+        </section>
+      )}
+
+      {hasSetsCatalog ? (
+        <Tabs
+          id="objects-catalog"
+          className="hl-oe-catalog-tabs"
+          selectedTabId={catalogTab}
+          onChange={setCatalogTab}
+          renderActiveTabPanelOnly
+        >
+          <Tab
+            id="types"
+            title={
+              <span className="hl-oe-tab-title">
+                Object types
+                <Tag minimal round>
+                  {visibleTypes.length}
+                </Tag>
+              </span>
+            }
+            panel={typesPanel}
+          />
+          <Tab
+            id="sets"
+            title={
+              <span className="hl-oe-tab-title">
+                Object sets
+                <Tag minimal round>
+                  {browseableSets.length}
+                </Tag>
+              </span>
+            }
+            panel={setsPanel}
+          />
+        </Tabs>
+      ) : (
+        typesPanel
+      )}
     </RegistryPage>
+  );
+}
+
+function ObjectSetCard({ objectSet }: { objectSet: ObjectSet }) {
+  const typeName = urnShortName(objectSet.object_type_urn);
+  const path = objectSetBrowsePath(typeName, objectSet.name);
+  const title = objectSet.display_name || objectSet.name;
+  return (
+    <Link to={path.to} params={path.params} search={path.search} className="hl-link-reset">
+      <Card interactive className="hl-h-full">
+        <div className="hl-registry-card-header">
+          <strong className="hl-registry-card-title" title={title}>
+            {title}
+          </strong>
+          {objectSet.visibility === "prominent" && (
+            <Tag minimal intent="primary">
+              prominent
+            </Tag>
+          )}
+        </div>
+        <div className="hl-tag-row hl-mt-xs">
+          <Tag minimal>{typeName}</Tag>
+          <Tag minimal intent={objectSet.lifecycle_status === "active" ? "success" : "none"}>
+            {objectSet.lifecycle_status}
+          </Tag>
+        </div>
+        {objectSet.description && <p className="hl-card-desc">{objectSet.description}</p>}
+      </Card>
+    </Link>
   );
 }
 
