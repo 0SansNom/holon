@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Button, Icon, Tag } from "@blueprintjs/core";
-import { motion } from "framer-motion";
+import { Link, Outlet, useNavigate } from "@tanstack/react-router";
+import { Button, Icon, Tag, Tooltip } from "@blueprintjs/core";
 import { useAuthStore } from "../../store/auth";
-import { logout } from "../../api/identity";
 import { registerLoginRedirect } from "../../api/authRedirect";
 import { useApprovals } from "../../api/hooks";
+import { useShellStore } from "../../store/shell";
 import { CommandPalette } from "./CommandPalette";
 import { ThemeToggle } from "./ThemeToggle";
-import { NAV_ITEMS, SEQUENTIAL_SHORTCUTS } from "./navigation";
+import { UserMenu } from "./UserMenu";
+import { NAV_SECTIONS, SEQUENTIAL_SHORTCUTS } from "./navigation";
 import { AppToaster } from "../../lib/toast";
 
 function isTypingTarget(el: Element | null): boolean {
@@ -17,15 +17,20 @@ function isTypingTarget(el: Element | null): boolean {
   return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT";
 }
 
+function shortcutLabel(): string {
+  if (typeof navigator === "undefined") return "Ctrl+K";
+  return /Mac|iPhone|iPad/.test(navigator.platform) || /Mac/.test(navigator.userAgent) ? "⌘K" : "Ctrl+K";
+}
+
 export function Shell() {
   const session = useAuthStore((s) => s.session);
-  const clear = useAuthStore((s) => s.clear);
   const navigate = useNavigate();
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [paletteOpen, setPaletteOpen] = useState(false);
   const leaderPressedAt = useRef<number | null>(null);
   const { data: pendingApprovals } = useApprovals("pending");
   const pendingCount = pendingApprovals?.length ?? 0;
+  const collapsed = useShellStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useShellStore((s) => s.toggleSidebar);
 
   useEffect(() => {
     if (!session) {
@@ -78,82 +83,93 @@ export function Shell() {
   if (!session) return null;
 
   return (
-    <div className="hl-shell">
+    <div className="hl-shell" data-collapsed={collapsed ? "true" : undefined}>
       <a href="#main-content" className="hl-skip-link">
         Skip to content
       </a>
       <AppToaster />
       <aside className="hl-sidebar" aria-label="Primary">
         <div className="hl-sidebar-brand">
-          Holon
-          <small>Enterprise Knowledge OS</small>
+          <Link to="/objects" className="hl-sidebar-brand-link" title="Holon">
+            <span className="hl-sidebar-mark" aria-hidden>
+              H
+            </span>
+            <span className="hl-sidebar-brand-text">
+              Holon
+              <small>Enterprise Knowledge OS</small>
+            </span>
+          </Link>
         </div>
-        <nav className="hl-flex-col hl-gap-xs" aria-label="Main navigation">
-          {NAV_ITEMS.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className="hl-nav-item"
-              activeProps={{ className: "hl-nav-item active" }}
-              activeOptions={{ exact: false }}
-            >
-              <Icon icon={item.icon} size={14} />
-              <span className="hl-nav-item-label">{item.label}</span>
-              {item.to === "/approvals" && pendingCount > 0 && (
-                <Tag minimal round intent="primary" className="hl-nav-badge">
-                  {pendingCount > 99 ? "99+" : pendingCount}
-                </Tag>
-              )}
-            </Link>
+        <nav className="hl-sidebar-nav" aria-label="Main navigation">
+          {NAV_SECTIONS.map((section) => (
+            <div key={section.id} className="hl-nav-section">
+              <div className="hl-nav-section-label">{section.label}</div>
+              {section.items.map((item) => {
+                const badge =
+                  item.to === "/approvals" && pendingCount > 0 ? (
+                    <Tag minimal round intent="primary" className="hl-nav-badge">
+                      {pendingCount > 99 ? "99+" : pendingCount}
+                    </Tag>
+                  ) : null;
+                const link = (
+                  <Link
+                    to={item.to}
+                    className="hl-nav-item"
+                    activeProps={{ className: "hl-nav-item active" }}
+                    activeOptions={{ exact: false }}
+                    title={collapsed ? item.label : undefined}
+                    aria-label={item.label}
+                  >
+                    <Icon icon={item.icon} size={14} />
+                    <span className="hl-nav-item-label">{item.label}</span>
+                    {badge}
+                  </Link>
+                );
+                return (
+                  <div key={item.to} className="hl-nav-item-wrap">
+                    {collapsed ? (
+                      <Tooltip content={item.label} placement="right" compact>
+                        {link}
+                      </Tooltip>
+                    ) : (
+                      link
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           ))}
         </nav>
+        <div className="hl-sidebar-footer">
+          <Button
+            minimal
+            small
+            fill={!collapsed}
+            className="hl-sidebar-collapse"
+            icon={collapsed ? "menu-open" : "menu-closed"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={toggleSidebar}
+          >
+            {collapsed ? null : "Collapse"}
+          </Button>
+        </div>
       </aside>
       <div className="hl-main">
         <header className="hl-topbar">
-          <div className="hl-mono hl-text-muted">
-            {session.principal.urn}
-          </div>
-          <div className="hl-flex-row hl-items-center hl-gap-md">
+          <button type="button" className="hl-topbar-search" onClick={() => setPaletteOpen(true)} aria-label="Search or jump to">
+            <Icon icon="search" size={14} />
+            <span className="hl-topbar-search-placeholder">Search or jump to…</span>
+            <kbd className="hl-kbd">{shortcutLabel()}</kbd>
+          </button>
+          <div className="hl-topbar-actions">
             <ThemeToggle />
-            <Tag
-              minimal
-              interactive
-              icon="search"
-              onClick={() => setPaletteOpen(true)}
-              style={{ fontSize: 11, color: "var(--hl-text-muted)" }}
-            >
-              <span className="hl-mono">⌘K</span>
-            </Tag>
-            <span style={{ fontSize: 13 }}>{session.principal.display_name}</span>
-            <Button
-              minimal
-              small
-              icon="log-out"
-              onClick={() => {
-                // Best-effort — the cookie is cleared server-side, but the
-                // local principal is dropped and we navigate away either
-                // way, same as every other 401 already does.
-                void logout().finally(() => {
-                  clear();
-                  void navigate({ to: "/login" });
-                });
-              }}
-            >
-              Sign out
-            </Button>
+            <UserMenu />
           </div>
         </header>
-        <motion.main
-          id="main-content"
-          key={pathname}
-          className="hl-content"
-          tabIndex={-1}
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.12, ease: "easeOut" }}
-        >
+        <main id="main-content" className="hl-content" tabIndex={-1}>
           <Outlet />
-        </motion.main>
+        </main>
       </div>
       <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>

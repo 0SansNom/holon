@@ -18,12 +18,7 @@ export function AdminPage() {
   return (
     <RegistryPage
       title="Admin"
-      description={
-        <>
-          Tenant (filiale), workspace, principal, and project access management — the same governance actions the CLI
-          wraps, here as a self-service UI.
-        </>
-      }
+      description="Manage tenants, workspaces, people, and project access."
     >
       <Tabs id="admin-tabs" selectedTabId={selectedTabId} onChange={setSelectedTabId} renderActiveTabPanelOnly>
         <Tab id="tenants" title="Tenants" panel={<Suspense fallback={TAB_SKELETON}><TenantsTab /></Suspense>} />
