@@ -47,12 +47,7 @@ export function PipelinesPage() {
   return (
     <RegistryPage
       title="Pipelines"
-      description={
-        <>
-          Transform DAGs over Iceberg datasets — each step applies a Knowledge Function and writes a new snapshot.
-          Outputs are catalogued automatically with <code>derived_from</code> lineage.
-        </>
-      }
+      description="Transform datasets step by step. Each run writes a new snapshot, catalogued with lineage automatically."
       actions={
         <Button intent="primary" icon="add" onClick={() => setCreating(true)}>
           New pipeline

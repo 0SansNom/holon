@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useParams, useNavigate, useSearch, Link } from "@tanstack/react-router";
-import { Button, ButtonGroup, Callout, Tab, Tabs, Tag } from "@blueprintjs/core";
+import { Button, Callout, Menu, MenuDivider, MenuItem, PopoverNext, Tab, Tabs, Tag } from "@blueprintjs/core";
 import {
   useActions,
   useObject,
@@ -18,14 +18,16 @@ import { getErrorMessage } from "../../api/client";
 import { camelToSnake } from "../common/propertyFormatUtils";
 import { buildFormatsBySourceKey } from "../Ontology/propertyEditorUtils";
 import { findPropertyWithTypeClass, hasTypeClass } from "../Ontology/typeClassUtils";
+import { ClassificationBadge } from "../common/ClassificationBadge";
 import { DetailPage } from "../common/PageLayout";
 import type { ActionDefinition, ConditionalFormatRule, RelationType } from "../../api/knowledge";
 import { TENANT_ID, WORKSPACE_ID } from "../../api/config";
 import {
-  titleOf,
+  headlineOf,
   urnShortName,
   buildRelatedLinksForObjectType,
   computeInlineEditableActions,
+  fkFieldTargetsFromRelations,
 } from "./objectExplorerUtils";
 import { RelatedLinkPanel } from "./RelatedLinkPanel";
 import { ObjectPropertiesTable } from "./ObjectPropertiesTable";
@@ -78,7 +80,8 @@ export function ObjectDetailPage() {
   const principalUrn = useAuthStore((s) => s.session?.principal.urn);
   const { data: object } = useObject(type, id);
   const { data: objectType } = useObjectType(type);
-  const displayTitle = titleOf(object as Record<string, unknown> | undefined, objectType);
+  const headline = headlineOf(object as Record<string, unknown> | undefined, objectType);
+  const [focusLink, setFocusLink] = useState<string | null>(null);
   const { data: actions } = useActions();
   const { data: relationTypes } = useRelationTypes();
   const { data: principals } = usePrincipals();
@@ -115,8 +118,11 @@ export function ObjectDetailPage() {
   }, [viewSearch, preferredMode, configuredDefinition]);
 
   const selectedTab =
-    (tabSearch as ObjectViewTab | undefined) ??
-    (viewMode === "configured" ? configuredDefinition?.tabs[0]?.id ?? "main" : "overview");
+    (tabSearch as ObjectViewTab | undefined) && tabSearch !== "graph"
+      ? (tabSearch as ObjectViewTab)
+      : viewMode === "configured"
+        ? configuredDefinition?.tabs[0]?.id ?? "main"
+        : "overview";
 
   const relevantActions = (actions ?? []).filter(
     (a) => a.target_object_type === type || (a.target_interface && (objectType?.implements ?? []).includes(a.target_interface)),
@@ -144,13 +150,10 @@ export function ObjectDetailPage() {
     [relationTypes, type],
   );
 
-  const fkFieldTargets = useMemo(() => {
-    const map = new Map<string, string>();
-    (relationTypes ?? [])
-      .filter((r) => urnShortName(r.source_object_type_urn) === type)
-      .forEach((r) => map.set(camelToSnake(r.source_property), urnShortName(r.target_object_type_urn)));
-    return map;
-  }, [relationTypes, type]);
+  const fkFieldTargets = useMemo(
+    () => fkFieldTargetsFromRelations(relationTypes ?? [], type),
+    [relationTypes, type],
+  );
 
   const relatedLinks = useMemo(
     () => buildRelatedLinksForObjectType(type, relationTypes ?? []),
@@ -237,6 +240,11 @@ export function ObjectDetailPage() {
 
   function setTab(tab: ObjectViewTab) {
     navigateView({ tab });
+  }
+
+  function openLinksTab(linkName?: string) {
+    setFocusLink(linkName ?? null);
+    setTab("links");
   }
 
   function setViewMode(mode: ObjectViewMode) {
@@ -336,71 +344,78 @@ export function ObjectDetailPage() {
       breadcrumbs={[
         { label: "Objects", to: "/objects" },
         { label: type, to: "/objects/$type", params: { type } },
-        { label: displayTitle || String(id) },
+        { label: headline.id || String(id) },
       ]}
       title={
         <>
           {iconUrl ? <img src={iconUrl} alt="" className="hl-object-detail-icon" /> : null}
-          {displayTitle || `${type} / ${id}`}
+          {headline.title || `${type} / ${id}`}
         </>
       }
       description={
-        <span className="hl-tag-row">
-          <Tag minimal intent={showingConfigured ? "success" : "primary"}>
-            {showingConfigured ? "Configured Object View" : "Standard Object View"}
-          </Tag>
-          <Tag minimal>{type}</Tag>
+        <span className="hl-page-title-meta">
+          <span>
+            {type}
+            {headline.id ? ` · ${headline.id}` : ""}
+          </span>
+          {objectType?.classification ? <ClassificationBadge classification={objectType.classification} /> : null}
+          {showingConfigured ? (
+            <Tag minimal intent="success">
+              Custom layout
+            </Tag>
+          ) : null}
         </span>
       }
       actions={
         <div className="hl-flex-row hl-items-center hl-gap-sm" style={{ flexWrap: "wrap" }}>
           <ObjectActionsBar actions={relevantActions} onSelect={selectAction} variant="header" />
-          <ButtonGroup>
-            {configuredDefinition ? (
-              <>
-                <Button
-                  active={!showingConfigured}
-                  onClick={() => setViewMode("standard")}
-                >
-                  Standard
-                </Button>
-                <Button
-                  active={showingConfigured}
-                  onClick={() => setViewMode("configured")}
-                >
-                  Configured
-                </Button>
-              </>
-            ) : (
-              <Button icon="cog" onClick={createConfiguredView}>
-                Create configured view
-              </Button>
-            )}
-            {configuredDefinition && (
-              <Button icon="edit" onClick={() => setEditorOpen(true)}>
-                Edit view
-              </Button>
-            )}
-            <Button
-              icon="diagram-tree"
-              onClick={() =>
-                void navigate({
-                  to: "/lineage/$urn",
-                  params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` },
-                })
-              }
-            >
-              Lineage
-            </Button>
-            <Button
-              icon="graph"
-              onClick={() =>
-                void navigate({ to: "/objects/$type/$id/graph", params: { type, id } })
-              }
-            >
-              Graph
-            </Button>
-          </ButtonGroup>
+          <PopoverNext
+            placement="bottom-end"
+            content={
+              <Menu>
+                {configuredDefinition ? (
+                  <>
+                    <MenuItem
+                      icon="document"
+                      text="Standard layout"
+                      active={!showingConfigured}
+                      onClick={() => setViewMode("standard")}
+                    />
+                    <MenuItem
+                      icon="applications"
+                      text="Custom layout"
+                      active={showingConfigured}
+                      onClick={() => setViewMode("configured")}
+                    />
+                    <MenuItem icon="edit" text="Edit layout" onClick={() => setEditorOpen(true)} />
+                    <MenuDivider />
+                  </>
+                ) : (
+                  <>
+                    <MenuItem icon="cog" text="Customize this view" onClick={createConfiguredView} />
+                    <MenuDivider />
+                  </>
+                )}
+                <MenuItem
+                  icon="diagram-tree"
+                  text="Lineage"
+                  onClick={() =>
+                    void navigate({
+                      to: "/lineage/$urn",
+                      params: { urn: `hl:${TENANT_ID}:${WORKSPACE_ID}:object-type:${type}` },
+                    })
+                  }
+                />
+                <MenuItem
+                  icon="graph"
+                  text="Related graph"
+                  onClick={() => void navigate({ to: "/objects/$type/$id/graph", params: { type, id } })}
+                />
+              </Menu>
+            }
+          >
+            <Button icon="more" aria-label="More actions" />
+          </PopoverNext>
         </div>
       }
     >
@@ -410,7 +425,7 @@ export function ObjectDetailPage() {
           {hierarchyParents.map((r) => (
             <HierarchyParentCrumb key={r.name} type={type} id={id} relation={r} />
           ))}
-          <span className="hl-text-muted-sm">→ {displayTitle || id}</span>
+          <span className="hl-text-muted-sm">→ {headline.title || id}</span>
         </div>
       )}
       {result && (
@@ -447,7 +462,9 @@ export function ObjectDetailPage() {
       ) : (
       <Tabs
         id="object-view-tabs"
-        selectedTabId={selectedTab}
+        selectedTabId={
+          selectedTab === "media" && mediaItems.length === 0 ? "overview" : selectedTab
+        }
         onChange={(id) => setTab(String(id) as ObjectViewTab)}
         renderActiveTabPanelOnly
         className="hl-oe-ov-tabs"
@@ -467,32 +484,10 @@ export function ObjectDetailPage() {
                 conditionalFormatsBySourceKey={conditionalFormatsBySourceKey}
                 principalsByUrn={principalsByUrn}
                 sharedPropertyTypes={sharedPropertyTypes}
+                relatedLinks={relatedLinks}
+                onOpenLink={openLinksTab}
               />
               <ObjectActionsBar actions={relevantActions} onSelect={selectAction} title="Actions" />
-              {relatedLinks.length > 0 && (
-                <div className="hl-section">
-                  <div className="hl-flex-between hl-items-center">
-                    <h4 className="hl-section-title" style={{ margin: 0 }}>
-                      Links
-                    </h4>
-                    <Button minimal small onClick={() => setTab("links")}>
-                      View all ({relatedLinks.length})
-                    </Button>
-                  </div>
-                  <div className="hl-tag-row hl-mt-sm">
-                    {relatedLinks.slice(0, 8).map((link, i) => (
-                      <Tag
-                        key={`${link.linkName}-${i}`}
-                        minimal
-                        intent={link.visibility === "prominent" ? "primary" : "none"}
-                        icon="link"
-                      >
-                        {link.pluralLabel || link.label}
-                      </Tag>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           }
         />
@@ -523,15 +518,15 @@ export function ObjectDetailPage() {
           panel={
             <div className="hl-oe-ov-tab-panel">
               {relatedLinks.length === 0 ? (
-                <p className="hl-text-muted">No RelationTypes linked to this ObjectType.</p>
+                <p className="hl-text-muted">No related objects for this type.</p>
               ) : (
                 relatedLinks.map((link, i) => (
                   <RelatedLinkPanel
-                    key={`${link.linkName}-${i}`}
+                    key={`${link.linkName}-${focusLink === link.linkName ? "focus" : i}`}
                     type={type}
                     id={String(id)}
                     link={link}
-                    defaultExpanded={link.visibility === "prominent"}
+                    defaultExpanded={link.visibility === "prominent" || focusLink === link.linkName}
                     writable
                   />
                 ))
@@ -539,51 +534,29 @@ export function ObjectDetailPage() {
             </div>
           }
         />
-        <Tab
-          id="media"
-          title={`Media${mediaItems.length ? ` (${mediaItems.length})` : ""}`}
-          panel={
-            <div className="hl-oe-ov-tab-panel">
-              <ObjectMediaGallery items={mediaItems} />
-            </div>
-          }
-        />
+        {mediaItems.length > 0 ? (
+          <Tab
+            id="media"
+            title={`Media (${mediaItems.length})`}
+            panel={
+              <div className="hl-oe-ov-tab-panel">
+                <ObjectMediaGallery items={mediaItems} />
+              </div>
+            }
+          />
+        ) : null}
         <Tab
           id="timeline"
           title="Timeline"
           panel={
             <div className="hl-oe-ov-tab-panel">
-              {timeline ? (
-                <ObjectTimelinePanel
-                  timeline={timeline}
-                  principalsByUrn={principalsByUrn}
-                  nextRevertibleId={nextRevertibleId}
-                  reverting={revertInvocation.isPending}
-                  onRevert={(invocationId) => void revertInvocationById(invocationId)}
-                />
-              ) : (
-                <p className="hl-text-muted">No timeline events.</p>
-              )}
-            </div>
-          }
-        />
-        <Tab
-          id="graph"
-          title="Graph"
-          panel={
-            <div className="hl-oe-ov-tab-panel">
-              <Callout icon="graph" className="hl-mb-md">
-                Explore related instances in the neighborhood graph (2–3 hops).
-              </Callout>
-              <Button
-                intent="primary"
-                icon="graph"
-                onClick={() =>
-                  void navigate({ to: "/objects/$type/$id/graph", params: { type, id } })
-                }
-              >
-                Open related instances graph
-              </Button>
+              <ObjectTimelinePanel
+                timeline={timeline ?? []}
+                principalsByUrn={principalsByUrn}
+                nextRevertibleId={nextRevertibleId}
+                reverting={revertInvocation.isPending}
+                onRevert={(invocationId) => void revertInvocationById(invocationId)}
+              />
             </div>
           }
         />

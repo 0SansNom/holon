@@ -19,8 +19,8 @@ export function SourcesPage() {
 
   return (
     <RegistryPage
-      title="Data Sources"
-      description="Connect REST, SQL, object storage, Kafka, and plugin sources; manage credentials and writeback; map synced datasets to ObjectTypes."
+      title="Sources"
+      description="Connect REST, SQL, files, Kafka, and plugins. Manage credentials and map synced data to object types."
     >
       <Tabs id="sources-tabs" selectedTabId={selectedTabId} onChange={setSelectedTabId} renderActiveTabPanelOnly>
         <Tab id="data-sources" title="Data Sources" panel={<Suspense fallback={TAB_SKELETON}><DataSourcesTab /></Suspense>} />

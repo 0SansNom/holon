@@ -15,12 +15,7 @@ export function ApplicationListPage() {
   return (
     <RegistryPage
       title="Applications"
-      description={
-        <>
-          Ontology-linked applications — every binding and action reference is validated against Knowledge's real
-          ontology, never free-form.
-        </>
-      }
+      description="Apps built on your ontology — dashboards, object views, and actions, always checked against real types."
       actions={
         <Button intent="primary" icon="add" onClick={() => setCreating(true)}>
           New application

@@ -249,12 +249,7 @@ export function CatalogPage() {
   return (
     <RegistryPage
       title="Catalog"
-      description={
-        <>
-          Governed datasets from Connectivity syncs (Iceberg). Map each dataset to an ObjectType to serve instances;
-          lineage hangs off the latest dataset version, not the bare dataset URN.
-        </>
-      }
+      description="Datasets from connected sources. Map them to object types to explore as instances, and follow lineage from each version."
     >
       {(datasets ?? []).length === 0 && (
         <EmptyState>No catalogued datasets yet — sync a source from Sources first.</EmptyState>
