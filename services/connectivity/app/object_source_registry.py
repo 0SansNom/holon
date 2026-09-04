@@ -1,4 +1,4 @@
-"""No-code object storage source registry for S3-compatible endpoints."""
+"""No-code object storage source registry for S3-compatible and Azure Blob endpoints."""
 
 from __future__ import annotations
 
@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS object_connection (
     PRIMARY KEY (tenant_id, name)
 );
 
+-- 's3' (endpoint/region/path_style, S3-compatible) or 'azure' (Blob Storage:
+-- access_key_id/secret_access_key double as account name/account key).
+ALTER TABLE object_connection ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 's3';
+
 CREATE TABLE IF NOT EXISTS object_source (
     tenant_id TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -59,9 +63,10 @@ CREATE TABLE IF NOT EXISTS object_source (
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_CONNECTION_KINDS = frozenset({"s3", "azure"})
 
 _PUBLIC_CONNECTION_COLUMNS = (
-    "tenant_id, name, endpoint, region, access_key_id, path_style, "
+    "tenant_id, name, kind, endpoint, region, access_key_id, path_style, "
     "(secret_access_key IS NOT NULL OR secret_ref IS NOT NULL) AS has_secret_access_key, "
     "created_by_urn, created_at"
 )
@@ -103,20 +108,37 @@ def _require_bucket(bucket: str) -> None:
         )
 
 
+def _default_azure_endpoint(account_name: str) -> str:
+    return f"https://{account_name}.blob.core.windows.net"
+
+
 async def register_connection(
     pool: asyncpg.Pool,
     *,
     tenant_id: str,
     name: str,
-    endpoint: str,
     access_key_id: str,
     created_by_urn: str,
+    kind: str = "s3",
+    endpoint: Optional[str] = None,
     region: str = "us-east-1",
     path_style: bool = True,
     secret_access_key: Optional[str] = None,
     secret_ref: Optional[str] = None,
 ) -> dict:
-    """Register or update an object storage connection credential."""
+    """Register or update an object storage connection credential.
+
+    For kind='azure', access_key_id/secret_access_key hold the storage
+    account name/key rather than S3 credentials, and endpoint defaults to
+    the account's public Blob endpoint when omitted.
+    """
+    if kind not in _CONNECTION_KINDS:
+        raise SourceConfigError(f"kind must be one of {sorted(_CONNECTION_KINDS)}")
+    if not endpoint:
+        if kind == "azure":
+            endpoint = _default_azure_endpoint(access_key_id)
+        else:
+            raise SourceConfigError("endpoint is required for kind='s3'")
     hostname = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}").hostname
     existing = await pool.fetchrow(
         "SELECT secret_access_key, secret_ref FROM object_connection WHERE tenant_id = $1 AND name = $2",
@@ -139,9 +161,10 @@ async def register_connection(
     await pool.execute(
         """
         INSERT INTO object_connection
-            (tenant_id, name, endpoint, region, access_key_id, secret_access_key, secret_ref, path_style, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (tenant_id, name, kind, endpoint, region, access_key_id, secret_access_key, secret_ref, path_style, created_by_urn)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
+            kind = EXCLUDED.kind,
             endpoint = EXCLUDED.endpoint,
             region = EXCLUDED.region,
             access_key_id = EXCLUDED.access_key_id,
@@ -149,7 +172,7 @@ async def register_connection(
             secret_ref = EXCLUDED.secret_ref,
             path_style = EXCLUDED.path_style
         """,
-        tenant_id, name, endpoint, region, access_key_id, secret_access_key, secret_ref, path_style, created_by_urn,
+        tenant_id, name, kind, endpoint, region, access_key_id, secret_access_key, secret_ref, path_style, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -314,8 +337,13 @@ async def is_registered(pool: asyncpg.Pool, tenant_id: str, name: str) -> bool:
 
 
 def _build_filesystem(
-    *, endpoint: str, access_key_id: str, secret_access_key: str, region: str, path_style: bool
-) -> pafs.S3FileSystem:
+    *, kind: str, endpoint: str, access_key_id: str, secret_access_key: str, region: str, path_style: bool
+) -> pafs.FileSystem:
+    if kind == "azure":
+        # access_key_id/secret_access_key double as the storage account
+        # name/key here; container addressing (container/blob) mirrors S3's
+        # bucket/key, so the read/list code below is shared as-is.
+        return pafs.AzureFileSystem(account_name=access_key_id, account_key=secret_access_key)
     parsed = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
     scheme = parsed.scheme or "https"
     endpoint_override = parsed.netloc or parsed.path
@@ -329,7 +357,7 @@ def _build_filesystem(
     )
 
 
-def _read_table(fs: pafs.S3FileSystem, path: str, format: str):
+def _read_table(fs: pafs.FileSystem, path: str, format: str):
     with fs.open_input_stream(path) as stream:
         if format == "csv":
             return pacsv.read_csv(stream)
@@ -340,6 +368,7 @@ def _read_table(fs: pafs.S3FileSystem, path: str, format: str):
 
 def _fetch_sync(
     *,
+    kind: str,
     endpoint: str,
     access_key_id: str,
     secret_access_key: str,
@@ -353,6 +382,7 @@ def _fetch_sync(
     last_synced_key: Optional[str],
 ) -> tuple[list[dict], Optional[str]]:
     fs = _build_filesystem(
+        kind=kind,
         endpoint=endpoint,
         access_key_id=access_key_id,
         secret_access_key=secret_access_key,
@@ -394,7 +424,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
         raise SourceFetchError(f"no active object source registered as {name!r}")
 
     connection = await pool.fetchrow(
-        "SELECT endpoint, region, access_key_id, secret_access_key, secret_ref, path_style "
+        "SELECT kind, endpoint, region, access_key_id, secret_access_key, secret_ref, path_style "
         "FROM object_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, row["connection_name"],
     )
@@ -413,6 +443,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     try:
         rows, new_cursor = await asyncio.to_thread(
             _fetch_sync,
+            kind=connection["kind"],
             endpoint=connection["endpoint"],
             access_key_id=connection["access_key_id"],
             secret_access_key=secret_access_key,
