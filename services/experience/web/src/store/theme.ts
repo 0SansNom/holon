@@ -12,8 +12,10 @@ function resolveTheme(preference: ThemePreference): ResolvedTheme {
 }
 
 function applyTheme(resolved: ResolvedTheme) {
-  document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = resolved;
+  const root = document.documentElement;
+  root.dataset.theme = resolved;
+  root.style.colorScheme = resolved;
+  root.classList.toggle("bp6-dark", resolved === "dark");
 }
 
 interface ThemeState {

@@ -22,12 +22,7 @@ export function GlossaryPage() {
   return (
     <RegistryPage
       title="Business Glossary"
-      description={
-        <>
-          Terms resolved (with synonyms) before any semantic fallback — structural resolution first, served by the
-          Knowledge service.
-        </>
-      }
+      description="Shared business terms and synonyms. Searching uses these first, so everyone means the same thing."
     >
       <InputGroup
         leftIcon="filter"

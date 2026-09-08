@@ -48,75 +48,69 @@ export function SavedViewsBar({
     : activeListId
       ? `l:${activeListId}`
       : "";
+  const hasSaved = explorations.length > 0 || lists.length > 0;
 
   return (
-    <div className="hl-oe-saved-views hl-mb-md">
-      <div className="hl-flex-between hl-items-center hl-mb-sm">
-        <div className="hl-section-title" style={{ margin: 0 }}>
-          Saved views
-        </div>
-        <div className="hl-flex-row hl-gap-sm" style={{ flexWrap: "wrap" }}>
-          <Button small minimal icon="floppy-disk" onClick={() => { setName(""); setSaveExplorationOpen(true); }}>
-            Save exploration
-          </Button>
-          <Button
-            small
-            minimal
-            icon="properties"
-            disabled={selectionCount === 0}
-            title={selectionCount === 0 ? "Select rows first" : `Save ${selectionCount} selected IDs`}
-            onClick={() => { setName(""); setSaveListOpen(true); }}
-          >
-            Save list
-          </Button>
-        </div>
-      </div>
-
+    <div className="hl-oe-saved-views">
       <div className="hl-flex-row hl-gap-sm hl-items-center" style={{ flexWrap: "wrap" }}>
-        <HTMLSelect
-          value={selectValue}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (!v) {
-              onClearView();
-              return;
-            }
-            if (v.startsWith("e:")) onLoadExploration(v.slice(2));
-            else if (v.startsWith("l:")) onLoadList(v.slice(2));
-          }}
+        {hasSaved && (
+          <HTMLSelect
+            value={selectValue}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (!v) {
+                onClearView();
+                return;
+              }
+              if (v.startsWith("e:")) onLoadExploration(v.slice(2));
+              else if (v.startsWith("l:")) onLoadList(v.slice(2));
+            }}
+          >
+            <option value="">Current view</option>
+            {explorations.length > 0 && (
+              <optgroup label="Saved explorations">
+                {explorations.map((e) => (
+                  <option key={e.id} value={`e:${e.id}`}>
+                    {e.name}
+                    {e.objectSet ? ` · ${e.objectSet}` : ""}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {lists.length > 0 && (
+              <optgroup label="Saved lists">
+                {lists.map((l) => (
+                  <option key={l.id} value={`l:${l.id}`}>
+                    {l.name} ({l.instanceIds.length})
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </HTMLSelect>
+        )}
+        <Button small minimal icon="floppy-disk" onClick={() => { setName(""); setSaveExplorationOpen(true); }}>
+          Save view
+        </Button>
+        <Button
+          small
+          minimal
+          icon="properties"
+          disabled={selectionCount === 0}
+          title={selectionCount === 0 ? "Select rows first" : `Save ${selectionCount} selected IDs`}
+          onClick={() => { setName(""); setSaveListOpen(true); }}
         >
-          <option value="">Current (unsaved)</option>
-          {explorations.length > 0 && (
-            <optgroup label="Explorations">
-              {explorations.map((e) => (
-                <option key={e.id} value={`e:${e.id}`}>
-                  {e.name}
-                  {e.objectSet ? ` · set:${e.objectSet}` : ""}
-                </option>
-              ))}
-            </optgroup>
-          )}
-          {lists.length > 0 && (
-            <optgroup label="Lists">
-              {lists.map((l) => (
-                <option key={l.id} value={`l:${l.id}`}>
-                  {l.name} ({l.instanceIds.length})
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </HTMLSelect>
-
+          Save list
+        </Button>
         {activeExploration && (
           <>
             <Tag minimal intent="primary" icon="filter">
-              Exploration
+              {activeExploration.name}
             </Tag>
             <Button
               minimal
               small
               icon="trash"
-              title="Delete exploration"
+              title="Delete saved view"
               onClick={() => onDeleteExploration(activeExploration.id)}
             />
           </>
@@ -124,7 +118,7 @@ export function SavedViewsBar({
         {activeList && (
           <>
             <Tag minimal intent="warning" icon="properties">
-              List · {activeList.instanceIds.length} IDs
+              {activeList.name}
             </Tag>
             <Button
               minimal
@@ -137,19 +131,14 @@ export function SavedViewsBar({
         )}
         {(activeExploration || activeList) && (
           <Button minimal small icon="cross" onClick={onClearView}>
-            Clear view
+            Clear
           </Button>
         )}
       </div>
 
-      <p className="hl-text-muted-sm hl-mt-sm">
-        Explorations store filters + column layout (local). Lists store static object IDs. Distinct from Ontology
-        Object Sets.
-      </p>
-
       <RegistryDialog
         isOpen={saveExplorationOpen}
-        title="Save exploration"
+        title="Save view"
         onClose={() => setSaveExplorationOpen(false)}
         error={null}
         isPending={false}
@@ -160,11 +149,11 @@ export function SavedViewsBar({
           setSaveExplorationOpen(false);
         }}
       >
-        <FormGroup label="Name" helperText="Includes current Object Set (if any), filters, and column layout.">
+        <FormGroup label="Name" helperText="Keeps the current set, filters, and column layout in this browser.">
           <InputGroup
             value={name}
             autoFocus
-            placeholder="My exploration"
+            placeholder="My view"
             onChange={(e) => setName(e.target.value)}
           />
         </FormGroup>
@@ -185,7 +174,7 @@ export function SavedViewsBar({
       >
         <FormGroup
           label="Name"
-          helperText={`Static list of ${selectionCount} selected object ID${selectionCount === 1 ? "" : "s"}.`}
+          helperText={`Static list of ${selectionCount} selected object${selectionCount === 1 ? "" : "s"}.`}
         >
           <InputGroup
             value={name}

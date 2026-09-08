@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { Button, Callout, Checkbox, HTMLSelect, Icon, InputGroup, Tag } from "@blueprintjs/core";
+import { useNavigate, useParams, useSearch, Link } from "@tanstack/react-router";
+import { Button, Callout, Checkbox, HTMLSelect, Icon, InputGroup, Menu, MenuDivider, MenuItem, PopoverNext, Tag } from "@blueprintjs/core";
 import {
   useReactTable,
   getCoreRowModel,
@@ -36,8 +36,12 @@ import {
   actionsForObjectType,
   computeInlineEditableActions,
   fkFieldTargetsFromRelations,
+  fkTargetForField,
+  humanizeApiName,
+  inferredFormatRule,
+  explorerTypeBlurb,
   principalsDisplayByUrn,
-  titleOf,
+  headlineOf,
 } from "./objectExplorerUtils";
 import { InlineEditableCell } from "./InlineEditableCell";
 import { SelectionPreviewPanel } from "./SelectionPreviewPanel";
@@ -133,7 +137,7 @@ export function ObjectTablePage() {
   const [previewOpen, setPreviewOpen] = useState(true);
   const [columnsDialogOpen, setColumnsDialogOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
-  const [chartCollapsed, setChartCollapsed] = useState(false);
+  const [chartCollapsed, setChartCollapsed] = useState(true);
   const [activeActionName, setActiveActionName] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [actionParameters, setActionParameters] = useState<Record<string, unknown>>({});
@@ -142,11 +146,15 @@ export function ObjectTablePage() {
   const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
   const [stackIndex, setStackIndex] = useState(0);
 
+  const activeFilterDefinition = useMemo(
+    () => buildPredicateDefinition(filterPredicates),
+    [filterPredicates],
+  );
+
   const useServerPaging = shouldUseServerPaging({
     setName,
     listId,
-    predicateCount: filterPredicates.length,
-    globalFilter,
+    predicateCount: activeFilterDefinition.all.length,
   });
   const serverCursor = cursorStack[stackIndex] ?? null;
 
@@ -157,6 +165,10 @@ export function ObjectTablePage() {
     setCursorStack([null]);
     setStackIndex(0);
   }, [type, serverPageSize, useServerPaging]);
+
+  useEffect(() => {
+    if (useServerPaging) setGlobalFilter("");
+  }, [useServerPaging]);
 
   const setsForType = useMemo(
     () => visibleObjectSetsForType(objectSets, type, setName),
@@ -217,11 +229,6 @@ export function ObjectTablePage() {
   const propertyKeys = useMemo(
     () => explorerPropertyKeys(objectType, baseRows),
     [objectType, baseRows],
-  );
-
-  const activeFilterDefinition = useMemo(
-    () => buildPredicateDefinition(filterPredicates),
-    [filterPredicates],
   );
 
   const rows = useMemo(() => {
@@ -318,7 +325,7 @@ export function ObjectTablePage() {
 
       return helper.accessor((row) => row[key], {
         id: key,
-        header: key,
+        header: humanizeApiName(key),
         size: FROZEN_DATA_COL_WIDTH,
         meta: {
           frozen,
@@ -332,7 +339,21 @@ export function ObjectTablePage() {
             ((row._maskedFields as string[]).includes(key) ||
               (row._maskedFields as string[]).includes(camelToSnake(key)));
           if (masked) return <span className="hl-masked-field">forbidden — masked</span>;
-          if (inlineAction) {
+          const value = info.getValue();
+          const fkTarget = fkTargetForField(fkFieldTargets, key);
+          if (value != null && fkTarget && !isNavTitleCol) {
+            return (
+              <Link
+                to="/objects/$type/$id"
+                params={{ type: fkTarget, id: String(value) }}
+                className="hl-link-accent"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {String(value)} → {fkTarget}
+              </Link>
+            );
+          }
+          if (inlineAction && !fkTarget) {
             return (
               <InlineEditableCell
                 value={info.getValue()}
@@ -352,7 +373,7 @@ export function ObjectTablePage() {
             );
           }
           if (isNavTitleCol) {
-            const label = titleOf(row, objectType) || String(id);
+            const label = headlineOf(row, objectType).title || String(id);
             return (
               <a
                 href={`/objects/${encodeURIComponent(type)}/${encodeURIComponent(id)}`}
@@ -369,8 +390,8 @@ export function ObjectTablePage() {
           }
           return (
             <FormattedValue
-              rule={formatsBySourceKey.get(key)}
-              value={info.getValue()}
+              rule={inferredFormatRule(formatsBySourceKey.get(key) ?? formatsBySourceKey.get(camelToSnake(key)), value)}
+              value={value}
               principalsByUrn={principalsByUrn}
               typeRule={resolveDisplayTypeRule(
                 resolvePropertyTypeRule(key, objectType?.property_types, objectType?.property_mapping),
@@ -388,6 +409,7 @@ export function ObjectTablePage() {
     visibleColumnKeys,
     freezeCount,
     formatsBySourceKey,
+    fkFieldTargets,
     principalsByUrn,
     inlineEditableBySourceKey,
     valueTypes,
@@ -405,9 +427,11 @@ export function ObjectTablePage() {
       sorting,
       globalFilter: useServerPaging ? "" : globalFilter,
       rowSelection,
-      pagination: useServerPaging
-        ? { pageIndex: 0, pageSize: Math.max(rows.length, 1) }
-        : undefined,
+      // Omit pagination when client-side: passing `undefined` overwrites
+      // initialState and TanStack then destructures pageSize from nothing.
+      ...(useServerPaging
+        ? { pagination: { pageIndex: 0, pageSize: Math.max(rows.length, 1) } }
+        : {}),
     },
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
@@ -607,11 +631,11 @@ export function ObjectTablePage() {
       description={
         activeSet ? (
           <>
-            Object Set on <span className="hl-mono">{type}</span>
+            Saved set on {type}
             {activeSet.description ? ` — ${activeSet.description}` : null}
           </>
         ) : (
-          objectType?.description
+          explorerTypeBlurb(objectType?.description)
         )
       }
       actions={
@@ -661,52 +685,65 @@ export function ObjectTablePage() {
         onClearSet={() => selectSet("")}
       />
 
-      <SavedViewsBar
-        explorations={explorationsForType}
-        lists={listsForType}
-        activeExplorationId={activeExploration?.id}
-        activeListId={activeList?.id}
-        selectionCount={selectionCount}
-        onLoadExploration={loadExploration}
-        onLoadList={loadList}
-        onClearView={clearSavedView}
-        onSaveExploration={saveCurrentExploration}
-        onSaveList={saveSelectionAsList}
-        onDeleteExploration={(id) => {
-          deleteExploration(id);
-          if (explorationId === id) clearSavedView();
-        }}
-        onDeleteList={(id) => {
-          deleteList(id);
-          if (listId === id) clearSavedView();
-        }}
-      />
+      <div className="hl-oe-query-bar">
+        {!useServerPaging && (
+          <InputGroup
+            leftIcon="search"
+            placeholder="Search these rows…"
+            value={globalFilter}
+            onChange={(e) => setGlobalFilter(e.target.value)}
+            className="hl-oe-query-search"
+          />
+        )}
+        <TableFilterBar
+          propertyKeys={propertyKeys}
+          predicates={filterPredicates}
+          onChange={setFilterPredicates}
+          onClear={() => setFilterPredicates([])}
+        />
+        <SavedViewsBar
+          explorations={explorationsForType}
+          lists={listsForType}
+          activeExplorationId={activeExploration?.id}
+          activeListId={activeList?.id}
+          selectionCount={selectionCount}
+          onLoadExploration={loadExploration}
+          onLoadList={loadList}
+          onClearView={clearSavedView}
+          onSaveExploration={saveCurrentExploration}
+          onSaveList={saveSelectionAsList}
+          onDeleteExploration={(id) => {
+            deleteExploration(id);
+            if (explorationId === id) clearSavedView();
+          }}
+          onDeleteList={(id) => {
+            deleteList(id);
+            if (listId === id) clearSavedView();
+          }}
+        />
+        <Button
+          small
+          minimal
+          icon="timeline-area-chart"
+          active={!chartCollapsed}
+          onClick={() => setChartCollapsed((c) => !c)}
+        >
+          Chart
+        </Button>
+      </div>
 
-      <TableFilterBar
-        propertyKeys={propertyKeys}
-        predicates={filterPredicates}
-        onChange={setFilterPredicates}
-        onClear={() => setFilterPredicates([])}
-      />
-
-      <ExplorationChartPanel
-        rows={baseRows}
-        propertyKeys={propertyKeys}
-        propertyMapping={objectType?.property_mapping}
-        collapsed={chartCollapsed}
-        onToggleCollapsed={() => setChartCollapsed((c) => !c)}
-        onDrillDown={(bucket, property) => {
-          setFilterPredicates((prev) => mergeDrillDownFilters(prev, property, bucket));
-        }}
-      />
-
-      <InputGroup
-        leftIcon="search"
-        placeholder="Search visible rows..."
-        value={globalFilter}
-        onChange={(e) => table.setGlobalFilter(e.target.value)}
-        className="hl-mb-md hl-filter-input"
-      />
+      {!chartCollapsed && (
+        <ExplorationChartPanel
+          rows={baseRows}
+          propertyKeys={propertyKeys}
+          propertyMapping={objectType?.property_mapping}
+          collapsed={false}
+          onToggleCollapsed={() => setChartCollapsed(true)}
+          onDrillDown={(bucket, property) => {
+            setFilterPredicates((prev) => mergeDrillDownFilters(prev, property, bucket));
+          }}
+        />
+      )}
 
       <div className={`hl-oe-explore-layout${showPreview ? "" : " hl-oe-explore-layout--full"}`}>
         <div className="hl-panel hl-table-scroll hl-oe-explore-table">
@@ -1017,41 +1054,6 @@ function ObjectTableToolbar({
           {selectionCount} selected
         </Tag>
       )}
-      <Button
-        minimal
-        icon="multi-select"
-        onClick={onSelectMatching}
-        title={`Select up to ${BATCH_ACTION_CAP} matching rows (filters + search)`}
-      >
-        Select matching
-      </Button>
-      <Button
-        minimal
-        icon="export"
-        disabled={rowCount === 0}
-        onClick={onExportCsv}
-        title={
-          selectionCount > 0
-            ? `Export ${selectionCount} selected rows as CSV`
-            : "Export visible (filtered) rows as CSV"
-        }
-      >
-        Export CSV
-      </Button>
-      <Button
-        minimal
-        icon="exchange"
-        disabled={selectionCount < 2}
-        onClick={onCompare}
-        title="Compare the first two selected objects"
-      >
-        Compare
-      </Button>
-      {!previewOpen && focusedId && (
-        <Button minimal icon="panel-stats" onClick={onShowPreview}>
-          Show preview
-        </Button>
-      )}
       <Button minimal icon="th" onClick={onOpenColumns}>
         Columns
         {columnLayoutCustom ? (
@@ -1060,9 +1062,37 @@ function ObjectTableToolbar({
           </Tag>
         ) : null}
       </Button>
-      <Button icon="diagram-tree" onClick={onViewLineage}>
-        View lineage
-      </Button>
+      <PopoverNext
+        placement="bottom-end"
+        content={
+          <Menu>
+            <MenuItem
+              icon="multi-select"
+              text="Select matching"
+              onClick={onSelectMatching}
+            />
+            <MenuItem
+              icon="export"
+              text={selectionCount > 0 ? `Export ${selectionCount} selected` : "Export CSV"}
+              disabled={rowCount === 0}
+              onClick={onExportCsv}
+            />
+            <MenuItem
+              icon="exchange"
+              text="Compare"
+              disabled={selectionCount < 2}
+              onClick={onCompare}
+            />
+            {!previewOpen && focusedId && (
+              <MenuItem icon="panel-stats" text="Show preview" onClick={onShowPreview} />
+            )}
+            <MenuDivider />
+            <MenuItem icon="diagram-tree" text="Lineage" onClick={onViewLineage} />
+          </Menu>
+        }
+      >
+        <Button icon="more" aria-label="More actions" />
+      </PopoverNext>
     </div>
   );
 }

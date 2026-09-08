@@ -28,11 +28,10 @@ const setStatus: ActionDefinition = {
 
 describe("shouldUseServerPaging", () => {
   it("is true only for unfiltered all-instances browse", () => {
-    expect(shouldUseServerPaging({ predicateCount: 0, globalFilter: "" })).toBe(true);
-    expect(shouldUseServerPaging({ setName: "active", predicateCount: 0, globalFilter: "" })).toBe(false);
-    expect(shouldUseServerPaging({ listId: "abc", predicateCount: 0, globalFilter: "" })).toBe(false);
-    expect(shouldUseServerPaging({ predicateCount: 1, globalFilter: "" })).toBe(false);
-    expect(shouldUseServerPaging({ predicateCount: 0, globalFilter: "acme" })).toBe(false);
+    expect(shouldUseServerPaging({ predicateCount: 0 })).toBe(true);
+    expect(shouldUseServerPaging({ setName: "active", predicateCount: 0 })).toBe(false);
+    expect(shouldUseServerPaging({ listId: "abc", predicateCount: 0 })).toBe(false);
+    expect(shouldUseServerPaging({ predicateCount: 1 })).toBe(false);
   });
 });
 

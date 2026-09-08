@@ -85,12 +85,7 @@ export function ApprovalsPage() {
   return (
     <RegistryPage
       title="Approvals"
-      description={
-        <>
-          High-risk Actions wait here until a principal with <code>approve</code> on the target ObjectType decides.
-          Editors can request; admins approve or reject.
-        </>
-      }
+      description="High-risk actions wait here until someone with approval rights decides. Editors request; admins approve or reject."
       trailing={
         <HTMLSelect
           value={statusFilter}

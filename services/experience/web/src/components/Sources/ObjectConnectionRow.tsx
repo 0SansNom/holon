@@ -25,13 +25,14 @@ export function ObjectConnectionRow({ connection, onEdit }: { connection: Object
         <div>
           <strong>{connection.name}</strong>
           <div className="hl-mono hl-text-muted-sm hl-mt-xs">
-            {connection.endpoint} · {connection.region}
+            {connection.endpoint}
+            {connection.kind === "s3" && ` · ${connection.region}`}
           </div>
           <div className="hl-tag-row hl-mt-xs">
             <Tag minimal icon="cloud">
-              Object
+              {connection.kind === "azure" ? "Azure Blob" : "S3"}
             </Tag>
-            {connection.path_style && (
+            {connection.kind === "s3" && connection.path_style && (
               <Tag minimal>path-style</Tag>
             )}
           </div>
