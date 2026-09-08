@@ -20,7 +20,7 @@ test.describe("SPA happy path", () => {
   test("Sources lists connectors and opens a REST dialog", async ({ page }) => {
     await signIn(page);
     await page.getByRole("link", { name: "Sources" }).click();
-    await expect(page.getByRole("heading", { name: "Data Sources" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sources" })).toBeVisible();
     await page.getByRole("button", { name: "Connect a source" }).click();
     await page.getByRole("menuitem", { name: "REST API" }).click();
     await expect(page.getByRole("dialog", { name: "Connect a source" })).toBeVisible();

@@ -61,13 +61,7 @@ export function OntologyPage() {
   return (
     <RegistryPage
       title="Ontology"
-      description={
-        <>
-          Define ObjectTypes, Interfaces, RelationTypes, Value Types, Shared Property Types, Action Types, and Object
-          Sets — no code required. The same governance actions the CLI's <code>holon ontology</code> commands and the
-          raw API already wrap.
-        </>
-      }
+      description="Define the types, relations, and actions that describe your business — no code required."
       actions={<OntologyChrome />}
     >
       <Tabs id="ontology-tabs" selectedTabId={selectedTabId} onChange={selectTab} renderActiveTabPanelOnly>

@@ -9,7 +9,7 @@ import type {
   PropertyFormatRule,
   SharedPropertyType,
 } from "../../api/knowledge";
-import { OBJECT_METADATA_KEYS, humanizeApiName } from "./objectExplorerUtils";
+import { OBJECT_METADATA_KEYS, fkTargetForField, humanizeApiName } from "./objectExplorerUtils";
 import { InlineEditableCell } from "./InlineEditableCell";
 import {
   isPropertyHidden,
@@ -62,7 +62,7 @@ export function ObjectPropertiesTable({
   });
 
   function renderValue(key: string, value: unknown) {
-    const fkTargetType = fkFieldTargets.get(key);
+    const fkTargetType = fkTargetForField(fkFieldTargets, key);
     const typeRule = resolveDisplayTypeRule(
       resolvePropertyTypeRule(key, objectType?.property_types, objectType?.property_mapping),
       sharedPropertyTypes,

@@ -131,7 +131,7 @@ const objectDetailRoute = createRoute({
     const tab = typeof search.tab === "string" && /^[a-zA-Z0-9_-]+$/.test(search.tab) ? search.tab : undefined;
     const view =
       search.view === "standard" || search.view === "configured" ? search.view : undefined;
-    const standardAllowed = new Set(["overview", "properties", "links", "media", "timeline", "graph"]);
+    const standardAllowed = new Set(["overview", "properties", "links", "media", "timeline"]);
     if (view === "configured" || (tab && !standardAllowed.has(tab))) {
       return { tab, view };
     }

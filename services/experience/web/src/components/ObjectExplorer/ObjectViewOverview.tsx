@@ -1,8 +1,21 @@
 import { Tag } from "@blueprintjs/core";
 import { Link } from "@tanstack/react-router";
 import { FormattedValue } from "../common/PropertyFormat";
-import type { ConditionalFormatRule, ObjectType, PropertyFormatRule, SharedPropertyType } from "../../api/knowledge";
-import { OBJECT_METADATA_KEYS, buildExplorerColumnKeys, humanizeApiName, preferTitleColumnFirst } from "./objectExplorerUtils";
+import type {
+  ConditionalFormatRule,
+  ObjectType,
+  PropertyFormatRule,
+  SharedPropertyType,
+} from "../../api/knowledge";
+import {
+  OBJECT_METADATA_KEYS,
+  buildExplorerColumnKeys,
+  fkTargetForField,
+  humanizeApiName,
+  inferredFormatRule,
+  preferTitleColumnFirst,
+  type RelatedLink,
+} from "./objectExplorerUtils";
 import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 import {
   effectivePropertyVisibility,
@@ -16,13 +29,14 @@ import { applyConditionalStyle, camelToSnake } from "../common/propertyFormatUti
 export function ObjectViewOverview({
   object,
   objectType,
-  objectTypeName,
   maskedFields,
   fkFieldTargets,
   formatsBySourceKey,
   conditionalFormatsBySourceKey,
   principalsByUrn,
   sharedPropertyTypes = [],
+  relatedLinks = [],
+  onOpenLink,
   maxFallback = 6,
 }: {
   object: Record<string, unknown>;
@@ -34,6 +48,8 @@ export function ObjectViewOverview({
   conditionalFormatsBySourceKey: Map<string, ConditionalFormatRule[]>;
   principalsByUrn: Map<string, string>;
   sharedPropertyTypes?: SharedPropertyType[];
+  relatedLinks?: RelatedLink[];
+  onOpenLink?: (linkName?: string) => void;
   maxFallback?: number;
 }) {
   const visible = (key: string) =>
@@ -60,13 +76,12 @@ export function ObjectViewOverview({
   const usingFallback = prominent.length === 0;
   const durableImplements = (objectType?.implements ?? []).filter((iface) => !isEphemeralTestName(iface));
 
-  const hasTags = Boolean(objectType?.classification) || durableImplements.length > 0;
+  const hasTags = durableImplements.length > 0;
 
   return (
     <div className="hl-oe-ov-overview">
       {hasTags && (
         <div className="hl-tag-row hl-mb-sm">
-          {objectType?.classification && <Tag minimal>{objectType.classification}</Tag>}
           {durableImplements.map((iface) => (
             <Tag key={iface} minimal>
               {humanizeApiName(iface)}
@@ -75,15 +90,7 @@ export function ObjectViewOverview({
         </div>
       )}
 
-      <div className="hl-flex-between hl-items-center hl-mb-sm">
-        <h4 className="hl-section-title" style={{ margin: 0 }}>
-          {usingFallback ? "Key properties" : "Prominent properties"}
-        </h4>
-        <span className="hl-text-muted-sm">
-          {objectTypeName}
-          {object.id != null ? ` · ${String(object.id)}` : ""}
-        </span>
-      </div>
+      <h4 className="hl-section-title hl-mb-sm">{usingFallback ? "Key properties" : "Prominent properties"}</h4>
 
       {keys.length === 0 ? (
         <p className="hl-text-muted">No properties to preview.</p>
@@ -91,12 +98,17 @@ export function ObjectViewOverview({
         <dl className="hl-oe-ov-prominent-grid">
           {keys.map((key) => {
             const value = object[key];
-            const fkTarget = fkFieldTargets.get(key);
+            const fkTarget = fkTargetForField(fkFieldTargets, key);
             const typeRule = resolveDisplayTypeRule(
               resolvePropertyTypeRule(key, objectType?.property_types, objectType?.property_mapping),
               sharedPropertyTypes,
             );
             const style = applyConditionalStyle(conditionalFormatsBySourceKey.get(key), object, value);
+            const formatRule =
+              inferredFormatRule(
+                formatsBySourceKey.get(key) ?? formatsBySourceKey.get(camelToSnake(key)),
+                value,
+              );
             return (
               <div key={key} className="hl-oe-ov-prominent-item" style={style}>
                 <dt className="hl-text-muted-sm" title={key}>
@@ -109,17 +121,17 @@ export function ObjectViewOverview({
                     <Link
                       to="/objects/$type/$id"
                       params={{ type: fkTarget, id: String(value) }}
-                      className="hl-link-accent hl-mono"
+                      className="hl-link-accent"
                     >
-                      {String(value)}
+                      {String(value)} → {fkTarget}
                     </Link>
                   ) : (
                     <FormattedValue
-                      rule={formatsBySourceKey.get(key) ?? formatsBySourceKey.get(camelToSnake(key))}
+                      rule={formatRule}
                       value={value}
                       principalsByUrn={principalsByUrn}
                       typeRule={typeRule}
-                      compact
+                      compact={false}
                     />
                   )}
                 </dd>
@@ -127,6 +139,33 @@ export function ObjectViewOverview({
             );
           })}
         </dl>
+      )}
+
+      {relatedLinks.length > 0 && onOpenLink && (
+        <div className="hl-mt-md">
+          <div className="hl-flex-between hl-items-center">
+            <h4 className="hl-section-title" style={{ margin: 0 }}>
+              Links
+            </h4>
+            <button type="button" className="hl-link-accent hl-oe-ov-text-btn" onClick={() => onOpenLink()}>
+              View all ({relatedLinks.length})
+            </button>
+          </div>
+          <div className="hl-tag-row hl-mt-sm">
+            {relatedLinks.slice(0, 8).map((link, i) => (
+              <Tag
+                key={`${link.linkName}-${i}`}
+                minimal
+                interactive
+                intent={link.visibility === "prominent" ? "primary" : "none"}
+                icon="link"
+                onClick={() => onOpenLink(link.linkName)}
+              >
+                {link.pluralLabel || link.label}
+              </Tag>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );

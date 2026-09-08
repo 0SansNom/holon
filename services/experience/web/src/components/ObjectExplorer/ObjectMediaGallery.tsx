@@ -5,8 +5,7 @@ export function ObjectMediaGallery({ items }: { items: ObjectMediaItem[] }) {
   if (items.length === 0) {
     return (
       <p className="hl-text-muted">
-        No media properties on this object. Mark properties with type class{" "}
-        <span className="hl-mono">hubble:media_url</span> or <span className="hl-mono">hubble:icon</span>.
+        No images or files on this object.
       </p>
     );
   }

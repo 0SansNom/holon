@@ -35,12 +35,7 @@ export function CollectionListPage() {
   return (
     <RegistryPage
       title="Collections"
-      description={
-        <>
-          A named, hand-curated grouping of resources — independent of tags and of project scope, cutting across
-          both. Add resources to one from any ObjectType/Application's "…" menu.
-        </>
-      }
+      description="Named groups of resources you care about — across projects and tags. Add items from any resource’s ⋮ menu."
       actions={
         <Button intent="primary" icon="add" onClick={() => setCreating(true)}>
           New collection

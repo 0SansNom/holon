@@ -10,8 +10,15 @@ import {
   parseSearchHitRef,
   preferTitleColumnFirst,
   preferredSearchProperty,
+  searchHitDisplay,
+  snippetAroundQuery,
   resolveInstanceColumnKey,
   titleOf,
+  headlineOf,
+  inferredFormatRule,
+  explorerTypeBlurb,
+  fkFieldTargetsFromRelations,
+  fkTargetForField,
   urnShortName,
 } from "./objectExplorerUtils";
 
@@ -45,6 +52,37 @@ describe("parseSearchHitRef", () => {
   it("returns null for malformed hits", () => {
     expect(parseSearchHitRef({ urn: "Customer:acme:42", object_type: "Order" })).toBeNull();
     expect(parseSearchHitRef({ urn: "Customer:acme", object_type: "Customer", tenant_id: "acme" })).toBeNull();
+  });
+});
+
+describe("searchHitDisplay", () => {
+  it("prefers a human phrase over the index urn", () => {
+    expect(
+      searchHitDisplay({
+        urn: "Order:acme:1",
+        object_type: "Order",
+        tenant_id: "acme",
+        text: "1 45000.00 delivered Industrial Robot Arm X200 2026-05-10 09:00:00+00:00 1",
+      }),
+    ).toEqual({ title: "Industrial Robot Arm X200", type: "Order", id: "1" });
+  });
+
+  it("strips ticket status noise", () => {
+    expect(
+      searchHitDisplay({
+        urn: "SupportTicket:acme:1",
+        object_type: "SupportTicket",
+        tenant_id: "acme",
+        text: "1 open Robot arm calibration issue high 2026-06-01 09:00:00 1",
+      }).title,
+    ).toBe("Robot arm calibration issue");
+  });
+});
+
+describe("snippetAroundQuery", () => {
+  it("windows text around the first match", () => {
+    expect(snippetAroundQuery("prefix robot arm suffix", "robot", 3)).toBe("…ix robot ar…");
+    expect(snippetAroundQuery("nope", "robot")).toBe("");
   });
 });
 
@@ -146,6 +184,68 @@ describe("titleOf", () => {
         { title_key: "name", primary_key: "id", property_mapping: { id: "id", name: "customer_name" } },
       ),
     ).toBe("Globex");
+  });
+});
+
+describe("headlineOf", () => {
+  it("keeps a human title_key", () => {
+    expect(
+      headlineOf(
+        { id: 7, name: "Acme" },
+        { title_key: "name", primary_key: "id", property_mapping: { id: "id", name: "name" } },
+      ),
+    ).toEqual({ title: "Acme", id: "7" });
+  });
+
+  it("falls back to product when title_key is the id", () => {
+    expect(
+      headlineOf(
+        { id: 1, product: "Industrial Robot Arm X200" },
+        { title_key: "id", primary_key: "id", property_mapping: { id: "id", product: "product" } },
+      ),
+    ).toEqual({ title: "Industrial Robot Arm X200", id: "1" });
+  });
+});
+
+describe("inferredFormatRule", () => {
+  it("treats ISO-like timestamps as datetime", () => {
+    expect(inferredFormatRule(undefined, "2026-05-10 09:00:00+00:00")).toEqual({
+      kind: "datetime",
+      style: "datetime-short",
+    });
+  });
+
+  it("groups decimal money-like strings", () => {
+    expect(inferredFormatRule(undefined, "45000.00")).toEqual({
+      kind: "numeric",
+      useGrouping: true,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  });
+});
+
+describe("explorerTypeBlurb", () => {
+  it("hides test-fixture copy", () => {
+    expect(explorerTypeBlurb("Test fixture ObjectType Order")).toBeUndefined();
+    expect(explorerTypeBlurb("Customer master records")).toBe("Customer master records");
+  });
+});
+
+describe("fkFieldTargetsFromRelations", () => {
+  it("indexes camelCase and snake_case source properties", () => {
+    const map = fkFieldTargetsFromRelations(
+      [
+        {
+          source_object_type_urn: "hl:t:w:object-type:Order",
+          source_property: "customerId",
+          target_object_type_urn: "hl:t:w:object-type:Customer",
+        },
+      ],
+      "Order",
+    );
+    expect(fkTargetForField(map, "customerId")).toBe("Customer");
+    expect(fkTargetForField(map, "customer_id")).toBe("Customer");
   });
 });
 

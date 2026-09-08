@@ -19,49 +19,54 @@ export function TableFilterBar({
   onClear: () => void;
 }) {
   const active = buildPredicateDefinition(predicates).all;
+  const empty = predicates.length === 0;
 
   return (
-    <div className="hl-oe-filter-bar hl-mb-md">
-      <div className="hl-flex-between hl-items-center hl-mb-sm">
-        <div className="hl-section-title" style={{ margin: 0 }}>
-          Filters
-        </div>
-        <div className="hl-flex-row hl-gap-sm hl-items-center">
-          {active.length > 0 && (
-            <Tag minimal intent="primary" icon="filter">
-              {active.length} active
-            </Tag>
-          )}
-          {(predicates.length > 0 || active.length > 0) && (
-            <Button minimal small icon="cross" onClick={onClear}>
-              Clear filters
-            </Button>
-          )}
-        </div>
-      </div>
-      {propertyKeys.length === 0 ? (
-        <p className="hl-text-muted-sm">No properties available to filter.</p>
+    <div className={`hl-oe-filter-bar${empty ? " hl-oe-filter-bar--empty" : ""}`}>
+      {empty ? (
+        <Button
+          small
+          minimal
+          icon="filter"
+          disabled={propertyKeys.length === 0}
+          onClick={() => onChange([{ property: propertyKeys[0] ?? "", op: "eq", value: "" }])}
+        >
+          Add filter
+        </Button>
       ) : (
-        <PredicateFilterRows
-          predicates={
-            predicates.length > 0
-              ? predicates
-              : [{ property: propertyKeys[0] ?? "", op: "eq", value: "" }]
-          }
-          propertyKeys={propertyKeys}
-          onChange={onChange}
-          addLabel="Add filter"
-          allowEmpty
-        />
-      )}
-      {active.length > 0 && (
-        <div className="hl-tag-row hl-mt-sm">
-          {active.map((pred, i) => (
-            <Tag key={`${pred.property}-${pred.op}-${i}`} minimal className="hl-mono">
-              {formatPredicateChip(pred)}
-            </Tag>
-          ))}
-        </div>
+        <>
+          <div className="hl-flex-between hl-items-center hl-mb-sm">
+            <div className="hl-section-title" style={{ margin: 0 }}>
+              Filters
+            </div>
+            <div className="hl-flex-row hl-gap-sm hl-items-center">
+              {active.length > 0 && (
+                <Tag minimal intent="primary" icon="filter">
+                  {active.length} active
+                </Tag>
+              )}
+              <Button minimal small icon="cross" onClick={onClear}>
+                Clear
+              </Button>
+            </div>
+          </div>
+          <PredicateFilterRows
+            predicates={predicates}
+            propertyKeys={propertyKeys}
+            onChange={onChange}
+            addLabel="Add filter"
+            allowEmpty
+          />
+          {active.length > 0 && (
+            <div className="hl-tag-row hl-mt-sm">
+              {active.map((pred, i) => (
+                <Tag key={`${pred.property}-${pred.op}-${i}`} minimal className="hl-mono">
+                  {formatPredicateChip(pred)}
+                </Tag>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

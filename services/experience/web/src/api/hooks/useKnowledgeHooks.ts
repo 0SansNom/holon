@@ -1,4 +1,4 @@
-import { useQuery, useSuspenseQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useSuspenseQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { knowledgeApi, type ActionApprovalStatus } from "../knowledge";
 import { queryKeys, BRANCH_KIND_LIST_QUERY_KEY, type BranchKind } from "../queryKeys";
 import { useOptionalSuspenseQuery } from "../optionalSuspenseQuery";
@@ -604,6 +604,7 @@ export function useSearch(
     ),
     queryFn: () => knowledgeApi.search(q, options),
     enabled: q.length > 0,
+    placeholderData: keepPreviousData,
   });
 }
 

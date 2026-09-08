@@ -140,9 +140,12 @@ export interface RegisterSqlSourceRequest {
   cursor_property?: string;
 }
 
+export type ObjectConnectionKind = "s3" | "azure";
+
 export interface ObjectConnection {
   tenant_id: string;
   name: string;
+  kind: ObjectConnectionKind;
   endpoint: string;
   region: string;
   access_key_id: string;
@@ -154,8 +157,9 @@ export interface ObjectConnection {
 
 export interface RegisterObjectConnectionRequest {
   name: string;
-  endpoint: string;
   access_key_id: string;
+  kind?: ObjectConnectionKind;
+  endpoint?: string;
   region?: string;
   path_style?: boolean;
   secret_access_key?: string;

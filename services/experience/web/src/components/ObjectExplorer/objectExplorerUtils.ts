@@ -1,4 +1,4 @@
-import type { ActionDefinition, ObjectType } from "../../api/knowledge";
+import type { ActionDefinition, ObjectType, PropertyFormatRule } from "../../api/knowledge";
 import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 import { camelToSnake } from "../common/propertyFormatUtils";
 
@@ -168,6 +168,62 @@ export function parseSearchHitRef(hit: {
   return id ? { type, id } : null;
 }
 
+const SEARCH_DATE_TOKEN = /^\d{4}-\d{2}-\d{2}/;
+const SEARCH_TIME_TOKEN = /^\d{2}:\d{2}(:\d{2})?/;
+const SEARCH_NUMERIC_TOKEN = /^-?\d+(\.\d+)?$/;
+const SEARCH_UUID_TOKEN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SEARCH_STOP_TOKENS = new Set([
+  "open",
+  "closed",
+  "pending",
+  "delivered",
+  "shipped",
+  "true",
+  "false",
+  "high",
+  "low",
+  "medium",
+  "internal",
+  "confidential",
+  "public",
+]);
+
+function isSearchNoiseToken(token: string, type: string, id: string): boolean {
+  if (token === type || token === id) return true;
+  if (SEARCH_DATE_TOKEN.test(token) || SEARCH_TIME_TOKEN.test(token)) return true;
+  if (SEARCH_NUMERIC_TOKEN.test(token) || SEARCH_UUID_TOKEN.test(token)) return true;
+  if (SEARCH_STOP_TOKENS.has(token.toLowerCase())) return true;
+  return false;
+}
+
+/** Pull a readable title out of the concatenated OpenSearch `text` blob. */
+export function searchHitDisplay(hit: {
+  urn: string;
+  object_type: string;
+  tenant_id?: string;
+  text: string;
+}): { title: string; type: string; id: string } {
+  const ref = parseSearchHitRef(hit);
+  const type = ref?.type || hit.object_type;
+  const id = ref?.id ?? "";
+  const phrase = hit.text
+    .split(/\s+/)
+    .filter((token) => token && !isSearchNoiseToken(token, type, id))
+    .join(" ")
+    .trim();
+  return { title: phrase || (id ? `${type} ${id}` : type || hit.urn), type, id };
+}
+
+export function snippetAroundQuery(text: string, query: string, radius = 48): string {
+  const q = query.trim();
+  if (!q || !text) return "";
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return "";
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + q.length + radius);
+  return `${start > 0 ? "…" : ""}${text.slice(start, end).trim()}${end < text.length ? "…" : ""}`;
+}
+
 /** Pick a property for a contains-predicate when saving a search as an Object Set. */
 export function preferredSearchProperty(objectType?: {
   title_key?: string | null;
@@ -234,6 +290,50 @@ export function titleOf(
   return String(instance.id ?? "");
 }
 
+const HEADLINE_FALLBACK_KEYS = ["name", "title", "product", "subject", "email", "label"];
+
+/** Page heading: prefer a human field when title_key is just the id. */
+export function headlineOf(
+  instance: Record<string, unknown> | null | undefined,
+  objectType?: Pick<ObjectType, "title_key" | "primary_key" | "property_mapping"> | null,
+): { title: string; id: string } {
+  const id = instance?.id != null && String(instance.id) !== "" ? String(instance.id) : "";
+  const mapped = titleOf(instance, objectType);
+  const titleKey = objectType?.title_key;
+  const idLike = !titleKey || titleKey === "id" || titleKey === objectType?.primary_key || mapped === id;
+  if (!idLike && mapped) return { title: mapped, id };
+  if (instance) {
+    for (const key of HEADLINE_FALLBACK_KEYS) {
+      const value = instancePropertyValue(instance, key, objectType?.property_mapping);
+      if (value != null && String(value).trim() !== "" && String(value) !== id) {
+        return { title: String(value), id };
+      }
+    }
+  }
+  return { title: mapped || id || "Untitled", id };
+}
+
+export function inferredFormatRule(
+  rule: PropertyFormatRule | undefined,
+  value: unknown,
+): PropertyFormatRule | undefined {
+  if (rule) return rule;
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2})/.test(value)) {
+    return { kind: "datetime", style: "datetime-short" };
+  }
+  if (typeof value === "string" && /^-?\d+\.\d{2}$/.test(value)) {
+    return { kind: "numeric", useGrouping: true, minimumFractionDigits: 2, maximumFractionDigits: 2 };
+  }
+  return undefined;
+}
+
+export function explorerTypeBlurb(description?: string | null): string | undefined {
+  const text = description?.trim();
+  if (!text) return undefined;
+  if (/test fixture/i.test(text)) return undefined;
+  return text;
+}
+
 /** True when an Action Type targets this ObjectType directly or via an implemented interface. */
 export function actionTargetsObjectType(
   action: { target_object_type?: string | null; target_interface?: string | null },
@@ -266,9 +366,16 @@ export function fkFieldTargetsFromRelations(
   const map = new Map<string, string>();
   for (const relation of relationTypes) {
     if (urnShortName(relation.source_object_type_urn) !== objectTypeName) continue;
-    map.set(camelToSnake(relation.source_property), urnShortName(relation.target_object_type_urn));
+    const target = urnShortName(relation.target_object_type_urn);
+    const source = relation.source_property;
+    map.set(source, target);
+    map.set(camelToSnake(source), target);
   }
   return map;
+}
+
+export function fkTargetForField(map: Map<string, string>, key: string): string | undefined {
+  return map.get(key) ?? map.get(camelToSnake(key));
 }
 
 export function principalsDisplayByUrn(

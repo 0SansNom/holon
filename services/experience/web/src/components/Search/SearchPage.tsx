@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearch as useSearchParams } from "@tanstack/react-router";
 import { Button, FormGroup, HTMLSelect, InputGroup, Tag } from "@blueprintjs/core";
 import { useCreateObjectSet, useInterfaces, useObjectTypes, useSearch } from "../../api/hooks";
@@ -8,7 +8,14 @@ import { RegistryPage } from "../common/PageLayout";
 import { RegistryDialog } from "../common/RegistryDialog";
 import { SearchResultsSkeleton } from "../common/Skeleton";
 import { useAsyncAction } from "../../hooks/useAsyncAction";
-import { objectSetBrowsePath, parseSearchHitRef, preferredSearchProperty } from "../ObjectExplorer/objectExplorerUtils";
+import {
+  humanizeApiName,
+  objectSetBrowsePath,
+  parseSearchHitRef,
+  preferredSearchProperty,
+  searchHitDisplay,
+  snippetAroundQuery,
+} from "../ObjectExplorer/objectExplorerUtils";
 import { expandFilterPropertyKeys } from "../Ontology/objectSetPredicates";
 import { isEphemeralTestName } from "../Ontology/ephemeralResources";
 
@@ -55,10 +62,9 @@ export function SearchPage() {
     () => interfaces.filter((iface) => !isEphemeralTestName(iface.name)),
     [interfaces],
   );
-  const ephemeralInterfaceCount = interfaces.length - durableInterfaces.length;
+  const showInterfaceFilter = durableInterfaces.length > 0 || !!interfaceName;
 
-  function submit(next: string) {
-    setSubmitted(next);
+  function resetFacets() {
     setObjectType(undefined);
     setInterfaceName(undefined);
     setPropFilters({});
@@ -66,6 +72,24 @@ export function SearchPage() {
     setStructFilterValue("");
     setPage(0);
   }
+
+  function submit(next: string) {
+    const q = next.trim();
+    if (q !== submitted) resetFacets();
+    else setPage(0);
+    setSubmitted(q);
+    void navigate({ to: "/search", search: q ? { q } : {}, replace: true });
+  }
+
+  useEffect(() => {
+    const next = (prefill ?? "").trim();
+    setQuery(next);
+    if (next === submitted) return;
+    setSubmitted(next);
+    resetFacets();
+    // Sync from the URL / command palette only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
 
   function toggleFacet(facet: string) {
     setObjectType((current) => (current === facet ? undefined : facet));
@@ -117,22 +141,22 @@ export function SearchPage() {
     setSetName("");
     const path = objectSetBrowsePath(objectType, name);
     void navigate({ to: path.to, params: path.params, search: path.search });
-  }, { successMessage: `Object set "${setName.trim()}" created` });
+  }, { successMessage: `Set “${setName.trim()}” created` });
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
   const facetEntries = Object.entries(data?.facets ?? {}).sort((a, b) => b[1] - a[1]);
   const propertyFacetEntries = Object.entries(data?.property_facets ?? {});
   const results = data?.results ?? [];
 
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    submit(query);
+  }
+
   return (
     <RegistryPage
       title="Search"
-      description={
-        <>
-          Unified search (Knowledge `/search`) — entitlement tokens filter at the source; ObjectType, interface, and
-          property facets narrow hits via OpenSearch <code>post_filter</code> (totals reflect the active filters).
-        </>
-      }
+      description="Find objects by name, id, or any indexed field."
       actions={
         objectType ? (
           <Button
@@ -143,30 +167,33 @@ export function SearchPage() {
               setSavingSet(true);
             }}
           >
-            Save as Object Set
+            Save as set
           </Button>
         ) : undefined
       }
     >
-      <div className="hl-flex-row hl-gap-sm hl-items-start" style={{ flexWrap: "wrap" }}>
+      <form className="hl-search-query" onSubmit={onSubmit}>
         <InputGroup
           large
           leftIcon="search"
-          placeholder="Search..."
+          placeholder="Search objects…"
           value={query}
+          autoFocus
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit(query)}
-          style={{ flex: "1 1 280px" }}
+          className="hl-search-query-input"
+          rightElement={
+            <Button minimal icon="arrow-right" type="submit" aria-label="Search" disabled={!query.trim() && !submitted} />
+          }
         />
-        <FormGroup label="Interface" style={{ marginBottom: 0, minWidth: 200 }}>
+        {showInterfaceFilter && (
           <HTMLSelect
             large
-            fill
             value={interfaceName ?? ""}
             onChange={(e) => {
               setInterfaceName(e.target.value || undefined);
               setPage(0);
             }}
+            aria-label="Interface"
           >
             <option value="">Any interface</option>
             {durableInterfaces.map((iface) => (
@@ -174,20 +201,20 @@ export function SearchPage() {
                 {iface.name}
               </option>
             ))}
-            {ephemeralInterfaceCount > 0 && interfaceName && isEphemeralTestName(interfaceName) ? (
+            {interfaceName && isEphemeralTestName(interfaceName) ? (
               <option value={interfaceName}>{interfaceName} (test)</option>
             ) : null}
           </HTMLSelect>
-        </FormGroup>
-      </div>
+        )}
+      </form>
 
-      {isLoading && submitted && <SearchResultsSkeleton />}
+      {isLoading && submitted && !data && <SearchResultsSkeleton />}
 
-      {data && !isLoading && (
+      {data && submitted && (
         <div className="hl-search-layout">
           {facetEntries.length > 0 && (
             <div className="hl-search-facets">
-              <div className="hl-section-title hl-mb-sm">Object type</div>
+              <div className="hl-section-title hl-mb-sm">Type</div>
               <div className="hl-grid-gap-sm">
                 {facetEntries.map(([facet, count]) => (
                   <button
@@ -204,7 +231,7 @@ export function SearchPage() {
               </div>
               {propertyFacetEntries.map(([prop, buckets]) => (
                 <div key={prop} className="hl-mt-md">
-                  <div className="hl-section-title hl-mb-sm">{prop}</div>
+                  <div className="hl-section-title hl-mb-sm">{humanizeApiName(prop)}</div>
                   <div className="hl-grid-gap-sm">
                     {Object.entries(buckets)
                       .sort((a, b) => b[1] - a[1])
@@ -227,8 +254,10 @@ export function SearchPage() {
           )}
 
           <div className="hl-flex-1 hl-min-w-0">
-            <div className="hl-flex-row hl-items-center hl-gap-sm hl-mb-md">
-              <Tag minimal>{data.total} results</Tag>
+            <div className="hl-flex-row hl-items-center hl-gap-sm hl-mb-md" style={{ flexWrap: "wrap" }}>
+              <Tag minimal>
+                {data.total} result{data.total === 1 ? "" : "s"}
+              </Tag>
               {interfaceName && (
                 <Tag
                   minimal
@@ -239,7 +268,7 @@ export function SearchPage() {
                     setPage(0);
                   }}
                 >
-                  interface:{interfaceName}
+                  {interfaceName}
                 </Tag>
               )}
               {objectType && (
@@ -252,7 +281,6 @@ export function SearchPage() {
                   key={prop}
                   minimal
                   intent="primary"
-                  className="hl-mono"
                   onRemove={() => {
                     setPropFilters((current) => {
                       const next = { ...current };
@@ -262,17 +290,14 @@ export function SearchPage() {
                     setPage(0);
                   }}
                 >
-                  {prop}={value}
+                  {humanizeApiName(prop)}: {value}
                 </Tag>
               ))}
-              {objectType && !saveProperty && (
-                <span className="hl-text-muted-sm">Select a type with properties to save as an Object Set.</span>
-              )}
             </div>
 
             {objectType && structFieldKeys.length > 0 && (
               <div className="hl-flex-row hl-gap-sm hl-items-end hl-mb-md" style={{ flexWrap: "wrap" }}>
-                <FormGroup label="Struct field" style={{ marginBottom: 0, minWidth: 180 }}>
+                <FormGroup label="Field" style={{ marginBottom: 0, minWidth: 180 }}>
                   <HTMLSelect
                     fill
                     value={structFilterProp}
@@ -281,7 +306,7 @@ export function SearchPage() {
                     <option value="">Select field…</option>
                     {structFieldKeys.map((key) => (
                       <option key={key} value={key}>
-                        {key}
+                        {humanizeApiName(key)}
                       </option>
                     ))}
                   </HTMLSelect>
@@ -291,7 +316,7 @@ export function SearchPage() {
                     value={structFilterValue}
                     onChange={(e) => setStructFilterValue(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && applyStructFilter()}
-                    placeholder="Paris"
+                    placeholder="Value"
                   />
                 </FormGroup>
                 <Button
@@ -305,22 +330,10 @@ export function SearchPage() {
             )}
 
             {results.map((r) => {
+              const display = searchHitDisplay(r);
               const ref = parseSearchHitRef(r);
               const body = (
-                <>
-                  <div className="hl-flex-between">
-                    <span className="hl-mono hl-text-muted-sm">{r.urn}</span>
-                    <ClassificationBadge classification={r.classification} />
-                  </div>
-                  <p className="hl-body-text hl-mt-sm" style={{ marginBottom: 0 }}>
-                    {r.text}
-                  </p>
-                  {ref && (
-                    <div className="hl-text-muted-sm hl-mt-xs">
-                      Open {ref.type}/{ref.id}
-                    </div>
-                  )}
-                </>
+                <SearchHitBody hitText={r.text} query={submitted} classification={r.classification} display={display} />
               );
               if (!ref) {
                 return (
@@ -341,7 +354,7 @@ export function SearchPage() {
               );
             })}
             {results.length === 0 && (
-              <EmptyState>No results for "{submitted}".</EmptyState>
+              <EmptyState>No results for “{submitted}”. Try another query or clear filters.</EmptyState>
             )}
 
             {totalPages > 1 && (
@@ -364,12 +377,14 @@ export function SearchPage() {
       )}
 
       {!submitted && !isLoading && (
-        <p className="hl-text-muted hl-mt-md">Enter a query to search across indexed objects.</p>
+        <div className="hl-mt-md">
+          <EmptyState>Type a name, id, or keyword and press Enter.</EmptyState>
+        </div>
       )}
 
       <RegistryDialog
         isOpen={savingSet}
-        title="Save search as Object Set"
+        title="Save search as a set"
         onClose={() => setSavingSet(false)}
         error={saveError}
         isPending={savePending}
@@ -378,26 +393,69 @@ export function SearchPage() {
         onSubmit={() => submitSaveSet(undefined)}
       >
         <p className="hl-text-muted-sm hl-mb-md">
-          Creates a governed Object Set on <strong>{objectType}</strong>
+          Creates a set of {objectType} objects
           {submitted && saveProperty ? (
             <>
               {" "}
-              with <span className="hl-mono">{saveProperty} contains “{submitted}”</span>
+              matching <span className="hl-mono">{humanizeApiName(saveProperty)} contains “{submitted}”</span>
             </>
           ) : (
-            <> matching all instances</>
+            <> (all instances)</>
           )}
-          . Free-text search is approximated as a property predicate.
+          .
         </p>
         <FormGroup label="Name">
           <InputGroup
             value={setName}
             onChange={(e) => setSetName(e.target.value)}
-            placeholder={`${objectType ?? "Type"}Matches`}
+            placeholder={`${objectType ?? "Type"} matches`}
             autoFocus
           />
         </FormGroup>
       </RegistryDialog>
     </RegistryPage>
+  );
+}
+
+function SearchHitBody({
+  hitText,
+  query,
+  classification,
+  display,
+}: {
+  hitText: string;
+  query: string;
+  classification: string;
+  display: { title: string; type: string; id: string };
+}) {
+  const q = query.trim();
+  const titleHasQuery = q.length > 0 && display.title.toLowerCase().includes(q.toLowerCase());
+  const snippet = !titleHasQuery ? snippetAroundQuery(hitText, q) : "";
+
+  return (
+    <>
+      <div className="hl-search-result-meta">
+        <span className="hl-search-result-type">
+          {display.type}
+          {display.id ? ` · ${display.id}` : ""}
+        </span>
+        <ClassificationBadge classification={classification} />
+      </div>
+      <div className="hl-search-result-title">{highlightQuery(display.title, q)}</div>
+      {snippet ? <p className="hl-search-result-snippet">{highlightQuery(snippet, q)}</p> : null}
+    </>
+  );
+}
+
+function highlightQuery(text: string, query: string): ReactNode {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx < 0) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="hl-search-mark">{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
   );
 }

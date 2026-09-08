@@ -54,7 +54,7 @@ export function DetailPage({
       <PageBreadcrumbs items={breadcrumbs} />
       <header className="hl-page-header hl-mt-xs">
         <div className="hl-page-header-main">
-          {typeof title === "string" ? <H3 className="hl-page-title">{title}</H3> : title}
+          <H3 className="hl-page-title">{title}</H3>
           {description && <div className="hl-page-description">{description}</div>}
         </div>
         {actions && <div className="hl-page-actions">{actions}</div>}

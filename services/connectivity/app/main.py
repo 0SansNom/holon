@@ -1438,8 +1438,9 @@ async def delete_sql_source(name: str, principal: Principal = Depends(current_pr
 
 class RegisterObjectConnectionRequest(BaseModel):
     name: str
-    endpoint: str
     access_key_id: str
+    kind: str = "s3"
+    endpoint: Optional[str] = None
     region: str = "us-east-1"
     path_style: bool = True
     # Optional; if omitted on edit, existing secret is retained
@@ -1451,13 +1452,14 @@ class RegisterObjectConnectionRequest(BaseModel):
 async def register_object_connection(
     body: RegisterObjectConnectionRequest, principal: Principal = Depends(current_principal)
 ) -> dict:
-    """Register or update an object storage connection credential."""
+    """Register or update an object storage connection credential (S3-compatible or Azure Blob)."""
     await _authorize_workspace(principal, "write")
     try:
         return await object_source_registry.register_connection(
             app.state.pool,
             tenant_id=principal.tenant_id,
             name=body.name,
+            kind=body.kind,
             endpoint=body.endpoint,
             access_key_id=body.access_key_id,
             region=body.region,

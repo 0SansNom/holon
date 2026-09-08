@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Button, Card, FormGroup, H4, InputGroup } from "@blueprintjs/core";
+import { Button, Card, FormGroup, H3, InputGroup } from "@blueprintjs/core";
 import { TENANT_ID } from "../../api/config";
 import { identityApi, login } from "../../api/identity";
 import { useAuthStore } from "../../store/auth";
@@ -19,8 +19,10 @@ export function LoginScreen() {
     let cancelled = false;
     void identityApi
       .oidcStart()
-      .then(() => {
-        if (!cancelled) setSsoAvailable(true);
+      .then((result) => {
+        if (!cancelled && typeof result?.authorize_url === "string" && result.authorize_url.length > 0) {
+          setSsoAvailable(true);
+        }
       })
       .catch(() => {
         if (!cancelled) setSsoAvailable(false);
@@ -49,35 +51,55 @@ export function LoginScreen() {
   return (
     <div className="hl-login-screen">
       <Card className="hl-login-card" elevation={2}>
-        <H4>Holon</H4>
-        <p className="hl-login-desc">Sign in with SSO, or with a principal URN and client secret from Identity.</p>
-        <FormGroup label="Principal URN" labelFor="login-urn">
-          <InputGroup
-            id="login-urn"
-            value={manualUrn}
-            onChange={(e) => setManualUrn(e.currentTarget.value)}
-            placeholder="hl:…:global:user:…"
-          />
-        </FormGroup>
-        <FormGroup label="Client secret" labelFor="login-secret">
-          <InputGroup
-            id="login-secret"
-            type="password"
-            value={manualSecret}
-            onChange={(e) => setManualSecret(e.currentTarget.value)}
-          />
-        </FormGroup>
-        {error && <p className="hl-text-danger hl-text-muted-sm">{error}</p>}
-        <Button
-          intent="primary"
-          fill
-          loading={loading}
-          disabled={!manualUrn.trim() || !manualSecret}
-          onClick={() => void signIn()}
-          className="hl-mt-sm"
+        <div className="hl-login-brand">
+          <span className="hl-sidebar-mark" aria-hidden>
+            H
+          </span>
+          <div>
+            <H3 className="hl-heading-reset">Holon</H3>
+            <div className="hl-text-muted-sm">Enterprise Knowledge OS</div>
+          </div>
+        </div>
+        <p className="hl-login-desc">
+          Sign in to browse objects, sources, and the ontology. Use your principal, or SSO if your workspace has it.
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (manualUrn.trim() && manualSecret) void signIn();
+          }}
         >
-          Sign in
-        </Button>
+          <FormGroup label="Principal URN" labelFor="login-urn">
+            <InputGroup
+              id="login-urn"
+              value={manualUrn}
+              onChange={(e) => setManualUrn(e.currentTarget.value)}
+              placeholder="hl:…:global:user:…"
+              autoComplete="username"
+            />
+          </FormGroup>
+          <FormGroup label="Client secret" labelFor="login-secret">
+            <InputGroup
+              id="login-secret"
+              type="password"
+              value={manualSecret}
+              onChange={(e) => setManualSecret(e.currentTarget.value)}
+              autoComplete="current-password"
+            />
+          </FormGroup>
+          {error && <p className="hl-text-danger hl-text-muted-sm">{error}</p>}
+          <Button
+            type="submit"
+            intent="primary"
+            fill
+            large
+            loading={loading}
+            disabled={!manualUrn.trim() || !manualSecret}
+            className="hl-mt-sm"
+          >
+            Sign in
+          </Button>
+        </form>
         {ssoAvailable && (
           <Button
             fill

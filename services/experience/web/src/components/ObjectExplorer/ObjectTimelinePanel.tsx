@@ -30,7 +30,9 @@ export function ObjectTimelinePanel({
   reverting: boolean;
   onRevert: (invocationId: number) => void;
 }) {
-  if (timeline.length === 0) return null;
+  if (timeline.length === 0) {
+    return <p className="hl-text-muted">No activity on this object yet.</p>;
+  }
 
   return (
     <div className="hl-section">

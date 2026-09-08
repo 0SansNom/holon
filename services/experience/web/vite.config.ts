@@ -4,6 +4,16 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  server: {
+    // `npm run dev` is same-origin (`/api/...`). Experience (8004) is the
+    // BFF that sets the session cookie and relays to Identity/Knowledge.
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8004",
+        changeOrigin: true,
+      },
+    },
+  },
   build: {
     outDir: '../app/static',
     emptyOutDir: true,
