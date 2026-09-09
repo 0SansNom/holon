@@ -72,6 +72,34 @@ async def list_relation_types(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     return [_row_to_dict(row) for row in rows]
 
 
+async def list_relation_types_for_join_dataset(
+    pool: asyncpg.Pool, tenant_id: str, join_dataset_urn: str
+) -> list[dict]:
+    """RelationTypes whose M:N bridge is this dataset — used at catalog ingest."""
+    rows = await pool.fetch(
+        """
+        SELECT * FROM relation_type
+        WHERE tenant_id = $1 AND join_dataset_urn = $2
+        ORDER BY name
+        """,
+        tenant_id,
+        join_dataset_urn,
+    )
+    return [_row_to_dict(row) for row in rows]
+
+
+async def list_join_dataset_relation_types(pool: asyncpg.Pool) -> list[dict]:
+    """Every join_dataset RelationType — used to backfill `relation_link` after migrate."""
+    rows = await pool.fetch(
+        """
+        SELECT * FROM relation_type
+        WHERE storage_kind = 'join_dataset'
+        ORDER BY tenant_id, name
+        """
+    )
+    return [_row_to_dict(row) for row in rows]
+
+
 def _validate_storage(
     *,
     storage_kind: str,
@@ -432,7 +460,23 @@ async def delete_relation_type(
         raise ValueError(
             "cannot delete an active RelationType — set lifecycle_status to deprecated (or experimental) first"
         )
-    await pool.execute("DELETE FROM relation_type WHERE urn = $1", urn)
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "DELETE FROM relation_link WHERE tenant_id = $1 AND relation_urn = $2",
+            tenant_id,
+            urn,
+        )
+        await conn.execute(
+            "DELETE FROM relation_link_overlay WHERE tenant_id = $1 AND relation_urn = $2",
+            tenant_id,
+            urn,
+        )
+        await conn.execute(
+            "DELETE FROM relation_link_sync WHERE tenant_id = $1 AND relation_urn = $2",
+            tenant_id,
+            urn,
+        )
+        await conn.execute("DELETE FROM relation_type WHERE urn = $1", urn)
 
 
 async def cascade_lifecycle_from_object_type(

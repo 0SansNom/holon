@@ -78,7 +78,7 @@ async def _create_resource(
         target_ot = definition.get("target_object_type")
         if target_ot is None and definition.get("target_object_type_urn"):
             target_ot = str(definition["target_object_type_urn"]).rsplit(":", 1)[-1]
-        return await relation_types_module.create_relation_type(
+        created = await relation_types_module.create_relation_type(
             pool,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
@@ -107,6 +107,12 @@ async def _create_resource(
             type_classes=definition.get("type_classes"),
             project_urn=definition.get("project_urn"),
         )
+        from .. import catalog, core
+
+        await catalog.sync_join_links_after_relation_change(
+            pool, created, core.ICEBERG_CONFIG
+        )
+        return created
     if resource_type == "value_type":
         return await value_types_module.create_value_type(
             pool,
@@ -183,7 +189,10 @@ async def _update_resource(
         mid_ot = definition.get("mid_object_type")
         if mid_ot is None and definition.get("mid_object_type_urn"):
             mid_ot = str(definition["mid_object_type_urn"]).rsplit(":", 1)[-1]
-        return await relation_types_module.update_relation_type(
+        previous = await relation_types_module.get_relation_type(
+            pool, relation_type_urn(tenant_id, workspace_id, resource_name)
+        )
+        updated = await relation_types_module.update_relation_type(
             pool,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
@@ -210,6 +219,12 @@ async def _update_resource(
             project_urn=definition.get("project_urn"),
             clear_project_urn=bool(definition.get("clear_project_urn", False)),
         )
+        from .. import catalog, core
+
+        await catalog.sync_join_links_after_relation_change(
+            pool, updated, core.ICEBERG_CONFIG, previous=previous
+        )
+        return updated
     if resource_type == "value_type":
         return await value_types_module.update_value_type(
             pool,

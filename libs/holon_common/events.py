@@ -191,16 +191,18 @@ class EventConsumer:
                 registry.validate(envelope.event_type, envelope.schema_version, envelope.payload)
             except Exception as exc:  # noqa: BLE001 — a poison message must not kill the consumer loop
                 logger.exception("skipping message: failed envelope/registry validation")
-                await self._quarantine(msg.value, exc)
+                if await self._quarantine(msg.value, exc):
+                    await self.commit()
                 continue
             yield envelope
 
-    async def _quarantine(self, raw_value: Any, exc: Exception) -> None:
-        """Dead Letter Queue: a poison message is skipped from normal processing
-        and lands somewhere inspectable.
-        """
+    async def quarantine_envelope(self, envelope: EventEnvelope, exc: Exception) -> bool:
+        return await self._quarantine(envelope.model_dump(mode="json"), exc)
+
+    async def _quarantine(self, raw_value: Any, exc: Exception) -> bool:
+        """Dead Letter Queue. Returns True if the caller may commit past this message."""
         if self._dlq_producer is None:
-            return
+            return True
         original_event_type = raw_value.get("event_type", "unknown") if isinstance(raw_value, dict) else "unknown"
         tenant_id = raw_value.get("tenant_id", "unknown") if isinstance(raw_value, dict) else "unknown"
         dlq_event = make_dlq_envelope(
@@ -212,8 +214,10 @@ class EventConsumer:
         )
         try:
             await self._dlq_producer.publish(dlq_event)
+            return True
         except Exception:
-            logger.exception("failed to publish quarantined message to DLQ — original message still dropped")
+            logger.exception("failed to publish quarantined message to DLQ — leaving offset uncommitted")
+            return False
 
     async def commit(self) -> None:
         if self._consumer is not None:

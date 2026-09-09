@@ -112,6 +112,11 @@ def test_join_dataset_link_write_and_unlink_via_overlay(msmith_token: str, jdoe_
     )
     assert status == 201, created
 
+    status, empty = _request(
+        "GET", ontology_url(f"/objects/Customer/1/links/{fwd}"), token=jdoe_token
+    )
+    assert status == 200, empty
+
     status, linked = _request(
         "PUT",
         ontology_url(f"/objects/Customer/1/links/{fwd}"),
