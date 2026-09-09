@@ -138,9 +138,11 @@ async def lifespan(app: FastAPI):
     await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
 
     expiry_task = asyncio.create_task(actions.sweep_expired_approvals_forever(app.state.pool, WORKSPACE_ID))
+    backfill_task = asyncio.create_task(catalog.backfill_join_links(app.state.pool, ICEBERG_CONFIG))
 
     yield
 
+    backfill_task.cancel()
     expiry_task.cancel()
     authz_cache_invalidation_task.cancel()
     ingest_task.cancel()
@@ -187,5 +189,6 @@ async def ready() -> dict:
             check_kafka_producer(app.state.producer),
             check_opensearch(OPENSEARCH_URL, OPENSEARCH_PASSWORD),
             check_iceberg_catalog(ICEBERG_CONFIG["catalog_uri"], ICEBERG_CONFIG["warehouse"]),
-        ]
+        ],
+        extra={"join_link_backfill": catalog.join_link_backfill_status},
     )

@@ -106,7 +106,9 @@ from .relation_types import (
     create_relation_type,
     delete_relation_type,
     get_relation_type,
+    list_join_dataset_relation_types,
     list_relation_types,
+    list_relation_types_for_join_dataset,
     update_relation_type,
 )
 from .object_type_groups import (
@@ -213,6 +215,8 @@ __all__ = [
     "get_relation_type",
     "list_object_types",
     "list_relation_types",
+    "list_join_dataset_relation_types",
+    "list_relation_types_for_join_dataset",
     "create_relation_type",
     "update_relation_type",
     "delete_relation_type",
