@@ -18,12 +18,14 @@ at them.
 - S3-compatible object store at `external.s3Endpoint`, plus an Iceberg
   REST catalog (`external.icebergCatalogUri`) pointed at a warehouse path
   in it (`external.icebergWarehouse`).
-- SpiceDB (`external.spicedbUrl`) — schema is loaded by `identity`,
-  `knowledge`, and `experience` at startup from `HOLON_SPICEDB_SCHEMA_PATH`.
-  The chart mounts it itself (`templates/spicedb-schema-configmap.yaml`,
-  built from `files/spicedb-schema.zed`) into those three pods only —
-  nothing to configure. `files/spicedb-schema.zed` is the single source
-  of truth (the compose stack mounts this same file).
+- SpiceDB (`external.spicedbUrl`) — schema is loaded by `identity` only
+  at startup from `HOLON_SPICEDB_SCHEMA_PATH`. The chart mounts it itself
+  (`templates/spicedb-schema-configmap.yaml`, built from
+  `files/spicedb-schema.zed`) into the Identity pod — nothing to
+  configure. `files/spicedb-schema.zed` is the single source of truth
+  (the compose stack mounts this same file). Knowledge and Experience
+  write relationship tuples only; they retry until Identity has applied
+  the schema.
 - OPA (`external.opaUrl`), OpenSearch (`external.opensearchUrl`), Qdrant
   (`external.qdrantUrl`). This repo no longer ships an OPA policy for
   production — load your own into your OPA; the compose/test stack's
