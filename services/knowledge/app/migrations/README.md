@@ -7,7 +7,7 @@ write a new one instead, even to fix a mistake in an already-applied
 migration.
 
 Knowledge is **migrations-first**. `0000_baseline.sql` is the CREATE TABLE
-baseline (idempotent `IF NOT EXISTS`). `0001`–`0004` are the historical
+baseline (idempotent `IF NOT EXISTS`). `0001`–`0006` are the historical
 non-additive follow-ups. Schema lives only in these files — there is no
 domain `ensure_schema()` / in-module `DDL` string. Additive changes go
 in a new `NNNN_*.sql` file.

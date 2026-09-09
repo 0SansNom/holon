@@ -157,6 +157,9 @@ async def update_relation_type(
         )
     except ValueError as exc:
         raise HolonError.invalid_argument('RelationTypeValidationFailed', str(exc)) from exc
+    await catalog.sync_join_links_after_relation_change(
+        core.pool, updated, core.ICEBERG_CONFIG, previous=current
+    )
     if request.clear_project_urn or request.project_urn is not None:
         try:
             await _link_relation_type_to_project(updated["urn"], updated.get("project_urn"))
@@ -338,6 +341,9 @@ async def create_relation_type(request: RelationTypeRequest, principal: Principa
         )
     except ValueError as exc:
         raise HolonError.invalid_argument('RelationTypeValidationFailed', str(exc)) from exc
+    await catalog.sync_join_links_after_relation_change(
+        core.pool, created, core.ICEBERG_CONFIG
+    )
     await _seed_relation_type_authz(
         tenant_id=principal.tenant_id,
         workspace_id=workspace_id,
