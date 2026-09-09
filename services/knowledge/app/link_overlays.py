@@ -62,6 +62,80 @@ async def list_overlays(
     return [dict(r) for r in rows]
 
 
+async def list_overlays_for_instance(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    relation_urn: str,
+    current_id,
+    as_source: bool,
+) -> list[dict]:
+    current = str(current_id)
+    if as_source:
+        rows = await pool.fetch(
+            """
+            SELECT source_id, target_id, op, mid_id
+            FROM relation_link_overlay
+            WHERE tenant_id = $1 AND relation_urn = $2 AND source_id = $3
+            """,
+            tenant_id,
+            relation_urn,
+            current,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT source_id, target_id, op, mid_id
+            FROM relation_link_overlay
+            WHERE tenant_id = $1 AND relation_urn = $2 AND target_id = $3
+            """,
+            tenant_id,
+            relation_urn,
+            current,
+        )
+    return [dict(r) for r in rows]
+
+
+def overlays_absorbed_by_pairs(
+    overlays: list[dict], iceberg_pairs: set[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Overlays Iceberg has already caught up with — safe to drop."""
+    drop: list[tuple[str, str]] = []
+    for overlay in overlays:
+        key = (str(overlay["source_id"]), str(overlay["target_id"]))
+        op = overlay.get("op")
+        if op == "add" and key in iceberg_pairs:
+            drop.append(key)
+        elif op == "delete" and key not in iceberg_pairs:
+            drop.append(key)
+    return drop
+
+
+async def delete_overlays(
+    conn: asyncpg.Connection,
+    *,
+    tenant_id: str,
+    relation_urn: str,
+    pairs: list[tuple[str, str]],
+) -> None:
+    if not pairs:
+        return
+    source_ids = [s for s, _t in pairs]
+    target_ids = [t for _s, t in pairs]
+    await conn.execute(
+        """
+        DELETE FROM relation_link_overlay o
+        USING unnest($3::text[], $4::text[]) AS x(source_id, target_id)
+        WHERE o.tenant_id = $1 AND o.relation_urn = $2
+          AND o.source_id = x.source_id AND o.target_id = x.target_id
+        """,
+        tenant_id,
+        relation_urn,
+        source_ids,
+        target_ids,
+    )
+
+
 async def count_overlays(pool: asyncpg.Pool, *, tenant_id: str, relation_urn: str) -> int:
     row = await pool.fetchrow(
         "SELECT count(*) AS n FROM relation_link_overlay WHERE tenant_id = $1 AND relation_urn = $2",
