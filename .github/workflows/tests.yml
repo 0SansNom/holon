@@ -171,7 +171,9 @@ jobs:
       - name: Browser e2e (login + Object Explorer + Sources + Ontology)
         working-directory: services/experience/web
         run: |
-          npx playwright install --with-deps chromium
+          # Bundled Chromium only. `--with-deps` hits dl.google.com chrome-stable
+          # apt and flakes on Hash Sum mismatch on GitHub-hosted runners.
+          npx playwright install chromium
           npx playwright test
 
       - name: Service logs on failure
