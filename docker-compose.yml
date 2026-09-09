@@ -17,7 +17,6 @@ x-app-env: &app-env
   HOLON_KAFKA_BOOTSTRAP: redpanda:9092
   HOLON_SPICEDB_URL: http://spicedb:8443
   HOLON_SPICEDB_PRESHARED_KEY: ${HOLON_SPICEDB_PRESHARED_KEY}
-  HOLON_SPICEDB_SCHEMA_PATH: /app/spicedb-schema.zed
   HOLON_OPA_URL: http://opa:8181
   # Leave unset (or empty) to disable tracing. Do NOT default to
   # 127.0.0.1 inside containers — that address is the container itself,
@@ -309,6 +308,7 @@ services:
     environment:
       <<: *app-env
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_identity
+      HOLON_SPICEDB_SCHEMA_PATH: /app/spicedb-schema.zed
       HOLON_ALLOW_USER_JWT_MINT: "true"
       HOLON_MINTABLE_PRINCIPAL_URNS: ""
       HOLON_BOOTSTRAP_ADMIN_SECRET: ${HOLON_BOOTSTRAP_ADMIN_SECRET:-}
@@ -402,7 +402,6 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/knowledge/app:/app/app
-      - ./deploy/helm/holon/files/spicedb-schema.zed:/app/spicedb-schema.zed:ro
       # Test-only fixture plugins (tests/fixtures/plugins) — imported only
       # when a test registers one via POST /plugins; never auto-registered.
       - ./tests/fixtures/plugins:/opt/holon-test-plugins:ro
@@ -543,7 +542,6 @@ services:
     volumes:
       - ./libs:/app/libs
       - ./services/experience/app:/app/app
-      - ./deploy/helm/holon/files/spicedb-schema.zed:/app/spicedb-schema.zed:ro
       # Test-only fixture plugins (tests/fixtures/plugins) — imported only
       # when a test registers one via POST /plugins; never auto-registered.
       - ./tests/fixtures/plugins:/opt/holon-test-plugins:ro

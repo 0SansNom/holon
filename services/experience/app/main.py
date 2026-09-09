@@ -67,7 +67,6 @@ OTLP_ENDPOINT = os.environ.get("HOLON_OTLP_ENDPOINT", "")
 SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
 SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
 OPA_URL = os.environ["HOLON_OPA_URL"]
-SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 
 WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 
@@ -109,7 +108,6 @@ async def lifespan(app: FastAPI):
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
 
     async def _seed_application_authz() -> None:
-        await app.state.authz.write_schema(Path(SPICEDB_SCHEMA_PATH).read_text())
         backfilled = await application_builder.backfill_urns(
             app.state.pool, tenant_id=TENANT_ID, workspace_id=WORKSPACE_ID,
         )

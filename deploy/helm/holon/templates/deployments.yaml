@@ -52,6 +52,8 @@ spec:
               value: {{ $.Values.holonEnv | quote }}
             {{- end }}
             {{- if eq $name "identity" }}
+            - name: HOLON_SPICEDB_SCHEMA_PATH
+              value: {{ $.Values.external.spicedbSchemaPath | default "/app/spicedb-schema.zed" | quote }}
             - name: HOLON_ALLOW_USER_JWT_MINT
               value: "true"
             - name: HOLON_MINTABLE_PRINCIPAL_URNS
@@ -87,7 +89,7 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
             timeoutSeconds: 2
-          {{- if or (eq $name "identity") (eq $name "knowledge") (eq $name "experience") }}
+          {{- if eq $name "identity" }}
           volumeMounts:
             - name: spicedb-schema
               mountPath: /app/spicedb-schema.zed

@@ -13,7 +13,7 @@ from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, 
 
 WORKSPACE_ID = "main"
 
-# The documented test-only failure hook (services/connectivity/app/main.py's
+# The documented test-only failure hook (services/connectivity/app/deps.py's
 # CLOSE_ACCOUNT_FAILURE_SENTINEL)
 FAILURE_SENTINEL = "__simulate_failure__"
 

@@ -1,7 +1,7 @@
 """SpiceDB bootstrap for the ontology's own resources — Knowledge owns
 ObjectType (and Shared Property Types / RelationTypes), so it links its own
 resources under the workspace itself; Identity only owns the tenant/workspace
-side of the graph.
+side of the graph, and is the sole writer of the SpiceDB schema.
 """
 
 from __future__ import annotations
@@ -19,18 +19,11 @@ from .urns import workspace_urn
 
 async def ensure_authz_seeded(
     client: PermissionClient,
-    schema_path: str,
     tenant_id: str,
     workspace_id: str,
     pool: Optional[asyncpg.Pool] = None,
 ) -> None:
-    """`write_schema` is idempotent: calling it again with the same file
-    is a no-op, and removes any dependency on Identity having started
-    first (see `PermissionClient` docstring in `identity/app/main.py`).
-    """
-    from pathlib import Path
-
-    await client.write_schema(Path(schema_path).read_text())
+    """Write ontology relationship tuples. Identity owns the SpiceDB schema."""
     w_urn = workspace_urn(tenant_id, workspace_id)
     # Backfill parent_workspace for every SPT so update/delete ReBAC checks
     # work for rows created before shared_property_type entered the schema.

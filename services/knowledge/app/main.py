@@ -72,7 +72,6 @@ OPENSEARCH_PASSWORD = os.environ["HOLON_OPENSEARCH_PASSWORD"]
 SPICEDB_URL = os.environ["HOLON_SPICEDB_URL"]
 SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
 OPA_URL = os.environ["HOLON_OPA_URL"]
-SPICEDB_SCHEMA_PATH = os.environ["HOLON_SPICEDB_SCHEMA_PATH"]
 
 
 async def _consume_identity_events(consumer: EventConsumer) -> None:
@@ -95,7 +94,7 @@ async def lifespan(app: FastAPI):
     core.authz = app.state.authz
     await retry_with_backoff(
         lambda: ontology.ensure_authz_seeded(
-            app.state.authz, SPICEDB_SCHEMA_PATH, TENANT_ID, WORKSPACE_ID, app.state.pool
+            app.state.authz, TENANT_ID, WORKSPACE_ID, app.state.pool
         ),
         what="knowledge authz seed",
     )
