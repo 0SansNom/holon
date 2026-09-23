@@ -35,6 +35,7 @@ from . import (
     object_source_registry,
     pipeline,
     plugin_registry,
+    salesforce_source_registry,
     sql_source_registry,
     stream_connector,
 )
@@ -168,6 +169,25 @@ class RegisterObjectSourceRequest(BaseModel):
     object_key: Optional[str] = None
     key_prefix: Optional[str] = None
     incremental: bool = False
+    schedule_interval_minutes: Optional[int] = None
+
+
+class RegisterSalesforceConnectionRequest(BaseModel):
+    name: str
+    client_id: str
+    login_url: Optional[str] = None
+    # Optional; if omitted on edit, existing secret is retained
+    client_secret: Optional[str] = None
+    secret_ref: Optional[str] = None
+
+
+class RegisterSalesforceSourceRequest(BaseModel):
+    name: str
+    connection_name: str
+    soql: str
+    workspace_id: Optional[str] = None
+    api_version: str = "v59.0"
+    cursor_property: Optional[str] = None
     schedule_interval_minutes: Optional[int] = None
 
 
@@ -321,18 +341,37 @@ async def _run_sync_for_dataset(
                     write_mode = "append"
             else:
                 object_source = await object_source_registry.get_source(deps.pool, tenant_id, dataset_name)
-                if object_source is None:
-                    raise HolonError.not_found('DatasetNotFound', f"unknown dataset: {dataset_name}", dataset_name=dataset_name)
-                if object_source["status"] != "active":
-                    raise HolonError.conflict(
-                        "SourceDisabled",
-                        f"source {dataset_name!r} is disabled — enable it first",
-                        dataset_name=dataset_name,
+                if object_source is not None:
+                    if object_source["status"] != "active":
+                        raise HolonError.conflict(
+                            "SourceDisabled",
+                            f"source {dataset_name!r} is disabled — enable it first",
+                            dataset_name=dataset_name,
+                        )
+                    connector_urn = build_urn(tenant_id, "global", "connector", f"object-{dataset_name}")
+                    read = functools.partial(
+                        object_source_registry.fetch_for_dataset, deps.pool, tenant_id, dataset_name
                     )
-                connector_urn = build_urn(tenant_id, "global", "connector", f"object-{dataset_name}")
-                read = functools.partial(object_source_registry.fetch_for_dataset, deps.pool, tenant_id, dataset_name)
-                if object_source["incremental"]:
-                    write_mode = "append"
+                    if object_source["incremental"]:
+                        write_mode = "append"
+                else:
+                    sf_source = await salesforce_source_registry.get_source(deps.pool, tenant_id, dataset_name)
+                    if sf_source is None:
+                        raise HolonError.not_found(
+                            "DatasetNotFound", f"unknown dataset: {dataset_name}", dataset_name=dataset_name
+                        )
+                    if sf_source["status"] != "active":
+                        raise HolonError.conflict(
+                            "SourceDisabled",
+                            f"source {dataset_name!r} is disabled — enable it first",
+                            dataset_name=dataset_name,
+                        )
+                    connector_urn = build_urn(tenant_id, "global", "connector", f"salesforce-{dataset_name}")
+                    read = functools.partial(
+                        salesforce_source_registry.fetch_for_dataset, deps.pool, tenant_id, dataset_name
+                    )
+                    if sf_source["cursor_property"]:
+                        write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
     try:
@@ -342,6 +381,8 @@ async def _run_sync_for_dataset(
     except sql_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except object_source_registry.SourceFetchError as exc:
+        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+    except salesforce_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
@@ -438,6 +479,14 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
                             tenant_id=object_source["tenant_id"],
                             workspace_id=object_source.get("workspace_id") or WORKSPACE_ID,
                             interval=timedelta(minutes=object_source["schedule_interval_minutes"]),
+                        )
+                    sf_sources = await salesforce_source_registry.list_all_scheduled_sources(pool)
+                    for sf_source in sf_sources:
+                        await _run_if_due(
+                            dataset_name=sf_source["name"],
+                            tenant_id=sf_source["tenant_id"],
+                            workspace_id=sf_source.get("workspace_id") or WORKSPACE_ID,
+                            interval=timedelta(minutes=sf_source["schedule_interval_minutes"]),
                         )
                     # Check scheduled connector plugins
                     plugins = await plugin_registry.list_all_scheduled_plugins(pool)

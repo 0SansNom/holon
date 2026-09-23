@@ -7,6 +7,8 @@ import {
   type RegisterSqlSourceRequest,
   type RegisterObjectConnectionRequest,
   type RegisterObjectSourceRequest,
+  type RegisterSalesforceConnectionRequest,
+  type RegisterSalesforceSourceRequest,
   type RegisterWriteTargetRequest,
   type RegisterKafkaStreamRequest,
 } from "../connectivity";
@@ -258,6 +260,68 @@ export function useDeleteObjectSource() {
   return useMutation({
     mutationFn: (name: string) => connectivityApi.deleteObjectSource(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSources() }),
+  });
+}
+
+export function useSalesforceConnections() {
+  return useSuspenseQuery({
+    queryKey: queryKeys.salesforceConnections(),
+    queryFn: connectivityApi.listSalesforceConnections,
+  });
+}
+
+export function useRegisterSalesforceConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterSalesforceConnectionRequest) => connectivityApi.registerSalesforceConnection(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.salesforceConnections() }),
+  });
+}
+
+export function useDeleteSalesforceConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteSalesforceConnection(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.salesforceConnections() }),
+  });
+}
+
+export function useSalesforceSources() {
+  return useSuspenseQuery({
+    queryKey: queryKeys.salesforceSources(),
+    queryFn: connectivityApi.listSalesforceSources,
+  });
+}
+
+export function useRegisterSalesforceSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterSalesforceSourceRequest) => connectivityApi.registerSalesforceSource(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.salesforceSources() }),
+  });
+}
+
+export function useDisableSalesforceSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disableSalesforceSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.salesforceSources() }),
+  });
+}
+
+export function useEnableSalesforceSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enableSalesforceSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.salesforceSources() }),
+  });
+}
+
+export function useDeleteSalesforceSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteSalesforceSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.salesforceSources() }),
   });
 }
 

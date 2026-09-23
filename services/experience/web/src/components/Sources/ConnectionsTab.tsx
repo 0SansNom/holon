@@ -1,7 +1,17 @@
 import { useState } from "react";
 import { Button, Menu, MenuItem, PopoverNext } from "@blueprintjs/core";
-import { useConnections, useSqlConnections, useObjectConnections } from "../../api/hooks";
-import type { GenericConnection, SqlConnection, ObjectConnection } from "../../api/connectivity";
+import {
+  useConnections,
+  useSqlConnections,
+  useObjectConnections,
+  useSalesforceConnections,
+} from "../../api/hooks";
+import type {
+  GenericConnection,
+  SqlConnection,
+  ObjectConnection,
+  SalesforceConnection,
+} from "../../api/connectivity";
 import { EmptyState } from "../common/ListPrimitives";
 import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
 import { ConnectionRow } from "./ConnectionRow";
@@ -10,34 +20,41 @@ import { SqlConnectionRow } from "./SqlConnectionRow";
 import { SqlConnectionDialog } from "./SqlConnectionDialog";
 import { ObjectConnectionRow } from "./ObjectConnectionRow";
 import { ObjectConnectionDialog } from "./ObjectConnectionDialog";
+import { SalesforceConnectionRow } from "./SalesforceConnectionRow";
+import { SalesforceConnectionDialog } from "./SalesforceConnectionDialog";
 import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
 
 export function ConnectionsTab() {
   const { data: connections } = useConnections();
   const { data: sqlConnections } = useSqlConnections();
   const { data: objectConnections } = useObjectConnections();
+  const { data: salesforceConnections } = useSalesforceConnections();
   const [creatingRest, setCreatingRest] = useState(false);
   const [creatingSql, setCreatingSql] = useState(false);
   const [creatingObject, setCreatingObject] = useState(false);
+  const [creatingSalesforce, setCreatingSalesforce] = useState(false);
   const [editingConnection, setEditingConnection] = useState<GenericConnection | null>(null);
   const [editingSqlConnection, setEditingSqlConnection] = useState<SqlConnection | null>(null);
   const [editingObjectConnection, setEditingObjectConnection] = useState<ObjectConnection | null>(null);
+  const [editingSalesforceConnection, setEditingSalesforceConnection] = useState<SalesforceConnection | null>(null);
 
   usePaletteCreateIntent("create-connection", setCreatingRest);
   usePaletteCreateIntent("create-sql-connection", setCreatingSql);
   usePaletteCreateIntent("create-object-connection", setCreatingObject);
+  usePaletteCreateIntent("create-salesforce-connection", setCreatingSalesforce);
 
   const restDialogOpen = creatingRest || editingConnection !== null;
   const sqlDialogOpen = creatingSql || editingSqlConnection !== null;
   const objectDialogOpen = creatingObject || editingObjectConnection !== null;
+  const salesforceDialogOpen = creatingSalesforce || editingSalesforceConnection !== null;
 
   return (
     <div>
       <OntologyTabHeader
         description={
           <>
-            Reusable credentials for REST, SQL, and object storage — register once, point several sources at the same
-            connection.
+            Reusable credentials for REST, SQL, object storage, and Salesforce — register once, point several sources at
+            the same connection.
           </>
         }
         trailing={
@@ -48,6 +65,7 @@ export function ConnectionsTab() {
                 <MenuItem icon="key" text="REST credential" onClick={() => setCreatingRest(true)} />
                 <MenuItem icon="database" text="SQL connection" onClick={() => setCreatingSql(true)} />
                 <MenuItem icon="cloud" text="Object storage connection" onClick={() => setCreatingObject(true)} />
+                <MenuItem icon="office" text="Salesforce connection" onClick={() => setCreatingSalesforce(true)} />
               </Menu>
             }
           >
@@ -99,13 +117,37 @@ export function ConnectionsTab() {
       <p className="hl-text-muted-sm hl-mb-sm">
         S3-compatible endpoints (MinIO, AWS S3). Required before registering an object source.
       </p>
-      <div className="hl-source-list">
+      <div className="hl-source-list hl-mb-lg">
         {objectConnections?.map((c) => (
           <ObjectConnectionRow key={c.name} connection={c} onEdit={() => setEditingObjectConnection(c)} />
         ))}
         {objectConnections?.length === 0 && (
           <EmptyState actionLabel="New object connection" onAction={() => setCreatingObject(true)}>
             No object storage connections saved yet.
+          </EmptyState>
+        )}
+      </div>
+
+      <div className="hl-flex-between hl-mb-sm">
+        <div className="hl-section-title">Salesforce connections</div>
+        <Button small icon="add" minimal onClick={() => setCreatingSalesforce(true)}>
+          New Salesforce connection
+        </Button>
+      </div>
+      <p className="hl-text-muted-sm hl-mb-sm">
+        Connected App client credentials. Required before registering a Salesforce SOQL source.
+      </p>
+      <div className="hl-source-list">
+        {salesforceConnections?.map((c) => (
+          <SalesforceConnectionRow
+            key={c.name}
+            connection={c}
+            onEdit={() => setEditingSalesforceConnection(c)}
+          />
+        ))}
+        {salesforceConnections?.length === 0 && (
+          <EmptyState actionLabel="New Salesforce connection" onAction={() => setCreatingSalesforce(true)}>
+            No Salesforce connections saved yet.
           </EmptyState>
         )}
       </div>
@@ -134,6 +176,15 @@ export function ConnectionsTab() {
           onClose={() => {
             setCreatingObject(false);
             setEditingObjectConnection(null);
+          }}
+        />
+      )}
+      {salesforceDialogOpen && (
+        <SalesforceConnectionDialog
+          editing={editingSalesforceConnection}
+          onClose={() => {
+            setCreatingSalesforce(false);
+            setEditingSalesforceConnection(null);
           }}
         />
       )}
