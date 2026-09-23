@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT / "libs"))
 sys.path.insert(0, str(ROOT / "services" / "connectivity"))
 
 from holon_common import HolonError  # noqa: E402
+from holon_common.spicedb_id import spicedb_object_id  # noqa: E402
 
 from app import authz_seed, deps  # noqa: E402
 from app.deps import pipeline_urn, source_urn, workspace_urn  # noqa: E402
@@ -134,3 +135,132 @@ def test_new_source_skips_source_authz(monkeypatch) -> None:
     assert asyncio.run(
         sources._authorize_source_update(_Registry(None), _Principal(), "s", "main")
     ) is None
+
+
+class _FakeAuthz:
+    def __init__(self, readable=None, mandant_readable=None, lookup_fails=False):
+        self.readable = readable or {}
+        self.mandant_readable = mandant_readable
+        self.lookup_fails = lookup_fails
+        self.written: list[str] = []
+        self.deleted: list[str] = []
+
+    async def lookup_resource_ids(self, *, resource_type, permission, principal_urn):
+        if self.lookup_fails:
+            raise RuntimeError("lookup down")
+        table = self.mandant_readable if principal_urn == "mandant" else self.readable
+        return {spicedb_object_id(urn) for urn in table}
+
+    async def check_rebac(self, principal_urn, resource_type, resource_urn, permission):
+        table = self.mandant_readable if principal_urn == "mandant" else self.readable
+        return resource_urn in table
+
+    async def write_relationship(self, *, resource_urn, **kwargs):
+        self.written.append(resource_urn)
+
+    async def delete_relationship(self, *, resource_urn, **kwargs):
+        self.deleted.append(resource_urn)
+
+
+class _ListPrincipal:
+    tenant_id = "acme"
+    urn = "user"
+
+    def __init__(self, on_behalf_of=None):
+        self.on_behalf_of = on_behalf_of
+
+
+_ROWS = [
+    {"name": "a", "workspace_id": "main"},
+    {"name": "b", "workspace_id": "other"},
+    {"name": "c", "workspace_id": None},
+]
+
+
+@pytest.mark.parametrize("lookup_fails", [False, True])
+def test_filter_readable_keeps_only_granted_rows(monkeypatch, lookup_fails) -> None:
+    fake = _FakeAuthz(
+        readable={source_urn("acme", "main", "a"), source_urn("acme", "main", "c")},
+        lookup_fails=lookup_fails,
+    )
+    monkeypatch.setattr(deps, "authz", fake)
+    kept = asyncio.run(deps._filter_readable(_ListPrincipal(), "source", _ROWS))
+    assert [row["name"] for row in kept] == ["a", "c"]
+
+
+def test_filter_readable_intersects_mandant(monkeypatch) -> None:
+    fake = _FakeAuthz(
+        readable={source_urn("acme", "main", "a"), source_urn("acme", "other", "b")},
+        mandant_readable={source_urn("acme", "other", "b")},
+    )
+    monkeypatch.setattr(deps, "authz", fake)
+    kept = asyncio.run(deps._filter_readable(_ListPrincipal("mandant"), "source", _ROWS))
+    assert [row["name"] for row in kept] == ["b"]
+
+
+def test_unlink_uses_stored_workspace(monkeypatch) -> None:
+    fake = _FakeAuthz()
+    monkeypatch.setattr(deps, "authz", fake)
+    asyncio.run(deps._unlink_resource_authz("pipeline", tenant_id="acme", workspace_id="other", name="p"))
+    assert fake.deleted == [pipeline_urn("acme", "other", "p")]
+
+
+class _FakeConn:
+    def __init__(self, tables):
+        self.tables = tables
+
+    async def fetch(self, sql):
+        table = sql.rsplit("FROM ", 1)[1].strip()
+        return self.tables.get(table, [])
+
+
+class _FakePool:
+    def __init__(self, tables, done=False):
+        self.tables = tables
+        self.done = done
+
+    def acquire(self):
+        pool = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                return _FakeConn(pool.tables)
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    async def fetchval(self, sql, key):
+        return 1 if self.done else None
+
+    async def execute(self, sql, key):
+        self.done = True
+
+
+_TABLES = {
+    "generic_rest_source": [{"tenant_id": "acme", "name": "r", "workspace_id": None}],
+    "pipeline_definition": [{"tenant_id": "acme", "name": "p", "workspace_id": "other"}],
+}
+
+
+def test_backfill_runs_once() -> None:
+    fake = _FakeAuthz()
+    pool = _FakePool(_TABLES)
+    asyncio.run(authz_seed.ensure_authz_seeded(fake, pool))
+    assert fake.written == [source_urn("acme", "main", "r"), pipeline_urn("acme", "other", "p")]
+    assert pool.done
+
+    fake.written.clear()
+    asyncio.run(authz_seed.ensure_authz_seeded(fake, pool))
+    assert fake.written == []
+
+
+def test_backfill_not_marked_done_on_failure(monkeypatch) -> None:
+    async def _fail(*args, **kwargs):
+        raise RuntimeError("spicedb down")
+
+    monkeypatch.setattr(authz_seed, "seed_pipeline_parent_workspace", _fail)
+    pool = _FakePool(_TABLES)
+    asyncio.run(authz_seed.ensure_authz_seeded(_FakeAuthz(), pool))
+    assert not pool.done
