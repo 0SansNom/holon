@@ -132,8 +132,3 @@ async def run_security_suite(*, knowledge_url: str, agent_token: str, editor_tok
     all_passed = all(c["passed"] for c in checks)
     return {"checks": checks, "zero_tolerance_violations": sum(1 for c in checks if not c["passed"]), "passed": all_passed}
 
-
-# Re-export for callers that import path metrics from evaluation.
-from .action_path_eval import run_action_path_suite  # noqa: E402
-
-__all__ = ["run_gold_set", "run_security_suite", "run_action_path_suite"]
