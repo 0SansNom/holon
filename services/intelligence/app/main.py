@@ -357,9 +357,13 @@ class CreateSessionRequest(BaseModel):
 async def create_agent_session(
     request: CreateSessionRequest = CreateSessionRequest(), principal: Principal = Depends(current_principal)
 ) -> dict:
-    """Create an agent runtime session."""
+    """Create an agent runtime session.
+
+    Read (not write): Agent App uses a viewer agent token; Knowledge write
+    denial for that agent is a zero-tolerance security-suite check.
+    """
     _require_intelligence_enabled()
-    await _authorize_workspace(principal, "write")
+    await _authorize_workspace(principal, "read")
     if request.system_prompt and principal.type not in {"agent", "service_account"}:
         raise HolonError.forbidden(
             "PermissionDenied",
