@@ -227,6 +227,13 @@ _HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "host", "content
 async def _relay(base_url: str, path: str, request: Request) -> Response:
     target = f"{base_url}/{path}"
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    # SPA sessions are cookie-only. Upstream services that re-forward the
+    # caller's JWT (Intelligence → Knowledge for GET /tools) read
+    # Authorization, not our HttpOnly cookie — rewrite here so those
+    # hops stay authenticated (same as _proxy / agent-sessions).
+    auth = _upstream_authorization(request)
+    if auth:
+        headers["authorization"] = auth
     body = await request.body()
 
     async def _do() -> httpx.Response:

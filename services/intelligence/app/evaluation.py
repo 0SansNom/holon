@@ -17,6 +17,7 @@ from qdrant_client import AsyncQdrantClient
 
 from .context_builder import ask as context_builder_ask
 from .embeddings import EmbeddingClient
+from .gold_set import STARTER_GOLD_SET, gold_set_disclaimer, seed_starter_gold_set
 from .llm_gateway import LLMClient
 
 logger = logging.getLogger("intelligence.evaluation")
@@ -38,8 +39,10 @@ CREATE TABLE IF NOT EXISTS eval_run (
 );
 """
 
+
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(DDL)
+    await seed_starter_gold_set(conn)
 
 
 async def run_gold_set(
@@ -114,11 +117,7 @@ async def run_gold_set(
     return {
         "metrics": metrics,
         "results": results,
-        "disclaimer": (
-            "No gold set is seeded by default — this evaluates whatever rows currently "
-            "exist in gold_set_question. Populate it yourself before treating these "
-            "metrics as meaningful; an empty set trivially reports null accuracy."
-        ),
+        "disclaimer": gold_set_disclaimer(seeded_starter=n >= len(STARTER_GOLD_SET)),
     }
 
 

@@ -18,8 +18,10 @@ import {
 } from "../../api/hooks";
 import { DashboardWidgets } from "./DashboardWidgets";
 import { ObjectAppView } from "./ObjectAppView";
+import { AgentAppView } from "./AgentAppView";
 import { ApplicationBuilder } from "./Builder/ApplicationBuilder";
 import type { ApplicationDefinition } from "../../api/experience";
+import { isAgentAppSurface } from "../../api/experience";
 import { ApiError } from "../../api/client";
 import { ResourceActionsMenu } from "../common/ResourceActionsMenu";
 import { DetailPage } from "../common/PageLayout";
@@ -158,7 +160,11 @@ export function ApplicationPage() {
           panel={
             application ? (
               <Suspense fallback={<ObjectAppSkeleton />}>
-                <ObjectAppView application={application} />
+                {application.definition.surfaces.some(isAgentAppSurface) ? (
+                  <AgentAppView application={application} />
+                ) : (
+                  <ObjectAppView application={application} />
+                )}
               </Suspense>
             ) : (
               <p className="hl-text-muted">Loading…</p>
