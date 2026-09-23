@@ -316,6 +316,25 @@ class AskRequest(BaseModel):
     query: str
 
 
+@app.post("/semantic-index/rebuild")
+async def rebuild_semantic_index(principal: Principal = Depends(current_principal)) -> dict:
+    """Re-index ontology metadata + glossary into Qdrant (tenant-scoped).
+
+    Boot indexes before CI fixtures exist; provision calls this after seeding.
+    """
+    _require_intelligence_enabled()
+    await _authorize_workspace(principal, "write")
+    indexed = await vector_store.index_metadata(
+        app.state.qdrant,
+        app.state.embedder,
+        knowledge_url=KNOWLEDGE_URL,
+        token=_indexer_token(),
+        tenant_id=TENANT_ID,
+        workspace_id=WORKSPACE_ID,
+    )
+    return {"indexed": indexed, "tenant_id": TENANT_ID}
+
+
 @app.post("/ask")
 async def ask(request: AskRequest, http_request: Request, principal: Principal = Depends(current_principal)) -> dict:
     """RAG ask endpoint using permission-filtered context."""

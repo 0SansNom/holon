@@ -42,6 +42,7 @@ def _bootstrap_admin_secret() -> str:
 IDENTITY = os.environ.get("HOLON_TEST_IDENTITY_URL", "http://localhost:8001")
 CONNECTIVITY = os.environ.get("HOLON_TEST_CONNECTIVITY_URL", "http://localhost:8002")
 KNOWLEDGE = os.environ.get("HOLON_TEST_KNOWLEDGE_URL", "http://localhost:8003")
+INTELLIGENCE = os.environ.get("HOLON_TEST_INTELLIGENCE_URL", "http://localhost:8006")
 TENANT_ID = os.environ.get("HOLON_TENANT_ID", "acme")
 WORKSPACE_ID = os.environ.get("HOLON_WORKSPACE_ID", "main")
 ADMIN_LOCAL = os.environ.get("HOLON_BOOTSTRAP_ADMIN_LOCAL_NAME", "admin")
@@ -213,8 +214,8 @@ def _urn(type_segment: str, local: str) -> str:
 
 
 def main() -> None:
-    print("Waiting for Identity / Connectivity / Knowledge…")
-    for url in (IDENTITY, CONNECTIVITY, KNOWLEDGE):
+    print("Waiting for Identity / Connectivity / Knowledge / Intelligence…")
+    for url in (IDENTITY, CONNECTIVITY, KNOWLEDGE, INTELLIGENCE):
         _wait(url)
 
     admin_urn = _urn("user", ADMIN_LOCAL)
@@ -350,6 +351,15 @@ def main() -> None:
     if status not in (200, 201, 409):
         raise SystemExit(f"function-plugin lifetime_tier: {status} {body}")
     print(f"  function-plugin lifetime_tier: {status}")
+
+    # Intelligence boots (and indexes) before ontology/glossary exist; rebuild
+    # so RAG semantic tests see tenant-tagged Qdrant points.
+    status, body = client.request(
+        "POST", f"{INTELLIGENCE}/semantic-index/rebuild", token=editor_token
+    )
+    if status != 200:
+        raise SystemExit(f"intelligence semantic-index rebuild: {status} {body}")
+    print(f"  intelligence semantic-index rebuild: indexed={body.get('indexed')}")
 
     print("\nTest fixtures provisioned.")
 
