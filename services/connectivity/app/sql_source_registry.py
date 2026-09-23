@@ -1,4 +1,4 @@
-"""No-code SQL source registry for Postgres-wire databases."""
+"""No-code SQL source registry for Postgres, MySQL/MariaDB, and SQL Server."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from holon_common.connector_safety import (
 from holon_common.secrets import resolve_optional
 from holon_common.sql_ident import quote_identifier, require_identifier
 
+from app import sql_drivers
+
 _FORBIDDEN_STMT = re.compile(
     r"\b(insert|update|delete|truncate|alter|drop|create|grant|revoke|call|execute)\b",
     re.IGNORECASE,
@@ -32,9 +34,20 @@ _SELECT_INTO = re.compile(
     re.IGNORECASE,
 )
 _FOR_LOCK = re.compile(r"\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b", re.IGNORECASE)
+# MySQL / MariaDB exfiltration and side-effect helpers.
+_MYSQL_FORBIDDEN = re.compile(
+    r"\b(load_file\s*\(|into\s+outfile\b|into\s+dumpfile\b|benchmark\s*\()",
+    re.IGNORECASE,
+)
+# SQL Server file / OLE / extended-proc helpers.
+_MSSQL_FORBIDDEN = re.compile(
+    r"\b(openrowset\s*\(|opendatasource\s*\(|xp_\w+|sp_oacreate\b)",
+    re.IGNORECASE,
+)
 
 _PUBLIC_CONNECTION_COLUMNS = (
-    "tenant_id, name, host, port, database, username, (password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
+    "tenant_id, name, dialect, host, port, database, username, "
+    "(password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
     "created_by_urn, created_at"
 )
 
@@ -67,7 +80,7 @@ class ConnectionInUseError(ValueError):
 _quote_identifier = quote_identifier
 
 
-def _require_select_only(query: str) -> None:
+def _require_select_only(query: str, dialect: str = "postgres") -> None:
     stripped = query.strip().rstrip(";").strip()
     if ";" in stripped:
         raise SourceConfigError("query must be a single SELECT statement — no semicolons")
@@ -82,8 +95,28 @@ def _require_select_only(query: str) -> None:
         or _SELECT_INTO.search(stripped)
     ):
         raise SourceConfigError("query must be a read-only SELECT — writes, locks, and file helpers are not allowed")
+    try:
+        d = sql_drivers.normalize_dialect(dialect)
+    except ValueError as exc:
+        raise SourceConfigError(str(exc)) from exc
+    if d == "mysql" and _MYSQL_FORBIDDEN.search(stripped):
+        raise SourceConfigError("query must be a read-only SELECT — MySQL file helpers are not allowed")
+    if d == "mssql" and _MSSQL_FORBIDDEN.search(stripped):
+        raise SourceConfigError("query must be a read-only SELECT — SQL Server file helpers are not allowed")
 
 
+def _bind_cursor_value(value: str) -> Any:
+    """Coerce a stored cursor string so drivers can bind typed columns.
+
+    Avoids a dialect-specific catalog lookup (pg_attribute) while still
+    comparing integers/floats natively instead of lexicographically.
+    """
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        return int(value)
+    try:
+        return float(value)
+    except ValueError:
+        return value
 
 
 async def register_connection(
@@ -92,14 +125,22 @@ async def register_connection(
     tenant_id: str,
     name: str,
     host: str,
-    port: int,
     database: str,
     username: str,
     created_by_urn: str,
+    dialect: str = "postgres",
+    port: Optional[int] = None,
     password: Optional[str] = None,
     secret_ref: Optional[str] = None,
 ) -> dict:
     """Register or update a SQL connection credential."""
+    try:
+        dialect = sql_drivers.normalize_dialect(dialect)
+    except ValueError as exc:
+        raise SourceConfigError(str(exc)) from exc
+    if port is None:
+        port = sql_drivers.default_port_for(dialect)
+
     existing = await pool.fetchrow(
         "SELECT password, secret_ref FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
@@ -120,9 +161,11 @@ async def register_connection(
 
     await pool.execute(
         """
-        INSERT INTO sql_connection (tenant_id, name, host, port, database, username, password, secret_ref, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO sql_connection
+            (tenant_id, name, dialect, host, port, database, username, password, secret_ref, created_by_urn)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
+            dialect = EXCLUDED.dialect,
             host = EXCLUDED.host,
             port = EXCLUDED.port,
             database = EXCLUDED.database,
@@ -130,7 +173,7 @@ async def register_connection(
             password = EXCLUDED.password,
             secret_ref = EXCLUDED.secret_ref
         """,
-        tenant_id, name, host, port, database, username, password, secret_ref, created_by_urn,
+        tenant_id, name, dialect, host, port, database, username, password, secret_ref, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -161,8 +204,6 @@ async def delete_connection(pool: asyncpg.Pool, tenant_id: str, name: str) -> No
     await pool.execute("DELETE FROM sql_connection WHERE tenant_id = $1 AND name = $2", tenant_id, name)
 
 
-
-
 async def register_source(
     pool: asyncpg.Pool,
     *,
@@ -190,10 +231,13 @@ async def register_source(
             require_identifier(cursor_property, what="cursor_property")
         except ValueError as exc:
             raise SourceConfigError(str(exc)) from exc
-    if query:
-        _require_select_only(query)
-    if await get_connection(pool, tenant_id, connection_name) is None:
+
+    connection = await get_connection(pool, tenant_id, connection_name)
+    if connection is None:
         raise SourceConfigError(f"unknown connection: {connection_name!r}")
+    dialect = connection.get("dialect") or "postgres"
+    if query:
+        _require_select_only(query, dialect)
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
@@ -308,7 +352,8 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
         raise SourceFetchError(f"no active SQL source registered as {name!r}")
 
     connection = await pool.fetchrow(
-        "SELECT host, port, database, username, password, secret_ref FROM sql_connection WHERE tenant_id = $1 AND name = $2",
+        "SELECT dialect, host, port, database, username, password, secret_ref "
+        "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, row["connection_name"],
     )
     if connection is None:
@@ -320,41 +365,36 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     password = resolve_optional(connection["secret_ref"]) or connection["password"]
 
     try:
-        conn = await asyncpg.connect(
-            host=connection["host"], port=connection["port"], database=connection["database"],
-            user=connection["username"], password=password, timeout=15.0,
-        )
-    except (OSError, asyncpg.PostgresError) as exc:
-        raise SourceFetchError(f"could not connect to source {name!r}: {exc}") from exc
-    try:
-        try:
-            if row["table_name"]:
-                sql = f"SELECT * FROM {_quote_identifier(row['table_name'])}"
-                args: list[Any] = []
-                if row["cursor_property"] and row["last_cursor_value"] is not None:
-                    # Cast last_cursor_value text to column data type for accurate comparison
-                    column_type = await conn.fetchval(
-                        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
-                        "WHERE attrelid = $1::regclass AND attname = $2 AND NOT attisdropped",
-                        row["table_name"], row["cursor_property"],
-                    )
-                    if column_type is None:
-                        raise SourceFetchError(
-                            f"source {name!r}: cursor_property {row['cursor_property']!r} "
-                            f"not found on table {row['table_name']!r}"
-                        )
-                    sql += f" WHERE {quote_identifier(row['cursor_property'])} > $1::text::{column_type}"
-                    args.append(row["last_cursor_value"])
-            else:
-                sql = row["query"]
-                args = []
-            records = await conn.fetch(sql, *args)
-        except asyncpg.PostgresError as exc:
-            raise SourceFetchError(f"query failed for source {name!r}: {exc}") from exc
-    finally:
-        await conn.close()
+        dialect = sql_drivers.normalize_dialect(connection["dialect"])
+    except ValueError as exc:
+        raise SourceFetchError(str(exc)) from exc
 
-    rows = [dict(record) for record in records]
+    if row["table_name"]:
+        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=dialect)}"
+        args: list[Any] = []
+        if row["cursor_property"] and row["last_cursor_value"] is not None:
+            # Uniform bind across dialects (no pg_attribute type cast).
+            col = quote_identifier(row["cursor_property"], dialect=dialect)
+            sql += f" WHERE {col} > {sql_drivers.cursor_placeholder(dialect)}"
+            args.append(_bind_cursor_value(row["last_cursor_value"]))
+    else:
+        sql = row["query"]
+        args = []
+
+    try:
+        rows = await sql_drivers.fetch_dicts(
+            dialect=dialect,
+            host=connection["host"],
+            port=connection["port"],
+            database=connection["database"],
+            username=connection["username"],
+            password=password,
+            sql=sql,
+            args=args,
+        )
+    except Exception as exc:
+        # Drivers raise a mix of OSError, asyncpg/aiomysql/aioodbc errors.
+        raise SourceFetchError(f"could not fetch source {name!r}: {exc}") from exc
 
     if row["cursor_property"]:
         candidates = [r[row["cursor_property"]] for r in rows if r.get(row["cursor_property"]) is not None]
