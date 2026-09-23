@@ -110,7 +110,9 @@ def test_low_risk_action_still_applies_immediately(jdoe_token: str) -> None:
 
 
 def test_pending_approvals_are_listed(jdoe_token: str, msmith_token: str) -> None:
-    status, result = _request_close_account(jdoe_token, 8, reason="listed for review")
+    # Customer 6 stays open after the reject test above; avoid automation's
+    # permanent close on customer 8.
+    status, result = _request_close_account(jdoe_token, 6, reason="listed for review")
     assert status == 200, result
     approval_id = result["approvalId"]
 

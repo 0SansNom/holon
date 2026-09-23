@@ -23,6 +23,8 @@ STARTER_GOLD_SET: list[tuple[str, str, str | None]] = [
     ("Summarize the Customer object type.", "ontology", "Customer"),
     ("What properties might an Order have?", "ontology", "Order"),
     ("List actions available on Customer.", "actions", "Customer"),
+    ("When can Order.cancelPending succeed?", "actions", "cancelPending"),
+    ("What happens if I close an account that is already closed?", "actions", "closeAccount"),
 ]
 
 

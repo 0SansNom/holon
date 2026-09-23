@@ -450,35 +450,61 @@ async def revert_declarative_action(
     }
 
 
+def _apply_instance_edit_rows(row: dict, edit_rows: list) -> dict:
+    """Merge ``object_instance_edit`` rows onto an instance dict (criteria + reads)."""
+    merged = dict(row)
+    for edit in edit_rows:
+        value = edit["property_value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        merged[edit["property_name"]] = value
+    return merged
+
+
 async def _get_unmasked_instance(
     pool: asyncpg.Pool, object_type: str, tenant_id: str, workspace_id: str, instance_id: str
 ) -> Optional[dict]:
-    """Fetch raw unmasked object instance for submission criteria evaluation."""
+    """Fetch raw unmasked object instance for submission criteria evaluation.
+
+    Includes ``object_instance_edit`` overlays so criteria see the same
+    world as public reads (Action-written props like ``cancelled`` /
+    ``account_closed`` before writeback).
+    """
     import functools
 
     from .. import core, ontology, resolver, serving_store
     from pyiceberg.exceptions import NoSuchTableError
 
     row = await serving_store.get_instance(pool, object_type, tenant_id, instance_id)
-    if row is not None:
-        return row
-    if await serving_store.is_tombstoned(pool, object_type, tenant_id, instance_id):
+    if row is None and await serving_store.is_tombstoned(pool, object_type, tenant_id, instance_id):
         return None
 
-    object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
-    definition = await ontology.get_object_type(pool, object_type_urn)
-    if definition is None:
-        return None
-    dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
-    try:
-        rows = await asyncio.to_thread(
-            functools.partial(resolver.fetch_generic, dataset_name),
-            id_value=instance_id,
-            **core.iceberg_kwargs(tenant_id),
-        )
-    except NoSuchTableError:
-        return None
-    return dict(rows[0]) if rows else None
+    if row is None:
+        object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
+        definition = await ontology.get_object_type(pool, object_type_urn)
+        if definition is None:
+            return None
+        dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
+        try:
+            rows = await asyncio.to_thread(
+                functools.partial(resolver.fetch_generic, dataset_name),
+                id_value=instance_id,
+                **core.iceberg_kwargs(tenant_id),
+            )
+        except NoSuchTableError:
+            return None
+        if not rows:
+            return None
+        row = dict(rows[0])
+
+    edit_rows = await pool.fetch(
+        "SELECT property_name, property_value FROM object_instance_edit "
+        "WHERE tenant_id = $1 AND object_type = $2 AND instance_id = $3",
+        tenant_id,
+        object_type,
+        str(instance_id),
+    )
+    return _apply_instance_edit_rows(row, edit_rows)
 
 
 async def validate_generic_action(
