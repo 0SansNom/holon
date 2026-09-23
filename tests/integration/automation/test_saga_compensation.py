@@ -46,7 +46,7 @@ def _request_close_account(jdoe_token: str, customer_id: int, reason: str) -> in
 
 
 def test_approved_close_account_completes_the_saga(jdoe_token: str, msmith_token: str) -> None:
-    customer_id = 4  # Kappa Foundries — untouched by the other case below
+    customer_id = 10  # Halcyon Pharma — exclusive permanent close (HITL keeps 4)
     approval_id = _request_close_account(jdoe_token, customer_id, "delinquent, saga happy path")
 
     status, decision = _request(

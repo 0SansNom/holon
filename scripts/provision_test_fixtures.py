@@ -135,10 +135,12 @@ RELATION_TYPES = [
     },
 ]
 
-# Reproduces the two former hardcoded Customer Actions as declarative Action
-# Types — `credit_hold_reason`/`account_closed_reason` source from the
-# invocation's own `reason` field (always available as an implicit
-# `parameter_name: "reason"` edit source, see declarative.py).
+# Declarative Action Types. Business invariants live in submission_criteria
+# (or edits), not in agent prompts / edit_function plugins.
+# `function_side_effect` is optional post-apply computation only — never a
+# substitute for criteria (see lifetime_tier on putOnCreditHold).
+# `credit_hold_reason`/`account_closed_reason` source from the invocation's
+# implicit `reason` field (see declarative.py).
 ACTION_TYPES = [
     {
         "name": "Customer.putOnCreditHold",
@@ -146,11 +148,21 @@ ACTION_TYPES = [
         "required_permission": "write",
         "risk_level": "low",
         "description": "Places a Customer's account on credit hold, recording a reason. "
-        "Applies immediately (low risk — reversible, no external write, no deletion).",
+        "Applies immediately (low risk — reversible, no external write, no deletion). "
+        "Rejected when the account is already closed.",
         "edits": [
             {"property": "credit_hold", "source": "literal", "value": True},
             {"property": "credit_hold_reason", "source": "parameter", "parameter_name": "reason"},
         ],
+        "submission_criteria": [
+            {
+                "property": "account_closed",
+                "operator": "neq",
+                "value": True,
+                "message": "cannot put a closed account on credit hold",
+            },
+        ],
+        # Derived tier refresh only — not an authorization / invariant check.
         "function_side_effect": "lifetime_tier",
     },
     {
@@ -159,12 +171,72 @@ ACTION_TYPES = [
         "required_permission": "write",
         "risk_level": "high",
         "description": "Closes a Customer's account. Proposes a human-in-the-loop approval "
-        "request (high risk — deletion-class, writes back to source system).",
+        "request (high risk — deletion-class, writes back to source system). "
+        "Rejected when the account is already closed.",
         "edits": [
             {"property": "account_closed", "source": "literal", "value": True},
             {"property": "account_closed_reason", "source": "parameter", "parameter_name": "reason"},
         ],
+        "submission_criteria": [
+            {
+                "property": "account_closed",
+                "operator": "neq",
+                "value": True,
+                "message": "account is already closed",
+            },
+        ],
         "writeback_dataset": "customers",
+    },
+    {
+        "name": "Order.cancelPending",
+        "target_object_type": "Order",
+        "required_permission": "write",
+        "risk_level": "low",
+        "description": "Cancels a pending Order (sets cancelled=true). Syntax-valid tool "
+        "calls still fail when status is not pending or the order is already cancelled — "
+        "semantic guard without edit_function / plugins. (Cannot edit property 'status': "
+        "reserved Action response key.)",
+        "edits": [
+            {"property": "cancelled", "source": "literal", "value": True},
+        ],
+        "submission_criteria": [
+            {
+                "all": [
+                    {
+                        "property": "status",
+                        "operator": "eq",
+                        "value": "pending",
+                        "message": "only pending orders can be cancelled",
+                    },
+                    {
+                        "property": "cancelled",
+                        "operator": "neq",
+                        "value": True,
+                        "message": "order is already cancelled",
+                    },
+                ],
+                "message": "order is not cancellable",
+            },
+        ],
+    },
+    {
+        "name": "Order.uncancel",
+        "target_object_type": "Order",
+        "required_permission": "write",
+        "risk_level": "low",
+        "description": "Clears the cancelled overlay on an Order so cancelPending can apply "
+        "again. Test/ops helper — overlays survive make seed (ERP reset only).",
+        "edits": [
+            {"property": "cancelled", "source": "literal", "value": False},
+        ],
+        "submission_criteria": [
+            {
+                "property": "cancelled",
+                "operator": "eq",
+                "value": True,
+                "message": "order is not cancelled",
+            },
+        ],
     },
 ]
 
@@ -172,8 +244,9 @@ GLOSSARY_TERMS = [
     ("client", "A business account that buys from us — see ObjectType Customer.", ["customer", "compte client"], "Customer"),
     ("grand compte", "A Customer in the 'enterprise' commercial segment — our highest-value tier.", ["enterprise customer", "grand client"], "Customer"),
     ("encours", "A Customer's lifetime value — total historical spend, in euros.", ["lifetime value", "valeur client"], "Customer"),
-    ("mise en attente de crédit", "The Customer.putOnCreditHold Action — blocks further orders pending payment resolution.", ["credit hold", "blocage crédit"], "Customer"),
-    ("clôture de compte", "The Customer.closeAccount Action — permanently closes an account. High-risk, requires approval.", ["account closure", "fermeture de compte"], "Customer"),
+    ("mise en attente de crédit", "The Customer.putOnCreditHold Action — blocks further orders pending payment resolution. Refused on an already-closed account.", ["credit hold", "blocage crédit"], "Customer"),
+    ("clôture de compte", "The Customer.closeAccount Action — permanently closes an account. High-risk, requires approval. Refused if already closed.", ["account closure", "fermeture de compte"], "Customer"),
+    ("annulation commande", "The Order.cancelPending Action — cancels only orders whose status is pending.", ["cancel order", "annuler commande"], "Order"),
     ("commande", "A single purchase placed by a Customer — see ObjectType Order.", ["order", "achat"], "Order"),
     ("ticket", "A customer support request — see ObjectType SupportTicket.", ["support ticket", "demande d'assistance"], "SupportTicket"),
     ("avis produit", "A public review left against an Order — see ObjectType ProductReview.", ["product review", "évaluation"], "ProductReview"),
@@ -327,9 +400,21 @@ def main() -> None:
         status, body = client.request(
             "POST", f"{KNOWLEDGE}/api/holon/action-types", token=admin_or_msmith, body=action_type
         )
-        if status not in (201, 409):
+        if status == 409:
+            # Re-provision must refresh criteria/edits (create is create-only).
+            status, body = client.request(
+                "PUT",
+                f"{KNOWLEDGE}/api/holon/action-types/{action_type['name']}",
+                token=admin_or_msmith,
+                body=action_type,
+            )
+            if status not in (200, 201):
+                raise SystemExit(f"action-type {action_type['name']} update: {status} {body}")
+            print(f"  action-type {action_type['name']}: updated")
+        elif status == 201:
+            print(f"  action-type {action_type['name']}: {status}")
+        else:
             raise SystemExit(f"action-type {action_type['name']}: {status} {body}")
-        print(f"  action-type {action_type['name']}: {status}")
 
     for term, definition, synonyms, related_object_type in GLOSSARY_TERMS:
         status, body = client.request(
