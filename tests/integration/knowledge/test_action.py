@@ -70,8 +70,9 @@ def test_put_on_credit_hold_rejects_already_closed_account(
     jdoe_token: str, msmith_token: str
 ) -> None:
     """Semantic layer (submission_criteria), not the LLM / Pydantic schema."""
-    customer_id = 4  # closed by HITL approve path when that test runs first;
-    # if still open, close it here so this assertion is self-contained.
+    # Exclusive from HITL's permanent close on customer 4; may already be
+    # closed by saga's happy path — either way criteria must refuse hold.
+    customer_id = 10  # Halcyon Pharma
     status, customer = _request("GET", ontology_url(f"/objects/Customer/{customer_id}"), token=jdoe_token)
     assert status == 200, customer
     if customer.get("account_closed") is not True:

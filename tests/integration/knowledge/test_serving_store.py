@@ -99,7 +99,9 @@ def test_relation_traversal_still_resolves_through_the_serving_store(
 
 
 def test_credit_hold_overlay_still_applies_on_a_materialized_read(jdoe_token: str, customers_synced: dict) -> None:
-    customer_id = 8  # Orion Data Systems — untouched by other test modules' Actions
+    # Vertex Manufacturing — approval-expiry only expires (never applies) close
+    # on 7; automation permanently closes 8.
+    customer_id = 7
     status, body = _request(
         "POST",
         ontology_url(f"/objects/Customer/{customer_id}/actions/putOnCreditHold"),
