@@ -16,10 +16,6 @@ from . import iceberg_writer, kafka_stream_registry
 logger = logging.getLogger("connectivity.stream")
 
 
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await kafka_stream_registry.ensure_schema(conn)
-
-
 async def _drain(consumer: AIOKafkaConsumer, *, timeout: float) -> AsyncIterator[Any]:
     """Yield available messages within timeout window."""
     loop = asyncio.get_event_loop()

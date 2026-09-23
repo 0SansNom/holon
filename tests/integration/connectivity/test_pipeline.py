@@ -246,11 +246,19 @@ def test_delete_pipeline_removes_definition_and_runs(jdoe_token: str) -> None:
     assert status == 404, missing
 
     status, runs = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}/runs", token=jdoe_token)
-    assert status == 200, runs
-    assert runs == [], runs
+    assert status == 404, runs
 
     status, again = _request("DELETE", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
     assert status == 404, again
+
+    # Recreating under the same name must not resurrect the old run history.
+    status, recreated = _request("POST", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token, body={"steps": definition["steps"]})
+    assert status == 201, recreated
+    status, runs = _request("GET", f"{CONNECTIVITY}/pipelines/{pipeline_name}/runs", token=jdoe_token)
+    assert status == 200, runs
+    assert runs == [], runs
+    status, _ = _request("DELETE", f"{CONNECTIVITY}/pipelines/{pipeline_name}", token=jdoe_token)
+    assert status == 200
 
 
 def test_pipeline_health_reflects_the_last_run(registered_function: dict, orders_synced: dict, jdoe_token: str) -> None:

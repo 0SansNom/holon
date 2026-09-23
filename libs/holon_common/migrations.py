@@ -10,12 +10,13 @@ exactly what it was missing: a real place for a change that isn't purely
 additive (rename, drop, backfill) to live, with a version so it's obvious
 what ran and when.
 
-Knowledge, Identity, and Experience are migrations-first. Domain
-`ensure_schema()` helpers were removed there; baselines are
+Knowledge, Identity, Experience, and Connectivity are migrations-first.
+Domain `ensure_schema()` helpers were removed there; baselines are
 `services/knowledge/app/migrations/0000_baseline.sql`,
-`services/identity/app/migrations/0000_baseline.sql`, and
-`services/experience/app/migrations/0000_baseline.sql`, then `0001`–.
-Other services still call `ensure_schema()` at boot *before*
+`services/identity/app/migrations/0000_baseline.sql`,
+`services/experience/app/migrations/0000_baseline.sql`, and
+`services/connectivity/app/migrations/0000_baseline.sql`, then `0001`–.
+Automation and Intelligence still call `ensure_schema()` at boot *before*
 `run_migrations`. This runner governs schema changes from here forward;
 it is not a retroactive rewrite of what's already shipped.
 

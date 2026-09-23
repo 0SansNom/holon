@@ -23,44 +23,6 @@ from holon_common.connector_safety import (
 )
 from holon_common.secrets import resolve_optional
 
-DDL = """
-CREATE TABLE IF NOT EXISTS object_connection (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    region TEXT NOT NULL DEFAULT 'us-east-1',
-    access_key_id TEXT NOT NULL,
-    secret_access_key TEXT,
-    secret_ref TEXT,
-    path_style BOOLEAN NOT NULL DEFAULT true,
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-
--- 's3' (endpoint/region/path_style, S3-compatible) or 'azure' (Blob Storage:
--- access_key_id/secret_access_key double as account name/account key).
-ALTER TABLE object_connection ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 's3';
-
-CREATE TABLE IF NOT EXISTS object_source (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    connection_name TEXT NOT NULL,
-    bucket TEXT NOT NULL,
-    object_key TEXT,
-    key_prefix TEXT,
-    format TEXT NOT NULL,
-    incremental BOOLEAN NOT NULL DEFAULT false,
-    last_synced_key TEXT,
-    schedule_interval_minutes INTEGER,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-"""
-
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _CONNECTION_KINDS = frozenset({"s3", "azure"})
@@ -95,10 +57,6 @@ class ConnectionConflictError(ValueError):
 
 class ConnectionInUseError(ValueError):
     pass
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 def _require_bucket(bucket: str) -> None:

@@ -17,6 +17,7 @@ from holon_common import (
     build_urn,
     make_principal_dependency,
 )
+from holon_common.spicedb_id import spicedb_object_id
 
 from . import kafka_stream_registry
 
@@ -95,17 +96,165 @@ def _resolve_workspace(
     return explicit or workspace_id or x_holon_workspace_id or WORKSPACE_ID
 
 
-def _workspace_urn(tenant_id: str, workspace_id: str) -> str:
+def workspace_urn(tenant_id: str, workspace_id: str) -> str:
     return build_urn(tenant_id, "global", "workspace", workspace_id)
+
+
+def resource_workspace(row: dict) -> str:
+    """Workspace of a source/pipeline row; legacy rows without one sit in the default."""
+    return row.get("workspace_id") or WORKSPACE_ID
+
+
+def source_urn(tenant_id: str, workspace_id: str, name: str) -> str:
+    return build_urn(tenant_id, workspace_id, "source", name)
+
+
+def pipeline_urn(tenant_id: str, workspace_id: str, name: str) -> str:
+    return build_urn(tenant_id, workspace_id, "pipeline", name)
 
 
 async def _authorize_workspace(
     principal: Principal, permission: str, *, workspace_id: Optional[str] = None
 ) -> None:
     """Authorize workspace permissions via ReBAC."""
-    urn = _workspace_urn(principal.tenant_id, workspace_id or WORKSPACE_ID)
+    urn = workspace_urn(principal.tenant_id, workspace_id or WORKSPACE_ID)
     decision = await authz.authorize(
         principal, resource_type="workspace", resource_urn=urn, permission=permission
     )
     if not decision.allowed:
         raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_source(
+    principal: Principal,
+    permission: str,
+    *,
+    name: str,
+    workspace_id: Optional[str] = None,
+) -> None:
+    """Authorize a source resource via ReBAC (inherits workspace grants)."""
+    ws = workspace_id or WORKSPACE_ID
+    urn = source_urn(principal.tenant_id, ws, name)
+    decision = await authz.authorize(
+        principal, resource_type="source", resource_urn=urn, permission=permission
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _authorize_pipeline(
+    principal: Principal,
+    permission: str,
+    *,
+    name: str,
+    workspace_id: Optional[str] = None,
+) -> None:
+    """Authorize a pipeline resource via ReBAC (inherits workspace grants)."""
+    ws = workspace_id or WORKSPACE_ID
+    urn = pipeline_urn(principal.tenant_id, ws, name)
+    decision = await authz.authorize(
+        principal, resource_type="pipeline", resource_urn=urn, permission=permission
+    )
+    if not decision.allowed:
+        raise HolonError.forbidden("PermissionDenied", decision.reason)
+
+
+async def _seed_source_authz(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    name: str,
+    compensate_delete,
+) -> str:
+    """Write parent_workspace for a source. `compensate_delete` undoes the
+    Postgres insert on failure; pass None when the row predates this request."""
+    from .authz_seed import seed_source_parent_workspace
+
+    try:
+        return await seed_source_parent_workspace(
+            authz, tenant_id=tenant_id, workspace_id=workspace_id, name=name
+        )
+    except Exception as exc:
+        if compensate_delete is not None:
+            await compensate_delete()
+        raise HolonError.unavailable(
+            "AuthzSeedFailed",
+            f"failed to seed SpiceDB relationship for source {name!r}: {exc}",
+            name=name,
+        ) from exc
+
+
+async def _seed_pipeline_authz(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    name: str,
+    compensate_delete,
+) -> str:
+    """Write parent_workspace for a pipeline. `compensate_delete` undoes the
+    Postgres insert on failure; pass None when the row predates this request."""
+    from .authz_seed import seed_pipeline_parent_workspace
+
+    try:
+        return await seed_pipeline_parent_workspace(
+            authz, tenant_id=tenant_id, workspace_id=workspace_id, name=name
+        )
+    except Exception as exc:
+        if compensate_delete is not None:
+            await compensate_delete()
+        raise HolonError.unavailable(
+            "AuthzSeedFailed",
+            f"failed to seed SpiceDB relationship for pipeline {name!r}: {exc}",
+            name=name,
+        ) from exc
+
+
+
+async def _unlink_resource_authz(
+    resource_type: str, *, tenant_id: str, workspace_id: str, name: str
+) -> None:
+    """Drop parent_workspace after the Postgres row is gone, so a later
+    resource with the same name in another workspace doesn't inherit it."""
+    urn = build_urn(tenant_id, workspace_id, resource_type, name)
+    try:
+        await authz.delete_relationship(
+            resource_type=resource_type,
+            resource_urn=urn,
+            relation="parent_workspace",
+            subject_type="workspace",
+            subject_urn=workspace_urn(tenant_id, workspace_id),
+        )
+    except Exception:
+        logger.exception("SpiceDB parent_workspace cleanup failed for deleted %s %s", resource_type, urn)
+
+
+async def _filter_readable(principal: Principal, resource_type: str, rows: list[dict]) -> list[dict]:
+    """Keep rows the principal (and its mandant, if delegated) can `read`."""
+
+    def _urn(row: dict) -> str:
+        return build_urn(principal.tenant_id, resource_workspace(row), resource_type, row["name"])
+
+    if not rows:
+        return []
+    try:
+        readable = await authz.lookup_resource_ids(
+            resource_type=resource_type, permission="read", principal_urn=principal.urn
+        )
+        if principal.on_behalf_of:
+            readable &= await authz.lookup_resource_ids(
+                resource_type=resource_type, permission="read", principal_urn=principal.on_behalf_of
+            )
+        return [row for row in rows if spicedb_object_id(_urn(row)) in readable]
+    except Exception:
+        logger.exception("%s LookupResources failed; falling back to per-row CheckPermission", resource_type)
+        allowed = []
+        for row in rows:
+            urn = _urn(row)
+            if not await authz.check_rebac(principal.urn, resource_type, urn, "read"):
+                continue
+            if principal.on_behalf_of and not await authz.check_rebac(
+                principal.on_behalf_of, resource_type, urn, "read"
+            ):
+                continue
+            allowed.append(row)
+        return allowed

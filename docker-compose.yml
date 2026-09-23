@@ -76,7 +76,7 @@ services:
       retries: 15
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       # Default root user for local S3 storage
@@ -90,7 +90,7 @@ services:
 
   # Infra only: creates the warehouse bucket, no fixture files copied in.
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       - minio
     entrypoint: >
@@ -101,7 +101,7 @@ services:
   # csv-seed`) copies it in when actually needed.
   csv-seed:
     profiles: [ "test-fixtures" ]
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -113,7 +113,7 @@ services:
   # External S3 store fixture for testing object storage connector
   source-s3:
     profiles: [ "test-fixtures" ]
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: source
@@ -126,7 +126,7 @@ services:
   # Seed utility for object storage connector
   source-s3-seed:
     profiles: [ "test-fixtures" ]
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       - source-s3
     volumes:

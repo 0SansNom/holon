@@ -76,6 +76,23 @@ definition application {
     permission write = parent_workspace->write + parent_project->write
 }
 
+// Connectivity resources (sources + pipelines inherit workspace grants).
+definition source {
+    relation parent_workspace: workspace
+
+    permission read = parent_workspace->read
+    permission write = parent_workspace->write
+    permission approve = parent_workspace->approve
+}
+
+definition pipeline {
+    relation parent_workspace: workspace
+
+    permission read = parent_workspace->read
+    permission write = parent_workspace->write
+    permission approve = parent_workspace->approve
+}
+
 // Markings security labels.
 definition marking {
     relation holder: principal

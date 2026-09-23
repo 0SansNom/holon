@@ -12,19 +12,6 @@ import asyncpg
 
 from holon_common.sql_ident import quote_identifier, require_identifier
 
-DDL = """
-CREATE TABLE IF NOT EXISTS write_target (
-    tenant_id TEXT NOT NULL,
-    dataset_name TEXT NOT NULL,
-    table_name TEXT NOT NULL,
-    id_column TEXT NOT NULL,
-    allowed_properties JSONB NOT NULL,
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, dataset_name)
-);
-"""
-
 
 class WriteTargetConfigError(ValueError):
     pass
@@ -36,10 +23,6 @@ class UnknownWriteTargetError(ValueError):
 
 class InstanceNotFoundError(ValueError):
     pass
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 async def register_write_target(
