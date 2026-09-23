@@ -13,7 +13,6 @@ from .knowledge_urls import holon_url
 
 from holon_common.plugin import (
     PluginConflictError,
-    ensure_schema as _shared_ensure_schema,
     find_active_by_manifest_field,
     get_registration,
     list_active_by_type,
@@ -23,10 +22,6 @@ from holon_common.plugin import (
 )
 
 from .tool_plugin_entry import assert_entry_point_allowed
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await _shared_ensure_schema(conn)
 
 
 async def register_tool_plugin(
@@ -74,7 +69,6 @@ def load_tool_plugin(manifest: dict):
 
 
 __all__ = [
-    "ensure_schema",
     "register_tool_plugin",
     "get_tool_plugin_registration",
     "set_tool_plugin_status",
