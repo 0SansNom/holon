@@ -185,7 +185,7 @@ PERSONAS = [
     ("msmith", "user", "Mary Smith", "DE", None, "admin"),
     ("kenji", "user", "Kenji Sato", "JP", None, "viewer"),
     ("alice", "user", "Alice TenantMember", "FR", None, None),
-    ("ingest-bot", "agent", "Ingest Bot", "FR", f"hl:{TENANT_ID}:global:user:jdoe", "editor"),
+    ("ingest-bot", "agent", "Ingest Bot", "FR", f"hl:{TENANT_ID}:global:user:jdoe", "viewer"),
     ("connectivity-connector", "service_account", "Connectivity Connector", None, None, "editor"),
     ("connectivity-pipeline-runner", "service_account", "Connectivity Pipeline Runner", None, None, "editor"),
     ("automation-workflow-engine", "service_account", "Automation Workflow Engine", None, None, "editor"),
