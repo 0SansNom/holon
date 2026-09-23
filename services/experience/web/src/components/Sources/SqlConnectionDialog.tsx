@@ -27,7 +27,7 @@ const DIALECT_LABELS: Record<SqlDialect, string> = {
 };
 
 function isDefaultPort(port: string, dialect: SqlDialect): boolean {
-  return !port || Object.values(DEFAULT_PORTS).some((p) => String(p) === port);
+  return !port || port === String(DEFAULT_PORTS[dialect]);
 }
 
 export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnection | null; onClose: () => void }) {
