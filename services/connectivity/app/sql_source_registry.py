@@ -17,38 +17,6 @@ from holon_common.connector_safety import (
 from holon_common.secrets import resolve_optional
 from holon_common.sql_ident import quote_identifier, require_identifier
 
-DDL = """
-CREATE TABLE IF NOT EXISTS sql_connection (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    port INTEGER NOT NULL DEFAULT 5432,
-    database TEXT NOT NULL,
-    username TEXT NOT NULL,
-    password TEXT,
-    secret_ref TEXT,
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS sql_source (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    connection_name TEXT NOT NULL,
-    table_name TEXT,
-    query TEXT,
-    schedule_interval_minutes INTEGER,
-    cursor_property TEXT,
-    last_cursor_value TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-"""
-
 _FORBIDDEN_STMT = re.compile(
     r"\b(insert|update|delete|truncate|alter|drop|create|grant|revoke|call|execute)\b",
     re.IGNORECASE,
@@ -94,10 +62,6 @@ class ConnectionConflictError(ValueError):
 
 class ConnectionInUseError(ValueError):
     pass
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 _quote_identifier = quote_identifier

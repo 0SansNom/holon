@@ -9,37 +9,9 @@ import asyncpg
 
 from holon_common.connector_safety import ConnectorSafetyError, assert_kafka_topic
 
-DDL = """
-CREATE TABLE IF NOT EXISTS kafka_stream_source (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    topic TEXT NOT NULL,
-    key_field TEXT NOT NULL,
-    dataset_name TEXT NOT NULL,
-    batch_interval_seconds DOUBLE PRECISION NOT NULL DEFAULT 5.0,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS kafka_stream_state (
-    tenant_id TEXT NOT NULL,
-    source_name TEXT NOT NULL,
-    record_key TEXT NOT NULL,
-    data JSONB NOT NULL,
-    updated_row_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, source_name, record_key)
-);
-"""
-
 
 class KafkaStreamConflictError(ValueError):
     pass
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 def _parse_row(row: asyncpg.Record) -> dict:
