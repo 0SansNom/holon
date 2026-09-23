@@ -42,6 +42,7 @@ from holon_common.readiness import (
 )
 
 from . import deps, kafka_stream_registry
+from .authz_seed import ensure_authz_seeded
 from .deps import (
     DB_URL,
     ICEBERG_CONFIG,
@@ -72,8 +73,6 @@ async def lifespan(app: FastAPI):
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
     deps.authz = app.state.authz
-    from .authz_seed import ensure_authz_seeded
-
     await retry_with_backoff(
         lambda: ensure_authz_seeded(app.state.authz, app.state.pool),
         what="connectivity authz seed",

@@ -1,13 +1,13 @@
 """SpiceDB bootstrap for Connectivity sources and pipelines.
 
 Identity owns the SpiceDB schema; Connectivity links its own resources
-under the workspace (and optional project) the same way Knowledge does
-for object_type.
+under their workspace the same way Knowledge does for object_type.
 """
 
 from __future__ import annotations
 
 import logging
+
 import asyncpg
 
 from holon_common.authz import PermissionClient
@@ -61,8 +61,8 @@ _BACKFILL_KEY = "authz_backfill_v1"
 async def ensure_authz_seeded(client: PermissionClient, pool: asyncpg.Pool) -> None:
     """One-time backfill of parent_workspace for rows created before
     Connectivity wrote its own relationships. New rows are seeded inline.
-    Raises if any write failed so the caller retries; the done-flag is
-    only set after a clean pass."""
+    The done-flag is only set after a clean pass, so a partial failure is
+    retried on the next boot without blocking this one."""
     if await pool.fetchval("SELECT 1 FROM connectivity_runtime WHERE key = $1", _BACKFILL_KEY):
         return
 
@@ -92,7 +92,8 @@ async def ensure_authz_seeded(client: PermissionClient, pool: asyncpg.Pool) -> N
                 kind, row["tenant_id"], workspace_id, row["name"],
             )
     if failed:
-        raise RuntimeError(f"authz backfill: {failed}/{len(rows)} relationship writes failed")
+        logger.error("authz backfill: %d/%d writes failed; will retry next boot", failed, len(rows))
+        return
 
     await pool.execute(
         "INSERT INTO connectivity_runtime (key, value) VALUES ($1, 'done') ON CONFLICT (key) DO NOTHING",
