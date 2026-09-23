@@ -140,7 +140,7 @@ export interface RegisterSqlSourceRequest {
   cursor_property?: string;
 }
 
-export type ObjectConnectionKind = "s3" | "azure";
+export type ObjectConnectionKind = "s3" | "azure" | "gcs";
 
 export interface ObjectConnection {
   tenant_id: string;

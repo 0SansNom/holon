@@ -103,7 +103,7 @@ export function ObjectSourceDialog({ editing, onClose }: { editing: ObjectSource
         <p className="hl-dialog-desc">
           {isEditing
             ? "Change bucket, path, or schedule — the name stays fixed since sync calls already target it."
-            : "Import CSV, NDJSON, or Parquet from S3-compatible storage — no code, nothing to deploy."}
+            : "Import CSV, NDJSON, or Parquet from S3, Azure Blob, or GCS — no code, nothing to deploy."}
         </p>
         <FormGroup label="Name" helperText="Dataset name — lowercase, no spaces (e.g. suppliers_csv)">
           <InputGroup
