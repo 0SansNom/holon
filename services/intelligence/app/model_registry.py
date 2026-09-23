@@ -14,19 +14,6 @@ import joblib
 
 logger = logging.getLogger("intelligence.model_registry")
 
-DDL = """
-CREATE TABLE IF NOT EXISTS model_registration (
-    name TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    version TEXT NOT NULL,
-    framework TEXT NOT NULL,
-    artifact_key TEXT NOT NULL,
-    input_schema JSONB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
 _VALID_FRAMEWORKS = {"sklearn"}
 
 
@@ -48,10 +35,6 @@ def _require_joblib_allowed() -> None:
             "joblib model register/predict disabled "
             "(set HOLON_ALLOW_JOBLIB_MODELS=true only for local DX — refused in production posture)"
         )
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 def _artifact_key(name: str, version: str) -> str:
