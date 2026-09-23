@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 
 import httpx
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from .embeddings import EmbeddingClient
 from .knowledge_urls import holon_url, ontology_url
@@ -15,6 +23,11 @@ from .knowledge_urls import holon_url, ontology_url
 logger = logging.getLogger("intelligence.vector_store")
 
 COLLECTION_NAME = "holon_semantic_index"
+
+
+def metadata_point_id(*, tenant_id: str, source: str, urn: str) -> str:
+    """Deterministic Qdrant point id scoped by tenant (avoids cross-tenant collisions)."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{tenant_id}:{source}:{urn}"))
 
 
 async def ensure_collection(client: AsyncQdrantClient, dimension: int) -> None:
@@ -26,11 +39,63 @@ async def ensure_collection(client: AsyncQdrantClient, dimension: int) -> None:
         )
 
 
+async def purge_untagged_points(client: AsyncQdrantClient) -> int:
+    """Delete legacy points that lack tenant_id (pre-P2 index). Returns count deleted."""
+    deleted = 0
+    next_offset = None
+    while True:
+        records, next_offset = await client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=64,
+            offset=next_offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not records:
+            break
+        orphan_ids = [
+            point.id
+            for point in records
+            if not (point.payload or {}).get("tenant_id")
+        ]
+        if orphan_ids:
+            await client.delete(collection_name=COLLECTION_NAME, points_selector=orphan_ids)
+            deleted += len(orphan_ids)
+        if next_offset is None:
+            break
+    if deleted:
+        logger.info("purged %d Qdrant points missing tenant_id", deleted)
+    return deleted
+
+
+async def maybe_rebuild_collection(client: AsyncQdrantClient, dimension: int) -> bool:
+    """If HOLON_QDRANT_REBUILD=1, drop and recreate the collection (local DX)."""
+    raw = (os.environ.get("HOLON_QDRANT_REBUILD") or "").strip().lower()
+    if raw not in {"1", "true", "yes"}:
+        return False
+    collections = await client.get_collections()
+    names = {c.name for c in collections.collections}
+    if COLLECTION_NAME in names:
+        await client.delete_collection(COLLECTION_NAME)
+        logger.warning("HOLON_QDRANT_REBUILD: deleted collection %s", COLLECTION_NAME)
+    await client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=VectorParams(size=dimension, distance=Distance.COSINE),
+    )
+    return True
+
+
 async def index_metadata(
-    client: AsyncQdrantClient, embedder: EmbeddingClient, *, knowledge_url: str, token: str
+    client: AsyncQdrantClient,
+    embedder: EmbeddingClient,
+    *,
+    knowledge_url: str,
+    token: str,
+    tenant_id: str,
+    workspace_id: str,
 ) -> int:
-    """Safe to re-run: each point's id is a deterministic hash of its
-    source, so re-indexing updates in place rather than duplicating.
+    """Safe to re-run: each point's id is a deterministic hash of tenant+source+urn,
+    so re-indexing updates in place rather than duplicating.
     """
     headers = {"Authorization": f"Bearer {token}"}
     documents: list[dict] = []
@@ -45,6 +110,8 @@ async def index_metadata(
                     "source": "object_type",
                     "urn": data["urn"],
                     "object_type": data["name"],
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
                 }
             )
 
@@ -57,6 +124,8 @@ async def index_metadata(
                     "source": "action",
                     "urn": action["name"],
                     "object_type": action["target_object_type"],
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
                 }
             )
 
@@ -70,6 +139,8 @@ async def index_metadata(
                     "source": "glossary",
                     "urn": term["term"],
                     "object_type": None,
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
                 }
             )
 
@@ -79,7 +150,7 @@ async def index_metadata(
     vectors = await embedder.embed([doc["text"] for doc in documents])
     points = [
         PointStruct(
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc['source']}:{doc['urn']}")),
+            id=metadata_point_id(tenant_id=tenant_id, source=doc["source"], urn=doc["urn"]),
             vector=vector,
             payload=doc,
         )
@@ -90,8 +161,20 @@ async def index_metadata(
 
 
 async def semantic_search(
-    client: AsyncQdrantClient, embedder: EmbeddingClient, *, query_text: str, limit: int = 5
+    client: AsyncQdrantClient,
+    embedder: EmbeddingClient,
+    *,
+    query_text: str,
+    tenant_id: str,
+    limit: int = 5,
 ) -> list[dict]:
     [query_vector] = await embedder.embed([query_text])
-    results = await client.query_points(collection_name=COLLECTION_NAME, query=query_vector, limit=limit)
+    results = await client.query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_vector,
+        query_filter=Filter(
+            must=[FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))]
+        ),
+        limit=limit,
+    )
     return [{"score": point.score, **point.payload} for point in results.points]

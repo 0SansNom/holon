@@ -27,6 +27,8 @@ _STATUS_VALUES_BY_OBJECT_TYPE = {
 _AGGREGATION_KEYWORDS = ["combien", "how many", "nombre de", "count"]
 _TEMPORAL_MARKERS = re.compile(r"\bas of\b|\bau\b.*\d{4}|\d{4}-\d{2}-\d{2}")
 _ID_PATTERN = re.compile(r"\b(\d+)\b")
+_LEXICAL_HIT_LIMIT = 5
+_HYDRATE_LIMIT = 3
 
 
 @dataclass
@@ -71,6 +73,45 @@ def classify_intent(query_text: str, *, resolved_object_type: Optional[str], res
     if resolved_object_type and resolved_id:
         return "lookup"
     return "semantic"
+
+
+def _parse_search_hit(hit: dict) -> tuple[Optional[str], Optional[str], str]:
+    """Return (object_type, instance_id, display_text) from a Knowledge /search hit."""
+    object_type = hit.get("object_type")
+    urn = hit.get("urn") or ""
+    text = (hit.get("text") or "").strip()
+    instance_id: Optional[str] = None
+    # Knowledge indexes urn as "{object_type}:{tenant_id}:{instance_id}"
+    parts = urn.split(":")
+    if len(parts) >= 3:
+        instance_id = parts[-1]
+        if not object_type:
+            object_type = parts[0]
+    summary = text[:400] if text else urn
+    if object_type and instance_id:
+        summary = f"[{object_type}/{instance_id}] {summary}"
+    return object_type, instance_id, summary
+
+
+async def _lexical_search(
+    http: httpx.AsyncClient,
+    knowledge_url: str,
+    headers: dict,
+    query_text: str,
+    *,
+    limit: int = _LEXICAL_HIT_LIMIT,
+) -> list[dict]:
+    """Knowledge OpenSearch — tenant + entitlement filtered server-side."""
+    response = await http.get(
+        holon_url(knowledge_url, "/search"),
+        headers=headers,
+        params={"q": query_text, "size": limit},
+    )
+    if response.status_code != 200:
+        logger.warning("Knowledge /search returned %s: %s", response.status_code, response.text[:200])
+        return []
+    body = response.json()
+    return list(body.get("results") or [])
 
 
 async def _structural_lookup(
@@ -140,6 +181,7 @@ async def build_context(
     qdrant: AsyncQdrantClient,
     embedder: EmbeddingClient,
     glossary_terms: list[dict],
+    tenant_id: str,
 ) -> ContextResult:
     headers = {"Authorization": authorization}
     resolved_object_type = _resolve_object_type(query_text, glossary_terms)
@@ -162,12 +204,37 @@ async def build_context(
             if item:
                 result.items.append(item)
 
-        # Semantic search is a fallback, only reached
-        # when structural resolution produced nothing.
+        # Instance lexical search (Knowledge OpenSearch) before metadata vectors —
+        # entitlements/markings already applied server-side.
         if not result.items:
-            hits = await semantic_search(qdrant, embedder, query_text=query_text, limit=3)
+            hits = await _lexical_search(http, knowledge_url, headers, query_text)
+            hydrated = 0
             for hit in hits:
-                result.items.append(ContextItem(text=hit["text"], urn=f"{hit['source']}:{hit['urn']}", channel="semantic"))
+                object_type, instance_id, summary = _parse_search_hit(hit)
+                urn = hit.get("urn") or f"{object_type}/{instance_id}"
+                result.items.append(ContextItem(text=summary, urn=urn, channel="lexical"))
+                if (
+                    hydrated < _HYDRATE_LIMIT
+                    and object_type
+                    and instance_id
+                    and intent in ("semantic", "lookup")
+                ):
+                    card = await _structural_lookup(
+                        http, knowledge_url, headers, object_type, instance_id, None
+                    )
+                    if card:
+                        result.items.append(card)
+                        hydrated += 1
+
+        # Semantic metadata fallback when structural + lexical produced nothing.
+        if not result.items:
+            hits = await semantic_search(
+                qdrant, embedder, query_text=query_text, tenant_id=tenant_id, limit=3
+            )
+            for hit in hits:
+                result.items.append(
+                    ContextItem(text=hit["text"], urn=f"{hit['source']}:{hit['urn']}", channel="semantic")
+                )
 
     return result
 
@@ -202,6 +269,7 @@ async def ask(
     embedder: EmbeddingClient,
     glossary_terms: list[dict],
     llm: LLMClient,
+    tenant_id: str,
 ) -> dict:
     context = await build_context(
         query_text=query_text,
@@ -210,6 +278,7 @@ async def ask(
         qdrant=qdrant,
         embedder=embedder,
         glossary_terms=glossary_terms,
+        tenant_id=tenant_id,
     )
     prompt = _render_prompt(query_text, context.items)
     response = await llm.complete(

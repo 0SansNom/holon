@@ -31,7 +31,9 @@ async def run_gold_set(
     qdrant: AsyncQdrantClient,
     embedder: EmbeddingClient,
     glossary_terms: list[dict],
-    llm: LLMClient) -> dict:
+    llm: LLMClient,
+    tenant_id: str,
+) -> dict:
     questions = await pool.fetch(
         "SELECT question_text, category, expected_urn_substring FROM gold_set_question ORDER BY id"
     )
@@ -51,7 +53,8 @@ async def run_gold_set(
                 qdrant=qdrant,
                 embedder=embedder,
                 glossary_terms=glossary_terms,
-                llm=llm
+                llm=llm,
+                tenant_id=tenant_id,
             )
         except Exception as exc:  # noqa: BLE001 — one bad question must not abort the whole run
             logger.exception("gold set question failed: %s", row["question_text"])
