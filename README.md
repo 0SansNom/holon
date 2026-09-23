@@ -18,8 +18,9 @@ What that means in practice:
 - **Applications** — a web UI and an application builder on the same
   APIs people and agents call.
 - **Search** — one index over the ontology, tenant-scoped.
-- **Agents** — optional, experimental. They use the same tools and
-  policy as a human session.
+- **Agents** — optional, experimental ontology-grounded agent runtime
+  (not a general AI platform). Same tools and policy as a human session;
+  Intelligence stays off in production.
 
 One instance, N orgs (filiales). MIT.
 
@@ -40,7 +41,7 @@ Six FastAPI services, each with its own Postgres:
 | `knowledge` | 8003 | Ontology, governed reads/writes, Actions, search |
 | `experience` | 8004 | Web UI and Application Builder |
 | `automation` | 8005 | Workflows — sagas and compensation |
-| `intelligence` | 8006 | LLM gateway, agents (experimental) |
+| `intelligence` | 8006 | Ontology-grounded agents / RAG (experimental) |
 
 Infra: Postgres, MinIO, Iceberg REST, Redpanda, SpiceDB, OPA,
 OpenSearch, Qdrant. Shared primitives in `libs/holon_common`.
