@@ -131,8 +131,11 @@ export function AgentAppView({ application }: { application: Application }) {
       </div>
 
       {error && (
-        <Callout intent="danger" onDismiss={() => setError(null)}>
-          {error}
+        <Callout intent="danger">
+          <div className="hl-flex-row hl-items-center hl-justify-between hl-gap-sm">
+            <span>{error}</span>
+            <Button minimal small text="Dismiss" onClick={() => setError(null)} />
+          </div>
         </Callout>
       )}
 
