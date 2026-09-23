@@ -64,3 +64,132 @@ def test_tenant_member_without_any_workspace_relation_is_denied(alice_token: str
 def test_action_on_nonexistent_customer_is_404(jdoe_token: str) -> None:
     status, body = _put_on_hold(jdoe_token, 9999)
     assert status == 404, body
+
+
+def test_put_on_credit_hold_rejects_already_closed_account(
+    jdoe_token: str, msmith_token: str
+) -> None:
+    """Semantic layer (submission_criteria), not the LLM / Pydantic schema."""
+    customer_id = 4  # closed by HITL approve path when that test runs first;
+    # if still open, close it here so this assertion is self-contained.
+    status, customer = _request("GET", ontology_url(f"/objects/Customer/{customer_id}"), token=jdoe_token)
+    assert status == 200, customer
+    if customer.get("account_closed") is not True:
+        status, pending = _request(
+            "POST",
+            ontology_url(f"/objects/Customer/{customer_id}/actions/closeAccount"),
+            token=jdoe_token,
+            body={"reason": "criteria self-setup"},
+        )
+        assert status == 200, pending
+        status, decision = _request(
+            "POST",
+            holon_url(f"/approvals/{pending['approvalId']}/approve"),
+            token=msmith_token,
+            body={},
+        )
+        assert status == 200, decision
+
+    status, body = _put_on_hold(jdoe_token, customer_id, reason="should be refused")
+    assert status == 400, body
+    assert body["errorName"] == "ActionValidationFailed", body
+    assert "closed" in body["detail"].lower(), body
+
+
+def _order_rows(jdoe_token: str) -> list[dict]:
+    status, body = _request("GET", ontology_url("/objects/Order"), token=jdoe_token)
+    assert status == 200, body
+    if isinstance(body, list):
+        return body
+    return list(body.get("data") or [])
+
+
+def _cancellable_order_ids(jdoe_token: str) -> list[int]:
+    """Pending + not already cancelled. Overlays survive `make seed` (ERP only)."""
+    ids: list[int] = []
+    for row in _order_rows(jdoe_token):
+        if row.get("status") == "pending" and row.get("cancelled") is not True:
+            ids.append(int(row["id"]))
+    return ids
+
+
+def _ensure_cancellable_order_id(jdoe_token: str) -> int:
+    """Return a pending, non-cancelled Order id — uncancel one if needed."""
+    ready = _cancellable_order_ids(jdoe_token)
+    if ready:
+        return ready[0]
+
+    cancelled_pending = [
+        int(r["id"])
+        for r in _order_rows(jdoe_token)
+        if r.get("status") == "pending" and r.get("cancelled") is True
+    ]
+    assert cancelled_pending, "fixtures need at least one pending Order"
+    order_id = cancelled_pending[0]
+    status, body = _request(
+        "POST",
+        ontology_url(f"/objects/Order/{order_id}/actions/uncancel"),
+        token=jdoe_token,
+        body={"reason": "reset cancel overlay for criteria test"},
+    )
+    assert status == 200, body
+    assert body.get("cancelled") is False, body
+    return order_id
+
+
+def test_cancel_pending_order_is_semantic_not_just_syntax(jdoe_token: str) -> None:
+    """Order.cancelPending: pending → applied; delivered → ActionValidationFailed."""
+    order_id = _ensure_cancellable_order_id(jdoe_token)
+
+    status, ok = _request(
+        "POST",
+        ontology_url(f"/objects/Order/{order_id}/actions/cancelPending"),
+        token=jdoe_token,
+        body={"reason": "customer withdrew"},
+    )
+    assert status == 200, ok
+    assert ok["status"] == "applied", ok
+    assert ok["cancelled"] is True, ok
+
+    status, order = _request("GET", ontology_url(f"/objects/Order/{order_id}"), token=jdoe_token)
+    assert status == 200, order
+    assert order["cancelled"] is True, order
+    assert order["status"] == "pending", order  # source status unchanged; overlay flags cancel
+
+    # Delivered order (seed id=1) — syntax-valid tool call, semantic refuse.
+    status, bad = _request(
+        "POST",
+        ontology_url("/objects/Order/1/actions/cancelPending"),
+        token=jdoe_token,
+        body={"reason": "should fail — already delivered"},
+    )
+    assert status == 400, bad
+    assert bad["errorName"] == "ActionValidationFailed", bad
+    assert "cancellable" in bad["detail"].lower() or "pending" in bad["detail"].lower(), bad
+
+    status, delivered = _request("GET", ontology_url("/objects/Order/1"), token=jdoe_token)
+    assert status == 200, delivered
+    assert delivered["status"] == "delivered", delivered
+    assert delivered.get("cancelled") is not True, delivered
+
+
+def test_second_cancel_on_same_order_is_rejected(jdoe_token: str) -> None:
+    order_id = _ensure_cancellable_order_id(jdoe_token)
+
+    status, first = _request(
+        "POST",
+        ontology_url(f"/objects/Order/{order_id}/actions/cancelPending"),
+        token=jdoe_token,
+        body={"reason": "first cancel"},
+    )
+    assert status == 200, first
+    assert first["cancelled"] is True, first
+
+    status, second = _request(
+        "POST",
+        ontology_url(f"/objects/Order/{order_id}/actions/cancelPending"),
+        token=jdoe_token,
+        body={"reason": "second cancel"},
+    )
+    assert status == 400, second
+    assert second["errorName"] == "ActionValidationFailed", second

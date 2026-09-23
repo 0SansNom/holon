@@ -44,3 +44,10 @@ def test_evaluate_runs_the_starter_gold_set_and_security_suite(jdoe_token: str) 
     security = body["security"]
     assert security["zero_tolerance_violations"] == 0, security
     assert security["passed"] is True, security
+
+    paths = body["actionPaths"]
+    assert paths["passed"] is True, paths
+    assert paths["path_failure_rate"] == 0, paths
+    check_names = {c["check"] for c in paths["checks"]}
+    assert "semantic_reject_non_pending_order" in check_names, paths
+    assert "semantic_apply_pending_order" in check_names, paths
