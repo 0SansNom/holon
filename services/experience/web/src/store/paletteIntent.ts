@@ -18,10 +18,12 @@ export type PaletteIntent =
   | "connect-source"
   | "connect-sql-source"
   | "connect-object-source"
+  | "connect-sftp-source"
   | "connect-stream"
   | "create-connection"
   | "create-sql-connection"
-  | "create-object-connection";
+  | "create-object-connection"
+  | "create-sftp-connection";
 
 interface PaletteIntentState {
   intent: PaletteIntent | null;

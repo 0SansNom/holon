@@ -194,6 +194,52 @@ export interface RegisterObjectSourceRequest {
   schedule_interval_minutes?: number;
 }
 
+export interface SftpConnection {
+  tenant_id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  has_password: boolean;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSftpConnectionRequest {
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+  password?: string;
+  secret_ref?: string;
+}
+
+export interface SftpSource {
+  tenant_id: string;
+  name: string;
+  workspace_id: string;
+  connection_name: string;
+  remote_path: string | null;
+  remote_prefix: string | null;
+  format: "csv" | "ndjson" | "parquet" | string;
+  incremental: boolean;
+  last_synced_path: string | null;
+  schedule_interval_minutes: number | null;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSftpSourceRequest {
+  name: string;
+  connection_name: string;
+  format: string;
+  remote_path?: string;
+  remote_prefix?: string;
+  incremental?: boolean;
+  schedule_interval_minutes?: number;
+}
+
 export interface SyncResult {
   dataset_urn: string;
   dataset_version_urn: string;
@@ -323,6 +369,18 @@ export const connectivityApi = {
   disableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/disable`),
   enableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/enable`),
   deleteObjectSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/object-sources/${name}`),
+
+  listSftpConnections: () => api.get<SftpConnection[]>(`${CONNECTIVITY_URL}/sftp-connections`),
+  registerSftpConnection: (body: RegisterSftpConnectionRequest) =>
+    api.post<SftpConnection>(`${CONNECTIVITY_URL}/sftp-connections`, body),
+  deleteSftpConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sftp-connections/${name}`),
+
+  listSftpSources: () => api.get<SftpSource[]>(`${CONNECTIVITY_URL}/sftp-sources`),
+  registerSftpSource: (body: RegisterSftpSourceRequest) =>
+    api.post<SftpSource>(`${CONNECTIVITY_URL}/sftp-sources`, body),
+  disableSftpSource: (name: string) => api.post<SftpSource>(`${CONNECTIVITY_URL}/sftp-sources/${name}/disable`),
+  enableSftpSource: (name: string) => api.post<SftpSource>(`${CONNECTIVITY_URL}/sftp-sources/${name}/enable`),
+  deleteSftpSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sftp-sources/${name}`),
 
   listWriteTargets: () => api.get<WriteTarget[]>(`${CONNECTIVITY_URL}/write-targets`),
   registerWriteTarget: (body: RegisterWriteTargetRequest) =>

@@ -226,6 +226,13 @@ async def register_source(
     if conflicting_object_source is not None:
         raise SourceConflictError(f"dataset {name!r} is already claimed by active object source {conflicting_object_source!r}")
 
+    conflicting_sftp_source = await pool.fetchval(
+        "SELECT name FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+        tenant_id, name,
+    )
+    if conflicting_sftp_source is not None:
+        raise SourceConflictError(f"dataset {name!r} is already claimed by active SFTP source {conflicting_sftp_source!r}")
+
     await pool.execute(
         """
         INSERT INTO sql_source
