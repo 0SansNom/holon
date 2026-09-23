@@ -48,7 +48,7 @@ x-app-env: &app-env
   HOLON_SCIM_BEARER_TOKEN: ${HOLON_SCIM_BEARER_TOKEN:-}
   HOLON_PLUGIN_ENTRY_PREFIXES: ${HOLON_PLUGIN_ENTRY_PREFIXES:-app.plugins.,app.tool_plugins.,holon_test_plugins.}
   # Local compose Postgres/source-s3/reviews-api/oauth2-idp are RFC1918; production leaves this unset (fail closed).
-  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,source-s3,reviews-api,oauth2-idp}
+  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,mysql,source-s3,reviews-api,oauth2-idp}
   HOLON_IDENTITY_URL: http://identity:8000
 
 services:
@@ -202,6 +202,26 @@ services:
       - mongo-data:/data/db
     ports:
       - "27017:27017"
+
+  # Test-only MySQL fixture for the SQL multi-driver connector (dialect=mysql).
+  mysql:
+    profiles: [ "test-fixtures" ]
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: holon12345
+      MYSQL_DATABASE: source_erp
+      MYSQL_USER: holon
+      MYSQL_PASSWORD: holon12345
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./tests/fixtures/mysql-seed:/docker-entrypoint-initdb.d:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uholon", "-pholon12345" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   # Test-only REST API fixture
   reviews-api:
@@ -566,5 +586,6 @@ volumes:
   minio-data:
   source-s3-data:
   mongo-data:
+  mysql-data:
   opensearch-data:
   qdrant-data:
