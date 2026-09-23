@@ -75,6 +75,7 @@ class TransformStep(BaseModel):
 
 class CreatePipelineRequest(BaseModel):
     steps: list[TransformStep]
+    workspace_id: Optional[str] = None
 
 
 class SetPipelineScheduleRequest(BaseModel):
@@ -388,8 +389,9 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
     async def _run_pipeline_if_due(*, name: str, tenant_id: str, interval: timedelta) -> None:
         # Check last successful pipeline run timestamp
         last_finished_at = await pool.fetchval(
-            "SELECT finished_at FROM pipeline_run WHERE pipeline_name = $1 AND status = 'succeeded' "
-            "ORDER BY id DESC LIMIT 1",
+            "SELECT finished_at FROM pipeline_run WHERE tenant_id = $1 AND pipeline_name = $2 "
+            "AND status = 'succeeded' ORDER BY id DESC LIMIT 1",
+            tenant_id,
             name,
         )
         due = last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
@@ -485,7 +487,7 @@ async def _latest_dataset_version_urn(dataset_name: str) -> Optional[str]:
 
 async def _run_pipeline(name: str, *, actor: EventActor, tenant_id: str) -> dict:
     """Execute pipeline transform steps sequentially and finalize outputs."""
-    definition = await pipeline.get_pipeline(deps.pool, name)
+    definition = await pipeline.get_pipeline(deps.pool, tenant_id, name)
     if definition is None:
         raise HolonError.not_found('PipelineNotFound', f"unknown pipeline: {name}", name=name)
 

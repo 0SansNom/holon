@@ -22,61 +22,6 @@ from holon_common.connector_safety import (
 )
 from holon_common.secrets import resolve_optional
 
-DDL = """
-CREATE TABLE IF NOT EXISTS generic_rest_source (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    base_url TEXT NOT NULL,
-    auth_header_name TEXT,
-    auth_header_value TEXT,
-    record_path TEXT,
-    next_page_path TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-
--- additive migration for databases seeded before this column existed
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS next_page_path TEXT;
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS secret_ref TEXT;
-
--- Reusable REST connection credentials table.
-CREATE TABLE IF NOT EXISTS generic_rest_connection (
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    auth_header_name TEXT NOT NULL,
-    auth_header_value TEXT NOT NULL DEFAULT '',
-    created_by_urn TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, name)
-);
-
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS secret_ref TEXT;
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS connection_name TEXT;
-
--- OAuth2 client credentials support.
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS auth_type TEXT NOT NULL DEFAULT 'header';
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_token_url TEXT;
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_client_id TEXT;
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_client_secret TEXT;
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_scope TEXT;
--- Persisted cache for OAuth2 tokens.
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_cached_token TEXT;
-ALTER TABLE generic_rest_connection ADD COLUMN IF NOT EXISTS oauth2_token_expires_at TIMESTAMPTZ;
-
--- Scheduling interval in minutes (compared against sync_run.finished_at).
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS schedule_interval_minutes INTEGER;
-
--- Incremental sync configuration and system-managed cursor tracking.
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS cursor_property TEXT;
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS incremental_param TEXT;
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS last_cursor_value TEXT;
-
--- Target workspace for multi-tenant isolation.
-ALTER TABLE generic_rest_source ADD COLUMN IF NOT EXISTS workspace_id TEXT;
-"""
-
 # Columns safe to return to caller (excludes raw credential values).
 _PUBLIC_COLUMNS = (
     "tenant_id, name, workspace_id, base_url, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
@@ -113,10 +58,6 @@ class ConnectionConflictError(ValueError):
 
 class ConnectionInUseError(ValueError):
     pass
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 _VALID_CONNECTION_AUTH_TYPES = frozenset({"header", "oauth2_client_credentials"})

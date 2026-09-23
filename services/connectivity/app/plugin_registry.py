@@ -17,27 +17,6 @@ logger = logging.getLogger("connectivity.plugin_registry")
 
 DEFAULT_RESERVED_DATASET_NAMES: frozenset[str] = frozenset()
 
-DDL = """
-CREATE TABLE IF NOT EXISTS plugin_registration (
-    name TEXT PRIMARY KEY,
-    version TEXT NOT NULL,
-    manifest JSONB NOT NULL,
-    checksum TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- NULL tenant_id = global plugin (e.g. exchange-rate); non-null = tenant-scoped.
-ALTER TABLE plugin_registration ADD COLUMN IF NOT EXISTS tenant_id TEXT;
-
--- Same scheduling model as `generic_rest_source` — NULL = manual only.
-ALTER TABLE plugin_registration ADD COLUMN IF NOT EXISTS schedule_interval_minutes INTEGER;
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
 
 def _load_entry_point(entry_point: str) -> ConnectorPlugin:
     return load_entry_point(entry_point)

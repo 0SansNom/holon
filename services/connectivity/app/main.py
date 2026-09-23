@@ -26,7 +26,7 @@ from holon_common import (
     run_migrations,
 )
 from holon_common.audit import clear_durable_audit_hooks
-from holon_common.audit_store import ensure_schema as ensure_audit_schema, install_durable_audit
+from holon_common.audit_store import install_durable_audit
 from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
@@ -41,17 +41,8 @@ from holon_common.readiness import (
     report_ready,
 )
 
-from . import (
-    deps,
-    generic_source_registry,
-    kafka_stream_registry,
-    object_source_registry,
-    pipeline,
-    plugin_registry,
-    sql_source_registry,
-    stream_connector,
-    write_target_registry,
-)
+from . import deps, kafka_stream_registry
+from .authz_seed import ensure_authz_seeded
 from .deps import (
     DB_URL,
     ICEBERG_CONFIG,
@@ -67,46 +58,14 @@ from .routers import router as api_router
 
 configure_json_logging(SERVICE_NAME)
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS sync_run (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    connector_urn TEXT NOT NULL,
-    dataset_urn TEXT NOT NULL,
-    dataset_version_urn TEXT NOT NULL,
-    iceberg_namespace TEXT NOT NULL,
-    iceberg_table TEXT NOT NULL,
-    snapshot_id BIGINT NOT NULL,
-    row_count INTEGER NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL,
-    finished_at TIMESTAMPTZ NOT NULL
-);
-
--- Cluster-wide flags (quiesce) so multi-replica Connectivity shares state.
-CREATE TABLE IF NOT EXISTS connectivity_runtime (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
     deps.pool = app.state.pool
-    async with app.state.pool.acquire() as conn:
-        await conn.execute(_DDL)
-        await ensure_audit_schema(conn)
-        await outbox.ensure_schema(conn)
-        await plugin_registry.ensure_schema(conn)
-        await generic_source_registry.ensure_schema(conn)
-        await sql_source_registry.ensure_schema(conn)
-        await object_source_registry.ensure_schema(conn)
-        await pipeline.ensure_schema(conn)
-        await write_target_registry.ensure_schema(conn)
-        await stream_connector.ensure_schema(conn)
+    # Connectivity-owned tables live in app/migrations (0000_baseline + 0001).
+    # Shared holon_common helpers (audit/outbox) are included in 0000.
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
     clear_durable_audit_hooks()
@@ -114,6 +73,10 @@ async def lifespan(app: FastAPI):
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
     deps.authz = app.state.authz
+    await retry_with_backoff(
+        lambda: ensure_authz_seeded(app.state.authz, app.state.pool),
+        what="connectivity authz seed",
+    )
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
     await app.state.producer.start()
@@ -145,7 +108,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Holon — Connectivity Platform", lifespan=lifespan)
-instrument_cors(app)  # Sources page (Experience) calls this service directly from the browser now
+instrument_cors(app)  # Experience BFF proxies /api/connectivity; CORS kept for local tooling
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 install_error_handlers(app, service_name=SERVICE_NAME)

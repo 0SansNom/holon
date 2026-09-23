@@ -11,35 +11,7 @@ from typing import Optional
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS pipeline_definition (
-    name TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    steps JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Same scheduling model as generic_rest_source / plugin_registration — NULL = manual only.
-ALTER TABLE pipeline_definition ADD COLUMN IF NOT EXISTS schedule_interval_minutes INTEGER;
-
-CREATE TABLE IF NOT EXISTS pipeline_run (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    pipeline_name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL,
-    finished_at TIMESTAMPTZ,
-    step_results JSONB NOT NULL DEFAULT '[]',
-    error TEXT
-);
-"""
-
 REQUIRED_STEP_FIELDS = ("step_name", "input_dataset", "function_name", "output_dataset")
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 def _validate_steps(steps: list[dict]) -> None:
@@ -89,11 +61,12 @@ def _validate_steps(steps: list[dict]) -> None:
 _HEALTH_JOIN = """
     LEFT JOIN LATERAL (
         SELECT status, started_at, finished_at, step_results, error
-        FROM pipeline_run pr WHERE pr.pipeline_name = d.name ORDER BY pr.id DESC LIMIT 1
+        FROM pipeline_run pr
+        WHERE pr.tenant_id = d.tenant_id AND pr.pipeline_name = d.name ORDER BY pr.id DESC LIMIT 1
     ) lr ON true
     LEFT JOIN LATERAL (
         SELECT finished_at FROM pipeline_run pr2
-        WHERE pr2.pipeline_name = d.name AND pr2.status = 'succeeded' ORDER BY pr2.id DESC LIMIT 1
+        WHERE pr2.tenant_id = d.tenant_id AND pr2.pipeline_name = d.name AND pr2.status = 'succeeded' ORDER BY pr2.id DESC LIMIT 1
     ) ls ON true
 """
 
@@ -130,20 +103,23 @@ def _attach_health(result: dict) -> dict:
     return result
 
 
-async def create_pipeline(pool: asyncpg.Pool, *, tenant_id: str, name: str, steps: list[dict]) -> dict:
+async def create_pipeline(
+    pool: asyncpg.Pool, *, tenant_id: str, name: str, workspace_id: str, steps: list[dict]
+) -> dict:
+    """Upsert; an existing pipeline keeps its workspace."""
     _validate_steps(steps)
     await pool.execute(
         """
-        INSERT INTO pipeline_definition (tenant_id, name, steps)
-        VALUES ($1, $2, $3::jsonb)
-        ON CONFLICT (name) DO UPDATE SET steps = EXCLUDED.steps, updated_at = now()
+        INSERT INTO pipeline_definition (tenant_id, name, workspace_id, steps)
+        VALUES ($1, $2, $3, $4::jsonb)
+        ON CONFLICT (tenant_id, name) DO UPDATE SET steps = EXCLUDED.steps, updated_at = now()
         """,
-        tenant_id, name, json.dumps(steps),
+        tenant_id, name, workspace_id, json.dumps(steps),
     )
-    return await get_pipeline(pool, name)
+    return await get_pipeline(pool, tenant_id, name)
 
 
-async def get_pipeline(pool: asyncpg.Pool, name: str) -> Optional[dict]:
+async def get_pipeline(pool: asyncpg.Pool, tenant_id: str, name: str) -> Optional[dict]:
     row = await pool.fetchrow(
         f"""
         SELECT d.*, lr.status AS last_run_status, lr.started_at AS last_run_started_at,
@@ -151,9 +127,9 @@ async def get_pipeline(pool: asyncpg.Pool, name: str) -> Optional[dict]:
                lr.step_results AS last_run_step_results, ls.finished_at AS last_success_at
         FROM pipeline_definition d
         {_HEALTH_JOIN}
-        WHERE d.name = $1
+        WHERE d.tenant_id = $1 AND d.name = $2
         """,
-        name,
+        tenant_id, name,
     )
     return _attach_health(_parse_pipeline_row(row)) if row else None
 
@@ -174,12 +150,14 @@ async def list_pipelines(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
     return [_attach_health(_parse_pipeline_row(row)) for row in rows]
 
 
-async def set_pipeline_schedule(pool: asyncpg.Pool, name: str, schedule_interval_minutes: Optional[int]) -> Optional[dict]:
+async def set_pipeline_schedule(
+    pool: asyncpg.Pool, tenant_id: str, name: str, schedule_interval_minutes: Optional[int]
+) -> Optional[dict]:
     await pool.execute(
-        "UPDATE pipeline_definition SET schedule_interval_minutes = $1 WHERE name = $2",
-        schedule_interval_minutes, name,
+        "UPDATE pipeline_definition SET schedule_interval_minutes = $1 WHERE tenant_id = $2 AND name = $3",
+        schedule_interval_minutes, tenant_id, name,
     )
-    return await get_pipeline(pool, name)
+    return await get_pipeline(pool, tenant_id, name)
 
 
 async def list_all_scheduled_pipelines(pool: asyncpg.Pool) -> list[dict]:
