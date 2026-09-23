@@ -7,23 +7,6 @@ from datetime import date, datetime, timezone
 
 import asyncpg
 
-DDL = """
-CREATE TABLE IF NOT EXISTS intelligence_request_window (
-    principal_urn TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    window_start TIMESTAMPTZ NOT NULL,
-    request_count INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (principal_urn, window_start)
-);
-
-CREATE TABLE IF NOT EXISTS intelligence_token_day (
-    tenant_id TEXT NOT NULL,
-    day DATE NOT NULL,
-    tokens BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (tenant_id, day)
-);
-"""
-
 
 class SpendLimitExceeded(Exception):
     def __init__(self, detail: str):
@@ -47,10 +30,6 @@ def rpm_limit() -> int:
 
 def daily_token_quota() -> int:
     return _int_env("HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA", 200_000)
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 def _minute_floor(now: datetime | None = None) -> datetime:

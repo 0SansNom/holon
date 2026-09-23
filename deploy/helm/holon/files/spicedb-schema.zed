@@ -93,6 +93,31 @@ definition pipeline {
     permission approve = parent_workspace->approve
 }
 
+// Intelligence resources (sessions, tool plugins, ML models inherit workspace grants).
+definition agent_session {
+    relation parent_workspace: workspace
+
+    permission read = parent_workspace->read
+    permission write = parent_workspace->write
+    permission approve = parent_workspace->approve
+}
+
+definition tool_plugin {
+    relation parent_workspace: workspace
+
+    permission read = parent_workspace->read
+    permission write = parent_workspace->write
+    permission approve = parent_workspace->approve
+}
+
+definition ml_model {
+    relation parent_workspace: workspace
+
+    permission read = parent_workspace->read
+    permission write = parent_workspace->write
+    permission approve = parent_workspace->approve
+}
+
 // Markings security labels.
 definition marking {
     relation holder: principal
