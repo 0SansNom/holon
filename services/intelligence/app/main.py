@@ -187,9 +187,22 @@ async def lifespan(app: FastAPI):
         lambda: vector_store.ensure_collection(app.state.qdrant, app.state.embedder.dimension),
         what="qdrant collection setup",
     )
+    await retry_with_backoff(
+        lambda: vector_store.maybe_rebuild_collection(app.state.qdrant, app.state.embedder.dimension),
+        what="qdrant optional rebuild",
+    )
+    await retry_with_backoff(
+        lambda: vector_store.purge_untagged_points(app.state.qdrant),
+        what="qdrant purge untagged points",
+    )
     indexed = await retry_with_backoff(
         lambda: vector_store.index_metadata(
-            app.state.qdrant, app.state.embedder, knowledge_url=KNOWLEDGE_URL, token=_indexer_token()
+            app.state.qdrant,
+            app.state.embedder,
+            knowledge_url=KNOWLEDGE_URL,
+            token=_indexer_token(),
+            tenant_id=TENANT_ID,
+            workspace_id=WORKSPACE_ID,
         ),
         what="semantic index build",
     )
@@ -303,6 +316,25 @@ class AskRequest(BaseModel):
     query: str
 
 
+@app.post("/semantic-index/rebuild")
+async def rebuild_semantic_index(principal: Principal = Depends(current_principal)) -> dict:
+    """Re-index ontology metadata + glossary into Qdrant (tenant-scoped).
+
+    Boot indexes before CI fixtures exist; provision calls this after seeding.
+    """
+    _require_intelligence_enabled()
+    await _authorize_workspace(principal, "write")
+    indexed = await vector_store.index_metadata(
+        app.state.qdrant,
+        app.state.embedder,
+        knowledge_url=KNOWLEDGE_URL,
+        token=_indexer_token(),
+        tenant_id=TENANT_ID,
+        workspace_id=WORKSPACE_ID,
+    )
+    return {"indexed": indexed, "tenant_id": TENANT_ID}
+
+
 @app.post("/ask")
 async def ask(request: AskRequest, http_request: Request, principal: Principal = Depends(current_principal)) -> dict:
     """RAG ask endpoint using permission-filtered context."""
@@ -324,6 +356,7 @@ async def ask(request: AskRequest, http_request: Request, principal: Principal =
             embedder=app.state.embedder,
             glossary_terms=glossary_terms,
             llm=app.state.llm,
+            tenant_id=principal.tenant_id,
         )
     except httpx.HTTPStatusError as exc:
         raise HolonError.from_http(exc.response.status_code, exc.response.text, error_name='UpstreamError') from exc
@@ -490,6 +523,7 @@ async def evaluate(http_request: Request, principal: Principal = Depends(current
         embedder=app.state.embedder,
         glossary_terms=glossary_terms,
         llm=app.state.llm,
+        tenant_id=principal.tenant_id,
     )
     agent_token, editor_token = _security_probe_tokens()
     security_result = await evaluation.run_security_suite(
