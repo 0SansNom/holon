@@ -12,7 +12,10 @@ const TAB_SKELETON = <RegistryTabSkeleton cards={3} />;
 export function SourcesPage() {
   const intent = usePaletteIntentStore((s) => s.intent);
   const [selectedTabId, setSelectedTabId] = useState<TabId>(() =>
-    intent === "create-connection" || intent === "create-sql-connection" || intent === "create-object-connection"
+    intent === "create-connection" ||
+    intent === "create-sql-connection" ||
+    intent === "create-object-connection" ||
+    intent === "create-salesforce-connection"
       ? "connections"
       : "data-sources",
   );
@@ -20,7 +23,7 @@ export function SourcesPage() {
   return (
     <RegistryPage
       title="Sources"
-      description="Connect REST, SQL, files, Kafka, and plugins. Manage credentials and map synced data to object types."
+      description="Connect REST, SQL, files, Salesforce, Kafka, and plugins. Manage credentials and map synced data to object types."
     >
       <Tabs id="sources-tabs" selectedTabId={selectedTabId} onChange={setSelectedTabId} renderActiveTabPanelOnly>
         <Tab id="data-sources" title="Data Sources" panel={<Suspense fallback={TAB_SKELETON}><DataSourcesTab /></Suspense>} />

@@ -194,6 +194,49 @@ export interface RegisterObjectSourceRequest {
   schedule_interval_minutes?: number;
 }
 
+export interface SalesforceConnection {
+  tenant_id: string;
+  name: string;
+  login_url: string;
+  client_id: string;
+  has_client_secret: boolean;
+  instance_url: string | null;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSalesforceConnectionRequest {
+  name: string;
+  client_id: string;
+  login_url?: string;
+  client_secret?: string;
+  secret_ref?: string;
+}
+
+export interface SalesforceSource {
+  tenant_id: string;
+  name: string;
+  workspace_id: string;
+  connection_name: string;
+  soql: string;
+  api_version: string;
+  cursor_property: string | null;
+  last_cursor_value: string | null;
+  schedule_interval_minutes: number | null;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSalesforceSourceRequest {
+  name: string;
+  connection_name: string;
+  soql: string;
+  api_version?: string;
+  cursor_property?: string;
+  schedule_interval_minutes?: number;
+}
+
 export interface SyncResult {
   dataset_urn: string;
   dataset_version_urn: string;
@@ -323,6 +366,22 @@ export const connectivityApi = {
   disableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/disable`),
   enableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/enable`),
   deleteObjectSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/object-sources/${name}`),
+
+  listSalesforceConnections: () => api.get<SalesforceConnection[]>(`${CONNECTIVITY_URL}/salesforce-connections`),
+  registerSalesforceConnection: (body: RegisterSalesforceConnectionRequest) =>
+    api.post<SalesforceConnection>(`${CONNECTIVITY_URL}/salesforce-connections`, body),
+  deleteSalesforceConnection: (name: string) =>
+    api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/salesforce-connections/${name}`),
+
+  listSalesforceSources: () => api.get<SalesforceSource[]>(`${CONNECTIVITY_URL}/salesforce-sources`),
+  registerSalesforceSource: (body: RegisterSalesforceSourceRequest) =>
+    api.post<SalesforceSource>(`${CONNECTIVITY_URL}/salesforce-sources`, body),
+  disableSalesforceSource: (name: string) =>
+    api.post<SalesforceSource>(`${CONNECTIVITY_URL}/salesforce-sources/${name}/disable`),
+  enableSalesforceSource: (name: string) =>
+    api.post<SalesforceSource>(`${CONNECTIVITY_URL}/salesforce-sources/${name}/enable`),
+  deleteSalesforceSource: (name: string) =>
+    api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/salesforce-sources/${name}`),
 
   listWriteTargets: () => api.get<WriteTarget[]>(`${CONNECTIVITY_URL}/write-targets`),
   registerWriteTarget: (body: RegisterWriteTargetRequest) =>

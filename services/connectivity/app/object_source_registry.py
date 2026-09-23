@@ -220,6 +220,15 @@ async def register_source(
     if conflicting_sql_source is not None:
         raise SourceConflictError(f"dataset {name!r} is already claimed by active SQL source {conflicting_sql_source!r}")
 
+    conflicting_sf_source = await pool.fetchval(
+        "SELECT name FROM salesforce_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+        tenant_id, name,
+    )
+    if conflicting_sf_source is not None:
+        raise SourceConflictError(
+            f"dataset {name!r} is already claimed by active Salesforce source {conflicting_sf_source!r}"
+        )
+
     await pool.execute(
         """
         INSERT INTO object_source
