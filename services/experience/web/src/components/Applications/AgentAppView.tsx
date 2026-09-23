@@ -13,23 +13,25 @@ type ChatMessage = {
 
 /**
  * Runtime for applications that declare an agentApp surface.
- * Each user message opens a new Intelligence session via the Experience BFF
- * (one turn completes a session today).
+ * Opens one Intelligence session and reuses it across turns until the
+ * user starts a new chat (or the session expires / is aborted).
  */
 export function AgentAppView({ application }: { application: Application }) {
   const { data: bootstrap } = useBootstrapConfig();
   const intelligenceEnabled = bootstrap?.intelligence_enabled !== false;
   const surface = application.definition.surfaces.find(isAgentAppSurface);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionUrn, setSessionUrn] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const sessionUrnRef = useRef<string | null>(null);
 
   if (!surface) {
     return (
       <EmptyState>
-        No Agent App surface on this application — enable it in the Builder tab (experimental ontology-grounded
+        No Agent App surface on this application — enable it in the Builder tab (beta ontology-grounded
         runtime).
       </EmptyState>
     );
@@ -43,6 +45,22 @@ export function AgentAppView({ application }: { application: Application }) {
     );
   }
 
+  function startNewChat() {
+    sessionUrnRef.current = null;
+    setSessionUrn(null);
+    setMessages([]);
+    setError(null);
+    setDraft("");
+  }
+
+  async function ensureSession(): Promise<string> {
+    if (sessionUrnRef.current) return sessionUrnRef.current;
+    const session = await experienceApi.createAgentSession(application.name);
+    sessionUrnRef.current = session.urn;
+    setSessionUrn(session.urn);
+    return session.urn;
+  }
+
   async function send() {
     const message = draft.trim();
     if (!message || busy) return;
@@ -53,8 +71,12 @@ export function AgentAppView({ application }: { application: Application }) {
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const session = await experienceApi.createAgentSession(application.name);
-      const turn = await experienceApi.runAgentSessionTurn(application.name, session.urn, message);
+      const urn = await ensureSession();
+      const turn = await experienceApi.runAgentSessionTurn(application.name, urn, message);
+      if (turn.sessionStatus && turn.sessionStatus !== "running") {
+        sessionUrnRef.current = null;
+        setSessionUrn(null);
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -71,6 +93,11 @@ export function AgentAppView({ application }: { application: Application }) {
         ...prev,
         { id: `s-${Date.now()}`, role: "system", text: detail },
       ]);
+      // Next send opens a fresh session if this one was aborted/expired.
+      if (/not running|expired|aborted/i.test(detail)) {
+        sessionUrnRef.current = null;
+        setSessionUrn(null);
+      }
     } finally {
       setBusy(false);
     }
@@ -79,15 +106,23 @@ export function AgentAppView({ application }: { application: Application }) {
   return (
     <div className="hl-flex-col hl-gap-sm" style={{ minHeight: 420 }}>
       <Callout intent="primary" icon="info-sign">
-        Ontology-grounded agent runtime (experimental). Tools are Knowledge Actions under the same authz as a human
-        session. Each message starts a fresh session.
+        Ontology-grounded agent runtime (beta). Tools are Knowledge Actions under the same authz as a human
+        session. Messages stay in one session until you start a new chat.
       </Callout>
 
-      <div className="hl-tag-row">
-        <Tag minimal>tools: {surface.tools?.length ?? 0}</Tag>
-        {surface.budget?.max_iterations != null && (
-          <Tag minimal>max iterations: {surface.budget.max_iterations}</Tag>
-        )}
+      <div className="hl-tag-row hl-flex-row hl-items-center hl-justify-between">
+        <div className="hl-tag-row">
+          <Tag minimal>tools: {surface.tools?.length ?? 0}</Tag>
+          {surface.budget?.max_iterations != null && (
+            <Tag minimal>max iterations: {surface.budget.max_iterations}</Tag>
+          )}
+          {sessionUrn && (
+            <Tag minimal intent="success" title={sessionUrn}>
+              session active
+            </Tag>
+          )}
+        </div>
+        <Button minimal small icon="clean" text="New chat" disabled={busy || (!sessionUrn && messages.length === 0)} onClick={startNewChat} />
       </div>
 
       <div

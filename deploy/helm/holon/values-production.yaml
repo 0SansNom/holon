@@ -18,7 +18,20 @@ bootstrap:
   tenantId: acme
   workspaceId: main
 
+# Intelligence defaults off in production. To enable beta
+# (services/intelligence/BETA.md):
+#   intelligenceEnabled: true
+#   intelligenceBetaOptIn: true
+#   services.intelligence.runtimeClassName: gvisor   # required; cluster RuntimeClass
+#   toolPluginIsolation: subprocess                 # required (default)
+#   llmProvider: anthropic                           # or voyage-backed stack keys in secret
+#   intelligenceRpm / intelligenceDailyTokenQuota    # must stay > 0
 intelligenceEnabled: false
+intelligenceBetaOptIn: false
+intelligenceRpm: 30
+intelligenceDailyTokenQuota: 200000
+toolPluginIsolation: subprocess
+toolPluginTimeoutSeconds: 15
 llmProvider: fake
 servingStoreRequireMaterialized: true
 holonEnv: production

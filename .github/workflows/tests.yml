@@ -28,23 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The suite is black-box e2e over HTTP: it needs the full stack.
-      # .env is git-ignored by design, so CI builds one from the example —
-      # CI-only values, never real secrets (R8.14).
+      # Black-box e2e over HTTP with the full stack.
+      # .env is git-ignored; CI builds one from the example (CI-only values).
       #
-      # Intelligence (Phase 3) needs a real ANTHROPIC_API_KEY/VOYAGE_API_KEY
-      # to do anything useful, which CI doesn't have. Rather than fake those,
-      # HOLON_EMBEDDING_PROVIDER is overridden to `local` (sentence-transformers,
-      # no API key needed) so Intelligence's startup indexing succeeds, and the
-      # tests that make real LLM/embedding calls are excluded below via the
-      # `llm` pytest marker — they run on demand (`pytest -m llm`) against a
-      # stack configured with real keys, never in CI.
+      # This job uses HOLON_LLM_PROVIDER=fake + local embeddings and excludes
+      # pytest -m llm / soak. Real Anthropic spend is opt-in nightly only
+      # (llm-nightly.yml) — never on PRs. See services/intelligence/BETA.md.
       #
       # HOLON_INTELLIGENCE_RUNTIME overrides docker-compose.yml's default
-      # `runsc-hostnet` (gVisor, ADR 025/R8.9) back to plain `runc` —
-      # GitHub's hosted runner doesn't have gVisor installed at all, so
-      # `runsc-hostnet` would be an unrecognized Docker runtime there.
-      # Real dev/prod environments keep the default.
+      # `runsc-hostnet` (gVisor) back to plain `runc` — GitHub hosted runners
+      # do not have gVisor installed.
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -166,7 +159,7 @@ jobs:
         run: pip install -r tests/requirements.txt
 
       - name: Run the suite
-        run: python3 -m pytest -q -m "not llm" tests
+        run: python3 -m pytest -q -m "not llm and not soak" tests
 
       - name: Browser e2e (login + Object Explorer + Sources + Ontology)
         working-directory: services/experience/web
@@ -183,3 +176,4 @@ jobs:
         # each container happened to log last (frequently unrelated,
         # later activity) instead of the moment that matters.
         run: docker compose logs
+

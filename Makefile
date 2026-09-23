@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test test-unit clean
+.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test test-unit test-soak clean
 
 COMPOSE := docker compose
 
@@ -46,4 +46,8 @@ test-unit:
 
 test:
 	pip3 install -q -r tests/requirements.txt
-	python3 -m pytest -q -m "not llm" tests
+	python3 -m pytest -q -m "not llm and not soak" tests
+
+test-soak:
+	pip3 install -q -r tests/requirements.txt
+	python3 -m pytest -q -m soak tests
