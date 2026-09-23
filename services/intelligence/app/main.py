@@ -506,10 +506,7 @@ async def evaluate(http_request: Request, principal: Principal = Depends(current
     security_result = await evaluation.run_security_suite(
         knowledge_url=KNOWLEDGE_URL, agent_token=agent_token, editor_token=editor_token
     )
-    path_result = await evaluation.run_action_path_suite(
-        knowledge_url=KNOWLEDGE_URL, editor_token=editor_token
-    )
-    return {"goldSet": gold_set_result, "security": security_result, "actionPaths": path_result}
+    return {"goldSet": gold_set_result, "security": security_result}
 
 
 class RegisterToolPluginRequest(BaseModel):
