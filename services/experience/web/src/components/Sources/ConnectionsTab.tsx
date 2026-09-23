@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Menu, MenuItem, PopoverNext } from "@blueprintjs/core";
-import { useConnections, useSqlConnections, useObjectConnections } from "../../api/hooks";
-import type { GenericConnection, SqlConnection, ObjectConnection } from "../../api/connectivity";
+import { useConnections, useSqlConnections, useObjectConnections, useSftpConnections } from "../../api/hooks";
+import type { GenericConnection, SqlConnection, ObjectConnection, SftpConnection } from "../../api/connectivity";
 import { EmptyState } from "../common/ListPrimitives";
 import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
 import { ConnectionRow } from "./ConnectionRow";
@@ -10,34 +10,41 @@ import { SqlConnectionRow } from "./SqlConnectionRow";
 import { SqlConnectionDialog } from "./SqlConnectionDialog";
 import { ObjectConnectionRow } from "./ObjectConnectionRow";
 import { ObjectConnectionDialog } from "./ObjectConnectionDialog";
+import { SftpConnectionRow } from "./SftpConnectionRow";
+import { SftpConnectionDialog } from "./SftpConnectionDialog";
 import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
 
 export function ConnectionsTab() {
   const { data: connections } = useConnections();
   const { data: sqlConnections } = useSqlConnections();
   const { data: objectConnections } = useObjectConnections();
+  const { data: sftpConnections } = useSftpConnections();
   const [creatingRest, setCreatingRest] = useState(false);
   const [creatingSql, setCreatingSql] = useState(false);
   const [creatingObject, setCreatingObject] = useState(false);
+  const [creatingSftp, setCreatingSftp] = useState(false);
   const [editingConnection, setEditingConnection] = useState<GenericConnection | null>(null);
   const [editingSqlConnection, setEditingSqlConnection] = useState<SqlConnection | null>(null);
   const [editingObjectConnection, setEditingObjectConnection] = useState<ObjectConnection | null>(null);
+  const [editingSftpConnection, setEditingSftpConnection] = useState<SftpConnection | null>(null);
 
   usePaletteCreateIntent("create-connection", setCreatingRest);
   usePaletteCreateIntent("create-sql-connection", setCreatingSql);
   usePaletteCreateIntent("create-object-connection", setCreatingObject);
+  usePaletteCreateIntent("create-sftp-connection", setCreatingSftp);
 
   const restDialogOpen = creatingRest || editingConnection !== null;
   const sqlDialogOpen = creatingSql || editingSqlConnection !== null;
   const objectDialogOpen = creatingObject || editingObjectConnection !== null;
+  const sftpDialogOpen = creatingSftp || editingSftpConnection !== null;
 
   return (
     <div>
       <OntologyTabHeader
         description={
           <>
-            Reusable credentials for REST, SQL, and object storage — register once, point several sources at the same
-            connection.
+            Reusable credentials for REST, SQL, object storage, and SFTP — register once, point several sources at the
+            same connection.
           </>
         }
         trailing={
@@ -48,6 +55,7 @@ export function ConnectionsTab() {
                 <MenuItem icon="key" text="REST credential" onClick={() => setCreatingRest(true)} />
                 <MenuItem icon="database" text="SQL connection" onClick={() => setCreatingSql(true)} />
                 <MenuItem icon="cloud" text="Object storage connection" onClick={() => setCreatingObject(true)} />
+                <MenuItem icon="folder-shared" text="SFTP connection" onClick={() => setCreatingSftp(true)} />
               </Menu>
             }
           >
@@ -110,6 +118,24 @@ export function ConnectionsTab() {
         )}
       </div>
 
+      <div className="hl-flex-between hl-mb-sm hl-mt-lg">
+        <div className="hl-section-title">SFTP connections</div>
+        <Button small icon="add" minimal onClick={() => setCreatingSftp(true)}>
+          New SFTP connection
+        </Button>
+      </div>
+      <p className="hl-text-muted-sm hl-mb-sm">Password-authenticated SFTP hosts. Required before registering an SFTP source.</p>
+      <div className="hl-source-list">
+        {sftpConnections?.map((c) => (
+          <SftpConnectionRow key={c.name} connection={c} onEdit={() => setEditingSftpConnection(c)} />
+        ))}
+        {sftpConnections?.length === 0 && (
+          <EmptyState actionLabel="New SFTP connection" onAction={() => setCreatingSftp(true)}>
+            No SFTP connections saved yet.
+          </EmptyState>
+        )}
+      </div>
+
       {restDialogOpen && (
         <ConnectionDialog
           editing={editingConnection}
@@ -134,6 +160,15 @@ export function ConnectionsTab() {
           onClose={() => {
             setCreatingObject(false);
             setEditingObjectConnection(null);
+          }}
+        />
+      )}
+      {sftpDialogOpen && (
+        <SftpConnectionDialog
+          editing={editingSftpConnection}
+          onClose={() => {
+            setCreatingSftp(false);
+            setEditingSftpConnection(null);
           }}
         />
       )}

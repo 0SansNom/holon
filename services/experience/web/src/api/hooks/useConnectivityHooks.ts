@@ -7,6 +7,8 @@ import {
   type RegisterSqlSourceRequest,
   type RegisterObjectConnectionRequest,
   type RegisterObjectSourceRequest,
+  type RegisterSftpConnectionRequest,
+  type RegisterSftpSourceRequest,
   type RegisterWriteTargetRequest,
   type RegisterKafkaStreamRequest,
 } from "../connectivity";
@@ -258,6 +260,65 @@ export function useDeleteObjectSource() {
   return useMutation({
     mutationFn: (name: string) => connectivityApi.deleteObjectSource(name),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.objectSources() }),
+  });
+}
+
+export function useSftpConnections() {
+  return useSuspenseQuery({
+    queryKey: queryKeys.sftpConnections(),
+    queryFn: connectivityApi.listSftpConnections,
+  });
+}
+
+export function useRegisterSftpConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterSftpConnectionRequest) => connectivityApi.registerSftpConnection(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sftpConnections() }),
+  });
+}
+
+export function useDeleteSftpConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteSftpConnection(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sftpConnections() }),
+  });
+}
+
+export function useSftpSources() {
+  return useSuspenseQuery({ queryKey: queryKeys.sftpSources(), queryFn: connectivityApi.listSftpSources });
+}
+
+export function useRegisterSftpSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RegisterSftpSourceRequest) => connectivityApi.registerSftpSource(body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sftpSources() }),
+  });
+}
+
+export function useDisableSftpSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.disableSftpSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sftpSources() }),
+  });
+}
+
+export function useEnableSftpSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.enableSftpSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sftpSources() }),
+  });
+}
+
+export function useDeleteSftpSource() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => connectivityApi.deleteSftpSource(name),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sftpSources() }),
   });
 }
 
