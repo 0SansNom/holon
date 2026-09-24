@@ -18,7 +18,10 @@ a public issue with exploit details.
 - `HOLON_MINTABLE_PRINCIPAL_URNS` set on every service (empty string if
   that service never mints)
 - User JWT minting Identity-only (`HOLON_ALLOW_USER_JWT_MINT`)
-- Intelligence off; joblib and in-process tool-plugin register off
+- Intelligence off by default; enabling it in production requires beta
+  opt-in (`services/intelligence/BETA.md`): `HOLON_INTELLIGENCE_BETA_OPT_IN`,
+  sandbox RuntimeClass attestation, finite spend caps; joblib and
+  in-process tool-plugin register stay off
 - Knowledge serving store fail-closed (instance reads never fall back to Iceberg)
 
 The production Helm overlay requires RS256 (`HOLON_JWT_ALG=RS256`,
@@ -52,7 +55,12 @@ a no-op. Ports are published on the host. Do not copy those defaults.
 
 ## Residual
 
-Intelligence is experimental; in-process plugins are not a sandbox —
-gVisor on that Deployment if you opt in. Connector APIs refuse plaintext
-passwords / auth headers in production (`secret_ref` only). No soak/chaos
-suite. RPO/RTO are yours.
+Intelligence is **beta (opt-in)** — see
+[`services/intelligence/BETA.md`](services/intelligence/BETA.md).
+Production beta requires a gVisor (or equivalent) `runtimeClassName` on
+the Intelligence Deployment **and**
+`HOLON_TOOL_PLUGIN_ISOLATION=subprocess` (plugin invoke out-of-process
+with timeout). Dynamic tool-plugin register stays off. Connector APIs
+refuse plaintext passwords / auth headers in production (`secret_ref`
+only). Soak/chaos runs nightly (`soak-nightly.yml`), not on every PR.
+RPO/RTO are yours.
