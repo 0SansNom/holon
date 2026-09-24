@@ -97,7 +97,7 @@ export function ConnectionsTab() {
         </Button>
       </div>
       <p className="hl-text-muted-sm hl-mb-sm">
-        S3-compatible endpoints (MinIO, AWS S3). Required before registering an object source.
+        S3 / Azure Blob / GCS. Required before registering an object source.
       </p>
       <div className="hl-source-list">
         {objectConnections?.map((c) => (
