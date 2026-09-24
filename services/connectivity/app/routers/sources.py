@@ -111,6 +111,7 @@ async def register_sql_connection(
             tenant_id=principal.tenant_id,
             name=body.name,
             host=body.host,
+            dialect=body.dialect,
             port=body.port,
             database=body.database,
             username=body.username,

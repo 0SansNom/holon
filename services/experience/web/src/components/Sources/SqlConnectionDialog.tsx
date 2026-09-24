@@ -1,17 +1,43 @@
 import { useState } from "react";
-import { Button, Callout, Dialog, DialogBody, DialogFooter, FormGroup, InputGroup } from "@blueprintjs/core";
+import {
+  Button,
+  Callout,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  FormGroup,
+  HTMLSelect,
+  InputGroup,
+} from "@blueprintjs/core";
 import { useRegisterSqlConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
-import type { SqlConnection } from "../../api/connectivity";
+import type { SqlConnection, SqlDialect } from "../../api/connectivity";
 import { SECRET_REF_HELP } from "./shared";
+
+const DEFAULT_PORTS: Record<SqlDialect, number> = {
+  postgres: 5432,
+  mysql: 3306,
+  mssql: 1433,
+};
+
+const DIALECT_LABELS: Record<SqlDialect, string> = {
+  postgres: "PostgreSQL",
+  mysql: "MySQL / MariaDB",
+  mssql: "SQL Server",
+};
+
+function isDefaultPort(port: string, dialect: SqlDialect): boolean {
+  return !port || port === String(DEFAULT_PORTS[dialect]);
+}
 
 export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnection | null; onClose: () => void }) {
   const isEditing = editing !== null;
   const { data: bootstrap } = useBootstrapConfig();
   const requireSecretRef = bootstrap?.require_connector_secret_ref === true;
   const [name, setName] = useState(editing?.name ?? "");
+  const [dialect, setDialect] = useState<SqlDialect>(editing?.dialect ?? "postgres");
   const [host, setHost] = useState(editing?.host ?? "");
-  const [port, setPort] = useState(editing != null ? String(editing.port) : "5432");
+  const [port, setPort] = useState(editing != null ? String(editing.port) : String(DEFAULT_PORTS.postgres));
   const [database, setDatabase] = useState(editing?.database ?? "");
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState("");
@@ -19,13 +45,21 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
   const [error, setError] = useState<string | null>(null);
   const register = useRegisterSqlConnection();
 
+  function onDialectChange(next: SqlDialect) {
+    setDialect(next);
+    if (isDefaultPort(port, dialect)) {
+      setPort(String(DEFAULT_PORTS[next]));
+    }
+  }
+
   async function save() {
     setError(null);
     try {
       await register.mutateAsync({
         name,
+        dialect,
         host,
-        port: Number(port) || 5432,
+        port: Number(port) || DEFAULT_PORTS[dialect],
         database,
         username,
         password: requireSecretRef ? undefined : password || undefined,
@@ -45,16 +79,35 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "Postgres-wire databases (PostgreSQL, Redshift, CockroachDB). Register once, point several SQL sources at it."}
+            : "PostgreSQL, MySQL/MariaDB, or SQL Server. Register once, point several SQL sources at it."}
         </p>
         <FormGroup label="Name" helperText="e.g. erp_prod — referenced by SQL sources, not a dataset name">
           <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_db" disabled={isEditing} />
+        </FormGroup>
+        <FormGroup label="Dialect">
+          <HTMLSelect
+            fill
+            value={dialect}
+            onChange={(e) => onDialectChange(e.target.value as SqlDialect)}
+            disabled={isEditing}
+          >
+            {(Object.keys(DIALECT_LABELS) as SqlDialect[]).map((d) => (
+              <option key={d} value={d}>
+                {DIALECT_LABELS[d]}
+              </option>
+            ))}
+          </HTMLSelect>
         </FormGroup>
         <FormGroup label="Host">
           <InputGroup value={host} onChange={(e) => setHost(e.target.value)} placeholder="db.example.com" />
         </FormGroup>
         <FormGroup label="Port">
-          <InputGroup type="number" value={port} onChange={(e) => setPort(e.target.value)} placeholder="5432" />
+          <InputGroup
+            type="number"
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+            placeholder={String(DEFAULT_PORTS[dialect])}
+          />
         </FormGroup>
         <FormGroup label="Database">
           <InputGroup value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="analytics" />

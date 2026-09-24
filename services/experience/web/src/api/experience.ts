@@ -89,6 +89,8 @@ export interface AgentSession {
 export interface AgentTurnResult {
   sessionUrn: string;
   status: string;
+  /** Session lifecycle after the turn — ``running`` for multi-turn, ``completed`` when closed. */
+  sessionStatus?: string;
   text: string;
   consumed?: Record<string, number>;
 }

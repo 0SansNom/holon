@@ -68,7 +68,7 @@ def test_register_connection_rejects_unknown_kind() -> None:
                 name="conn",
                 access_key_id="acct",
                 created_by_urn="urn:jdoe",
-                kind="gcs",
+                kind="ftp",
             )
         )
 
