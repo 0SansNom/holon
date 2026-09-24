@@ -32,3 +32,9 @@ def test_require_identifier_rejects_injection() -> None:
 def test_quote_identifier_quotes_each_part() -> None:
     assert quote_identifier("orders") == '"orders"'
     assert quote_identifier("public.orders") == '"public"."orders"'
+
+
+def test_quote_identifier_dialects() -> None:
+    assert quote_identifier("orders", dialect="postgres") == '"orders"'
+    assert quote_identifier("public.orders", dialect="mysql") == "`public`.`orders`"
+    assert quote_identifier("dbo.orders", dialect="mssql") == "[dbo].[orders]"

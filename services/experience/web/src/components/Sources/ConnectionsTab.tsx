@@ -77,7 +77,7 @@ export function ConnectionsTab() {
         </Button>
       </div>
       <p className="hl-text-muted-sm hl-mb-sm">
-        Postgres-wire databases (PostgreSQL, Redshift, CockroachDB). Required before registering a SQL source.
+        PostgreSQL, MySQL/MariaDB, or SQL Server. Required before registering a SQL source.
       </p>
       <div className="hl-source-list hl-mb-lg">
         {sqlConnections?.map((c) => (
