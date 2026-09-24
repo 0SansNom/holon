@@ -7,9 +7,10 @@ import {
   useSqlSources,
   useObjectSources,
   useSftpSources,
+  useSalesforceSources,
   useSyncs,
 } from "../../api/hooks";
-import type { GenericSource, SqlSource, ObjectSource, SftpSource } from "../../api/connectivity";
+import type { GenericSource, SqlSource, ObjectSource, SftpSource, SalesforceSource } from "../../api/connectivity";
 import { EmptyState } from "../common/ListPrimitives";
 import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
 import { SourceRow } from "./SourceRow";
@@ -22,6 +23,8 @@ import { ObjectSourceRow } from "./ObjectSourceRow";
 import { ObjectSourceDialog } from "./ObjectSourceDialog";
 import { SftpSourceRow } from "./SftpSourceRow";
 import { SftpSourceDialog } from "./SftpSourceDialog";
+import { SalesforceSourceRow } from "./SalesforceSourceRow";
+import { SalesforceSourceDialog } from "./SalesforceSourceDialog";
 import { ConnectSourceDialog } from "./ConnectSourceDialog";
 import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
 
@@ -32,21 +35,25 @@ export function DataSourcesTab() {
   const { data: sqlSources } = useSqlSources();
   const { data: objectSources } = useObjectSources();
   const { data: sftpSources } = useSftpSources();
+  const { data: salesforceSources } = useSalesforceSources();
   const { data: syncs } = useSyncs();
   const [connectingRest, setConnectingRest] = useState(false);
   const [connectingSql, setConnectingSql] = useState(false);
   const [connectingObject, setConnectingObject] = useState(false);
   const [connectingSftp, setConnectingSftp] = useState(false);
+  const [connectingSalesforce, setConnectingSalesforce] = useState(false);
   const [editingSource, setEditingSource] = useState<GenericSource | null>(null);
   const [editingSqlSource, setEditingSqlSource] = useState<SqlSource | null>(null);
   const [editingObjectSource, setEditingObjectSource] = useState<ObjectSource | null>(null);
   const [editingSftpSource, setEditingSftpSource] = useState<SftpSource | null>(null);
+  const [editingSalesforceSource, setEditingSalesforceSource] = useState<SalesforceSource | null>(null);
   const [addingStream, setAddingStream] = useState(false);
 
   usePaletteCreateIntent("connect-source", setConnectingRest);
   usePaletteCreateIntent("connect-sql-source", setConnectingSql);
   usePaletteCreateIntent("connect-object-source", setConnectingObject);
   usePaletteCreateIntent("connect-sftp-source", setConnectingSftp);
+  usePaletteCreateIntent("connect-salesforce-source", setConnectingSalesforce);
   usePaletteCreateIntent("connect-stream", setAddingStream);
 
   const lastSyncByName = useMemo(() => {
@@ -62,14 +69,15 @@ export function DataSourcesTab() {
   const sqlDialogOpen = connectingSql || editingSqlSource !== null;
   const objectDialogOpen = connectingObject || editingObjectSource !== null;
   const sftpDialogOpen = connectingSftp || editingSftpSource !== null;
+  const salesforceDialogOpen = connectingSalesforce || editingSalesforceSource !== null;
 
   return (
     <div>
       <OntologyTabHeader
         description={
           <>
-            Connect REST, SQL, object storage, SFTP, Kafka, or registered plugins — no deploy. Synced data is catalogued
-            the same way; map it to an Object Type under Admin.
+            Connect REST, SQL, object storage, SFTP, Salesforce, Kafka, or registered plugins — no deploy. Synced data is
+            catalogued the same way; map it to an Object Type under Admin.
           </>
         }
         trailing={
@@ -81,6 +89,7 @@ export function DataSourcesTab() {
                 <MenuItem icon="database" text="SQL database" onClick={() => setConnectingSql(true)} />
                 <MenuItem icon="cloud" text="Object storage" onClick={() => setConnectingObject(true)} />
                 <MenuItem icon="folder-shared" text="SFTP" onClick={() => setConnectingSftp(true)} />
+                <MenuItem icon="office" text="Salesforce" onClick={() => setConnectingSalesforce(true)} />
                 <MenuItem icon="pulse" text="Kafka stream" onClick={() => setAddingStream(true)} />
               </Menu>
             }
@@ -202,6 +211,31 @@ export function DataSourcesTab() {
         )}
       </div>
 
+      <div className="hl-flex-between hl-mb-sm">
+        <div className="hl-section-title">Salesforce sources</div>
+        <Button small icon="add" minimal onClick={() => setConnectingSalesforce(true)}>
+          Connect Salesforce
+        </Button>
+      </div>
+      <p className="hl-text-muted-sm hl-mb-sm">
+        Run SOQL against a Connected App — records land in Iceberg like any other source.
+      </p>
+      <div className="hl-source-list hl-mb-lg">
+        {salesforceSources?.map((s) => (
+          <SalesforceSourceRow
+            key={s.name}
+            source={s}
+            lastSync={lastSyncByName.get(s.name)}
+            onEdit={() => setEditingSalesforceSource(s)}
+          />
+        ))}
+        {salesforceSources?.length === 0 && (
+          <EmptyState actionLabel="Connect Salesforce" onAction={() => setConnectingSalesforce(true)}>
+            No Salesforce sources yet — add a Salesforce connection under the Connections tab first.
+          </EmptyState>
+        )}
+      </div>
+
       <div className="hl-section-title hl-mb-sm">REST sources</div>
       <div className="hl-source-list">
         {sources?.map((s) => (
@@ -247,6 +281,15 @@ export function DataSourcesTab() {
           onClose={() => {
             setConnectingSftp(false);
             setEditingSftpSource(null);
+          }}
+        />
+      )}
+      {salesforceDialogOpen && (
+        <SalesforceSourceDialog
+          editing={editingSalesforceSource}
+          onClose={() => {
+            setConnectingSalesforce(false);
+            setEditingSalesforceSource(null);
           }}
         />
       )}

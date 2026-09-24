@@ -73,6 +73,7 @@ async def ensure_authz_seeded(client: PermissionClient, pool: asyncpg.Pool) -> N
             ("source", "sql_source"),
             ("source", "object_source"),
             ("source", "sftp_source"),
+            ("source", "salesforce_source"),
             ("pipeline", "pipeline_definition"),
         ):
             for row in await conn.fetch(f"SELECT tenant_id, name, workspace_id FROM {table}"):
