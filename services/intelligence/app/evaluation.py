@@ -17,29 +17,10 @@ from qdrant_client import AsyncQdrantClient
 
 from .context_builder import ask as context_builder_ask
 from .embeddings import EmbeddingClient
+from .gold_set import gold_set_disclaimer
 from .llm_gateway import LLMClient
 
 logger = logging.getLogger("intelligence.evaluation")
-
-DDL = """
-CREATE TABLE IF NOT EXISTS gold_set_question (
-    id BIGSERIAL PRIMARY KEY,
-    question_text TEXT NOT NULL,
-    category TEXT NOT NULL,
-    expected_urn_substring TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS eval_run (
-    id BIGSERIAL PRIMARY KEY,
-    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at TIMESTAMPTZ,
-    metrics JSONB
-);
-"""
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
 
 
 async def run_gold_set(
@@ -51,6 +32,7 @@ async def run_gold_set(
     embedder: EmbeddingClient,
     glossary_terms: list[dict],
     llm: LLMClient,
+    tenant_id: str,
 ) -> dict:
     questions = await pool.fetch(
         "SELECT question_text, category, expected_urn_substring FROM gold_set_question ORDER BY id"
@@ -72,6 +54,7 @@ async def run_gold_set(
                 embedder=embedder,
                 glossary_terms=glossary_terms,
                 llm=llm,
+                tenant_id=tenant_id,
             )
         except Exception as exc:  # noqa: BLE001 — one bad question must not abort the whole run
             logger.exception("gold set question failed: %s", row["question_text"])
@@ -114,11 +97,7 @@ async def run_gold_set(
     return {
         "metrics": metrics,
         "results": results,
-        "disclaimer": (
-            "No gold set is seeded by default — this evaluates whatever rows currently "
-            "exist in gold_set_question. Populate it yourself before treating these "
-            "metrics as meaningful; an empty set trivially reports null accuracy."
-        ),
+        "disclaimer": gold_set_disclaimer(seeded_starter=n >= len(STARTER_GOLD_SET)),
     }
 
 
@@ -155,3 +134,9 @@ async def run_security_suite(*, knowledge_url: str, agent_token: str, editor_tok
 
     all_passed = all(c["passed"] for c in checks)
     return {"checks": checks, "zero_tolerance_violations": sum(1 for c in checks if not c["passed"]), "passed": all_passed}
+
+
+# Re-export for callers that import path metrics from evaluation.
+from .action_path_eval import run_action_path_suite  # noqa: E402
+
+__all__ = ["run_gold_set", "run_security_suite", "run_action_path_suite"]

@@ -94,9 +94,12 @@ export interface RegisterConnectionRequest {
   secret_ref?: string;
 }
 
+export type SqlDialect = "postgres" | "mysql" | "mssql";
+
 export interface SqlConnection {
   tenant_id: string;
   name: string;
+  dialect: SqlDialect;
   host: string;
   port: number;
   database: string;
@@ -109,6 +112,7 @@ export interface SqlConnection {
 export interface RegisterSqlConnectionRequest {
   name: string;
   host: string;
+  dialect?: SqlDialect;
   port?: number;
   database: string;
   username: string;
@@ -140,7 +144,7 @@ export interface RegisterSqlSourceRequest {
   cursor_property?: string;
 }
 
-export type ObjectConnectionKind = "s3" | "azure";
+export type ObjectConnectionKind = "s3" | "azure" | "gcs";
 
 export interface ObjectConnection {
   tenant_id: string;
@@ -191,6 +195,95 @@ export interface RegisterObjectSourceRequest {
   object_key?: string;
   key_prefix?: string;
   incremental?: boolean;
+  schedule_interval_minutes?: number;
+}
+
+export interface SftpConnection {
+  tenant_id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  has_password: boolean;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSftpConnectionRequest {
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+  password?: string;
+  secret_ref?: string;
+}
+
+export interface SftpSource {
+  tenant_id: string;
+  name: string;
+  workspace_id: string;
+  connection_name: string;
+  remote_path: string | null;
+  remote_prefix: string | null;
+  format: "csv" | "ndjson" | "parquet" | string;
+  incremental: boolean;
+  last_synced_path: string | null;
+  schedule_interval_minutes: number | null;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSftpSourceRequest {
+  name: string;
+  connection_name: string;
+  format: string;
+  remote_path?: string;
+  remote_prefix?: string;
+  incremental?: boolean;
+  schedule_interval_minutes?: number;
+}
+
+export interface SalesforceConnection {
+  tenant_id: string;
+  name: string;
+  login_url: string;
+  client_id: string;
+  has_client_secret: boolean;
+  instance_url: string | null;
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSalesforceConnectionRequest {
+  name: string;
+  client_id: string;
+  login_url?: string;
+  client_secret?: string;
+  secret_ref?: string;
+}
+
+export interface SalesforceSource {
+  tenant_id: string;
+  name: string;
+  workspace_id: string;
+  connection_name: string;
+  soql: string;
+  api_version: string;
+  cursor_property: string | null;
+  last_cursor_value: string | null;
+  schedule_interval_minutes: number | null;
+  status: "active" | "disabled";
+  created_by_urn: string;
+  created_at: string;
+}
+
+export interface RegisterSalesforceSourceRequest {
+  name: string;
+  connection_name: string;
+  soql: string;
+  api_version?: string;
+  cursor_property?: string;
   schedule_interval_minutes?: number;
 }
 
@@ -323,6 +416,34 @@ export const connectivityApi = {
   disableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/disable`),
   enableObjectSource: (name: string) => api.post<ObjectSource>(`${CONNECTIVITY_URL}/object-sources/${name}/enable`),
   deleteObjectSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/object-sources/${name}`),
+
+  listSftpConnections: () => api.get<SftpConnection[]>(`${CONNECTIVITY_URL}/sftp-connections`),
+  registerSftpConnection: (body: RegisterSftpConnectionRequest) =>
+    api.post<SftpConnection>(`${CONNECTIVITY_URL}/sftp-connections`, body),
+  deleteSftpConnection: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sftp-connections/${name}`),
+
+  listSftpSources: () => api.get<SftpSource[]>(`${CONNECTIVITY_URL}/sftp-sources`),
+  registerSftpSource: (body: RegisterSftpSourceRequest) =>
+    api.post<SftpSource>(`${CONNECTIVITY_URL}/sftp-sources`, body),
+  disableSftpSource: (name: string) => api.post<SftpSource>(`${CONNECTIVITY_URL}/sftp-sources/${name}/disable`),
+  enableSftpSource: (name: string) => api.post<SftpSource>(`${CONNECTIVITY_URL}/sftp-sources/${name}/enable`),
+  deleteSftpSource: (name: string) => api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/sftp-sources/${name}`),
+
+  listSalesforceConnections: () => api.get<SalesforceConnection[]>(`${CONNECTIVITY_URL}/salesforce-connections`),
+  registerSalesforceConnection: (body: RegisterSalesforceConnectionRequest) =>
+    api.post<SalesforceConnection>(`${CONNECTIVITY_URL}/salesforce-connections`, body),
+  deleteSalesforceConnection: (name: string) =>
+    api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/salesforce-connections/${name}`),
+
+  listSalesforceSources: () => api.get<SalesforceSource[]>(`${CONNECTIVITY_URL}/salesforce-sources`),
+  registerSalesforceSource: (body: RegisterSalesforceSourceRequest) =>
+    api.post<SalesforceSource>(`${CONNECTIVITY_URL}/salesforce-sources`, body),
+  disableSalesforceSource: (name: string) =>
+    api.post<SalesforceSource>(`${CONNECTIVITY_URL}/salesforce-sources/${name}/disable`),
+  enableSalesforceSource: (name: string) =>
+    api.post<SalesforceSource>(`${CONNECTIVITY_URL}/salesforce-sources/${name}/enable`),
+  deleteSalesforceSource: (name: string) =>
+    api.delete<{ deleted: string }>(`${CONNECTIVITY_URL}/salesforce-sources/${name}`),
 
   listWriteTargets: () => api.get<WriteTarget[]>(`${CONNECTIVITY_URL}/write-targets`),
   registerWriteTarget: (body: RegisterWriteTargetRequest) =>

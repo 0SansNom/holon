@@ -39,11 +39,7 @@ from holon_common import (
     run_migrations,
 )
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
-from holon_common.audit_store import (
-    ensure_schema as ensure_audit_schema,
-    install_durable_audit,
-    list_events_page,
-)
+from holon_common.audit_store import install_durable_audit, list_events_page
 from holon_common.authz import PermissionClient
 from holon_common.readiness import check_kafka_producer, check_opa, check_postgres, check_qdrant, check_spicedb, report_ready
 from holon_common.principal_status import (
@@ -52,10 +48,24 @@ from holon_common.principal_status import (
     make_principal_status_consumer,
 )
 
-from .knowledge_urls import holon_url
-from . import agent_runtime, evaluation, model_registry, spend_limits, tool_plugin_registry, vector_store
+from . import agent_runtime, deps, evaluation, model_registry, spend_limits, tool_plugin_registry, vector_store
+from .authz_seed import ensure_authz_seeded
 from .context_builder import ask as context_builder_ask
+from .deps import (
+    _authorize_agent_session,
+    _authorize_ml_model,
+    _authorize_tool_plugin,
+    _authorize_workspace,
+    _filter_readable,
+    _seed_agent_session_authz,
+    _seed_ml_model_authz,
+    _seed_tool_plugin_authz,
+    ml_model_urn,
+    tool_plugin_urn,
+)
 from .embeddings import build_embedding_client
+from .gold_set import seed_starter_gold_set
+from .knowledge_urls import holon_url
 from .llm_gateway import build_llm_client
 from .spend_limits import SpendLimitExceeded
 
@@ -130,20 +140,22 @@ async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
     app.state.intelligence_enabled = _intelligence_enabled()
     app.state.pool = await create_pool(DB_URL)
-    async with app.state.pool.acquire() as conn:
-        await agent_runtime.ensure_schema(conn)
-        await evaluation.ensure_schema(conn)
-        await tool_plugin_registry.ensure_schema(conn)
-        await model_registry.ensure_schema(conn)
-        await spend_limits.ensure_schema(conn)
-        await ensure_audit_schema(conn)
-        await outbox.ensure_schema(conn)
+    deps.pool = app.state.pool
+    # Intelligence-owned tables live in app/migrations (0000_baseline).
+    # Shared holon_common helpers (audit/outbox/plugin) are included in 0000.
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
+    async with app.state.pool.acquire() as conn:
+        await seed_starter_gold_set(conn)
 
     clear_durable_audit_hooks()
     install_durable_audit(app.state.pool)
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
+    deps.authz = app.state.authz
+    await retry_with_backoff(
+        lambda: ensure_authz_seeded(app.state.authz, app.state.pool),
+        what="intelligence authz seed",
+    )
 
     app.state.s3 = boto3.client(
         "s3",
@@ -175,9 +187,22 @@ async def lifespan(app: FastAPI):
         lambda: vector_store.ensure_collection(app.state.qdrant, app.state.embedder.dimension),
         what="qdrant collection setup",
     )
+    await retry_with_backoff(
+        lambda: vector_store.maybe_rebuild_collection(app.state.qdrant, app.state.embedder.dimension),
+        what="qdrant optional rebuild",
+    )
+    await retry_with_backoff(
+        lambda: vector_store.purge_untagged_points(app.state.qdrant),
+        what="qdrant purge untagged points",
+    )
     indexed = await retry_with_backoff(
         lambda: vector_store.index_metadata(
-            app.state.qdrant, app.state.embedder, knowledge_url=KNOWLEDGE_URL, token=_indexer_token()
+            app.state.qdrant,
+            app.state.embedder,
+            knowledge_url=KNOWLEDGE_URL,
+            token=_indexer_token(),
+            tenant_id=TENANT_ID,
+            workspace_id=WORKSPACE_ID,
         ),
         what="semantic index build",
     )
@@ -207,7 +232,7 @@ async def lifespan(app: FastAPI):
     await app.state.pool.close()
 
 
-app = FastAPI(title="Holon — Intelligence Platform", lifespan=lifespan)
+app = FastAPI(title="Holon — Ontology-grounded agent runtime (beta)", lifespan=lifespan)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
@@ -219,17 +244,6 @@ current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 def _require_intelligence_enabled() -> None:
     if not getattr(app.state, "intelligence_enabled", True):
         raise HolonError.unavailable('PrincipalDisabled', "Intelligence is disabled (HOLON_INTELLIGENCE_ENABLED=false)",)
-
-
-async def _authorize_workspace(principal: Principal, permission: str) -> None:
-    decision = await app.state.authz.authorize(
-        principal,
-        resource_type="workspace",
-        resource_urn=build_urn(principal.tenant_id, "global", "workspace", WORKSPACE_ID),
-        permission=permission,
-    )
-    if not decision.allowed:
-        raise HolonError.forbidden("PermissionDenied", decision.reason)
 
 
 async def _enforce_spend(principal: Principal) -> None:
@@ -302,6 +316,25 @@ class AskRequest(BaseModel):
     query: str
 
 
+@app.post("/semantic-index/rebuild")
+async def rebuild_semantic_index(principal: Principal = Depends(current_principal)) -> dict:
+    """Re-index ontology metadata + glossary into Qdrant (tenant-scoped).
+
+    Boot indexes before CI fixtures exist; provision calls this after seeding.
+    """
+    _require_intelligence_enabled()
+    await _authorize_workspace(principal, "write")
+    indexed = await vector_store.index_metadata(
+        app.state.qdrant,
+        app.state.embedder,
+        knowledge_url=KNOWLEDGE_URL,
+        token=_indexer_token(),
+        tenant_id=TENANT_ID,
+        workspace_id=WORKSPACE_ID,
+    )
+    return {"indexed": indexed, "tenant_id": TENANT_ID}
+
+
 @app.post("/ask")
 async def ask(request: AskRequest, http_request: Request, principal: Principal = Depends(current_principal)) -> dict:
     """RAG ask endpoint using permission-filtered context."""
@@ -323,6 +356,7 @@ async def ask(request: AskRequest, http_request: Request, principal: Principal =
             embedder=app.state.embedder,
             glossary_terms=glossary_terms,
             llm=app.state.llm,
+            tenant_id=principal.tenant_id,
         )
     except httpx.HTTPStatusError as exc:
         raise HolonError.from_http(exc.response.status_code, exc.response.text, error_name='UpstreamError') from exc
@@ -356,7 +390,11 @@ class CreateSessionRequest(BaseModel):
 async def create_agent_session(
     request: CreateSessionRequest = CreateSessionRequest(), principal: Principal = Depends(current_principal)
 ) -> dict:
-    """Create an agent runtime session."""
+    """Create an agent runtime session.
+
+    Read (not write): Agent App uses a viewer agent token; Knowledge write
+    denial for that agent is a zero-tolerance security-suite check.
+    """
     _require_intelligence_enabled()
     await _authorize_workspace(principal, "read")
     if request.system_prompt and principal.type not in {"agent", "service_account"}:
@@ -382,6 +420,16 @@ async def create_agent_session(
         )
     except ValueError as exc:
         raise HolonError.invalid_argument('AgentRequestInvalid', str(exc)) from exc
+
+    session_urn = session["urn"]
+
+    async def _compensate():
+        await app.state.pool.execute("DELETE FROM agent_turn WHERE session_urn = $1", session_urn)
+        await app.state.pool.execute("DELETE FROM agent_session WHERE urn = $1", session_urn)
+
+    await _seed_agent_session_authz(
+        tenant_id=principal.tenant_id, session_urn=session_urn, compensate_delete=_compensate
+    )
     emit_audit(
         category="access",
         action="intelligence.agent_session.created",
@@ -390,7 +438,7 @@ async def create_agent_session(
         actor_urn=principal.urn,
         actor_type=principal.type,
         resource_type="agent_session",
-        resource_urn=session.get("urn"),
+        resource_urn=session_urn,
         extra={
             "chain_trigger": request.chain_trigger,
             "causation_depth": request.causation_depth,
@@ -412,9 +460,10 @@ async def list_available_tools(http_request: Request, principal: Principal = Dep
 
 @app.get("/sessions/{session_urn:path}")
 async def get_agent_session(session_urn: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "read")
     session = await agent_runtime.get_session(app.state.pool, session_urn)
-    return _require_own_session(session, principal)
+    _require_own_session(session, principal)
+    await _authorize_agent_session(principal, "read", session_urn=session_urn)
+    return session
 
 
 @app.post("/sessions/{session_urn:path}/turns")
@@ -422,10 +471,10 @@ async def run_agent_turn(
     session_urn: str, request: TurnRequest, http_request: Request, principal: Principal = Depends(current_principal)
 ) -> dict:
     _require_intelligence_enabled()
-    await _authorize_workspace(principal, "read")
-    await _enforce_spend(principal)
     session = await agent_runtime.get_session(app.state.pool, session_urn)
     _require_own_session(session, principal)
+    await _authorize_agent_session(principal, "read", session_urn=session_urn)
+    await _enforce_spend(principal)
     authorization = http_request.headers.get("authorization", "")
     try:
         body = await agent_runtime.run_turn(
@@ -445,9 +494,9 @@ async def run_agent_turn(
 @app.post("/sessions/{session_urn:path}/replay")
 async def replay_agent_session(session_urn: str, principal: Principal = Depends(current_principal)) -> dict:
     _require_intelligence_enabled()
-    await _authorize_workspace(principal, "read")
     session = await agent_runtime.get_session(app.state.pool, session_urn)
     _require_own_session(session, principal)
+    await _authorize_agent_session(principal, "read", session_urn=session_urn)
     try:
         return await agent_runtime.replay_session(app.state.pool, session_urn=session_urn, llm=app.state.llm)
     except ValueError as exc:
@@ -456,7 +505,7 @@ async def replay_agent_session(session_urn: str, principal: Principal = Depends(
 
 @app.post("/evaluate")
 async def evaluate(http_request: Request, principal: Principal = Depends(current_principal)) -> dict:
-    """Run evaluation suite against gold set questions and security suite."""
+    """Run gold set, security suite, and action-path (criteria) suite."""
     _require_intelligence_enabled()
     await _authorize_workspace(principal, "write")
     await _enforce_spend(principal)
@@ -474,12 +523,16 @@ async def evaluate(http_request: Request, principal: Principal = Depends(current
         embedder=app.state.embedder,
         glossary_terms=glossary_terms,
         llm=app.state.llm,
+        tenant_id=principal.tenant_id,
     )
     agent_token, editor_token = _security_probe_tokens()
     security_result = await evaluation.run_security_suite(
         knowledge_url=KNOWLEDGE_URL, agent_token=agent_token, editor_token=editor_token
     )
-    return {"goldSet": gold_set_result, "security": security_result}
+    path_result = await evaluation.run_action_path_suite(
+        knowledge_url=KNOWLEDGE_URL, editor_token=editor_token
+    )
+    return {"goldSet": gold_set_result, "security": security_result, "actionPaths": path_result}
 
 
 class RegisterToolPluginRequest(BaseModel):
@@ -507,6 +560,15 @@ async def register_tool_plugin(
             raise HolonError.invalid_argument('PluginValidationFailed', str(exc)) from exc
         except tool_plugin_registry.PluginConflictError as exc:
             raise HolonError.conflict('PluginConflict', str(exc)) from exc
+
+    name = registration["name"]
+
+    async def _compensate():
+        await app.state.pool.execute("DELETE FROM plugin_registration WHERE name = $1", name)
+
+    await _seed_tool_plugin_authz(
+        tenant_id=principal.tenant_id, name=name, compensate_delete=_compensate
+    )
     emit_audit(
         category="access",
         action="intelligence.tool_plugin.registered",
@@ -515,7 +577,7 @@ async def register_tool_plugin(
         actor_urn=principal.urn,
         actor_type=principal.type,
         resource_type="tool_plugin",
-        resource_urn=build_urn(principal.tenant_id, "global", "tool-plugin", registration["name"]),
+        resource_urn=tool_plugin_urn(principal.tenant_id, name),
         extra={"entry_point": body.entry_point},
     )
     return registration
@@ -527,30 +589,30 @@ def _tool_plugin_not_found(name: str) -> HolonError:
 
 @app.get("/tool-plugins/{name}")
 async def get_tool_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "read")
     registration = await tool_plugin_registry.get_tool_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _tool_plugin_not_found(name)
+    await _authorize_tool_plugin(principal, "read", name=name)
     return registration
 
 
 @app.post("/tool-plugins/{name}/disable")
 async def disable_tool_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
     _require_intelligence_enabled()
-    await _authorize_workspace(principal, "write")
     registration = await tool_plugin_registry.get_tool_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _tool_plugin_not_found(name)
+    await _authorize_tool_plugin(principal, "write", name=name)
     return await tool_plugin_registry.set_tool_plugin_status(app.state.pool, name, "disabled")
 
 
 @app.post("/tool-plugins/{name}/enable")
 async def enable_tool_plugin(name: str, principal: Principal = Depends(current_principal)) -> dict:
     _require_intelligence_enabled()
-    await _authorize_workspace(principal, "write")
     registration = await tool_plugin_registry.get_tool_plugin_registration(app.state.pool, name)
     if registration is None:
         raise _tool_plugin_not_found(name)
+    await _authorize_tool_plugin(principal, "write", name=name)
     return await tool_plugin_registry.set_tool_plugin_status(app.state.pool, name, "active")
 
 
@@ -567,13 +629,17 @@ async def register_model(
 ) -> dict:
     """Register an already-trained model artifact."""
     _require_intelligence_enabled()
-    await _authorize_workspace(principal, "write")
+    existing = await model_registry.get_model(app.state.pool, name)
+    if existing is None:
+        await _authorize_workspace(principal, "write")
+    else:
+        await _authorize_ml_model(principal, "write", name=name)
     try:
         artifact_bytes = base64.b64decode(body.artifact_base64)
     except Exception as exc:
         raise HolonError.invalid_argument('InvalidBase64Artifact', f"artifact_base64 is not valid base64: {exc}") from exc
     try:
-        return await model_registry.register_model(
+        registration = await model_registry.register_model(
             app.state.pool,
             app.state.s3,
             MODEL_BUCKET,
@@ -589,6 +655,16 @@ async def register_model(
         code = 403 if "joblib model" in detail.lower() or "disabled" in detail.lower() else 400
         raise HolonError.from_http(code, detail, error_name='ModelRegistryError') from exc
 
+    if existing is None:
+
+        async def _compensate():
+            await app.state.pool.execute("DELETE FROM model_registration WHERE name = $1", name)
+
+        await _seed_ml_model_authz(
+            tenant_id=principal.tenant_id, name=name, compensate_delete=_compensate
+        )
+    return registration
+
 
 def _model_not_found(name: str) -> HolonError:
     return HolonError.not_found("ModelNotFound", f"no model registered as {name!r}", name=name)
@@ -597,31 +673,37 @@ def _model_not_found(name: str) -> HolonError:
 @app.get("/models")
 async def list_models(principal: Principal = Depends(current_principal)) -> list[dict]:
     await _authorize_workspace(principal, "read")
-    return await model_registry.list_models(app.state.pool, principal.tenant_id)
+    rows = await model_registry.list_models(app.state.pool, principal.tenant_id)
+    return await _filter_readable(
+        principal,
+        "ml_model",
+        rows,
+        urn_fn=lambda row: ml_model_urn(principal.tenant_id, row["name"]),
+    )
 
 
 @app.get("/models/{name}")
 async def get_model(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "read")
     registration = await model_registry.get_model(app.state.pool, name)
     if registration is None:
         raise _model_not_found(name)
+    await _authorize_ml_model(principal, "read", name=name)
     return registration
 
 
 @app.post("/models/{name}/disable")
 async def disable_model(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "write")
     if await model_registry.get_model(app.state.pool, name) is None:
         raise _model_not_found(name)
+    await _authorize_ml_model(principal, "write", name=name)
     return await model_registry.set_model_status(app.state.pool, name, "disabled")
 
 
 @app.post("/models/{name}/enable")
 async def enable_model(name: str, principal: Principal = Depends(current_principal)) -> dict:
-    await _authorize_workspace(principal, "write")
     if await model_registry.get_model(app.state.pool, name) is None:
         raise _model_not_found(name)
+    await _authorize_ml_model(principal, "write", name=name)
     return await model_registry.set_model_status(app.state.pool, name, "active")
 
 
@@ -632,9 +714,9 @@ class PredictRequest(BaseModel):
 @app.post("/models/{name}/predict")
 async def predict(name: str, body: PredictRequest, principal: Principal = Depends(current_principal)) -> dict:
     """Execute model prediction inference synchronously."""
-    await _authorize_workspace(principal, "read")
     if await model_registry.get_model(app.state.pool, name) is None:
         raise _model_not_found(name)
+    await _authorize_ml_model(principal, "read", name=name)
     try:
         prediction = await model_registry.predict(
             app.state.pool, app.state.s3, MODEL_BUCKET, name=name, features=body.features

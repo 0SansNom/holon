@@ -69,6 +69,19 @@ def _sync_and_wait(jdoe_token: str) -> dict:
     pytest.fail("catalog did not converge to the new customers snapshot in time")
 
 
+def _poll_customer_email(jdoe_token: str, customer_id: int, want: str) -> dict:
+    """Catalog can converge before Knowledge finishes rematerializing the row."""
+    deadline = time.monotonic() + 60
+    last: dict = {}
+    while time.monotonic() < deadline:
+        status, last = _request("GET", ontology_url(f"/objects/Customer/{customer_id}"), token=jdoe_token)
+        assert status == 200, last
+        if last.get("email") == want:
+            return last
+        time.sleep(0.5)
+    pytest.fail(f"Customer/{customer_id} email never became {want!r}: {last}")
+
+
 def test_as_of_read_returns_the_state_that_was_true_at_that_time(jdoe_token: str) -> None:
     original_email = asyncio.run(_get_email(CUSTOMER_ID))
 
@@ -76,18 +89,14 @@ def test_as_of_read_returns_the_state_that_was_true_at_that_time(jdoe_token: str
         # 1. Establish a known-good historical point: sync now, confirm the
         # live read matches, and record the timestamp right after.
         _sync_and_wait(jdoe_token)
-        status, before = _request("GET", ontology_url(f"/objects/Customer/{CUSTOMER_ID}"), token=jdoe_token)
-        assert status == 200, before
-        assert before["email"] == original_email, before
+        before = _poll_customer_email(jdoe_token, CUSTOMER_ID, original_email)
         as_of_before = before["materializedAt"]
 
         # 2. Mutate the source and re-sync
         asyncio.run(_set_email(CUSTOMER_ID, MUTATED_EMAIL))
         _sync_and_wait(jdoe_token)
 
-        status, after = _request("GET", ontology_url(f"/objects/Customer/{CUSTOMER_ID}"), token=jdoe_token)
-        assert status == 200, after
-        assert after["email"] == MUTATED_EMAIL, after
+        after = _poll_customer_email(jdoe_token, CUSTOMER_ID, MUTATED_EMAIL)
 
         # 3. A historical read pinned to the pre-mutation timestamp must
         # still show the *old* email
@@ -103,6 +112,7 @@ def test_as_of_read_returns_the_state_that_was_true_at_that_time(jdoe_token: str
     finally:
         asyncio.run(_set_email(CUSTOMER_ID, original_email))
         _sync_and_wait(jdoe_token)
+        _poll_customer_email(jdoe_token, CUSTOMER_ID, original_email)
 
 
 def test_as_of_far_in_the_past_has_no_history(jdoe_token: str) -> None:

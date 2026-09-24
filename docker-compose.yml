@@ -23,6 +23,8 @@ x-app-env: &app-env
   # so every service would spam connection-refused forever.
   HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-}
   HOLON_INTELLIGENCE_ENABLED: ${HOLON_INTELLIGENCE_ENABLED:-true}
+  HOLON_INTELLIGENCE_RPM: ${HOLON_INTELLIGENCE_RPM:-30}
+  HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA: ${HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA:-200000}
   HOLON_LLM_PROVIDER: ${HOLON_LLM_PROVIDER:-anthropic}
   HOLON_METRICS_TOKEN: ${HOLON_METRICS_TOKEN:-}
   HOLON_CORS_ORIGINS: ${HOLON_CORS_ORIGINS:-http://localhost:5173,http://localhost:8004}
@@ -48,7 +50,7 @@ x-app-env: &app-env
   HOLON_SCIM_BEARER_TOKEN: ${HOLON_SCIM_BEARER_TOKEN:-}
   HOLON_PLUGIN_ENTRY_PREFIXES: ${HOLON_PLUGIN_ENTRY_PREFIXES:-app.plugins.,app.tool_plugins.,holon_test_plugins.}
   # Local compose Postgres/source-s3/reviews-api/oauth2-idp are RFC1918; production leaves this unset (fail closed).
-  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,source-s3,reviews-api,oauth2-idp}
+  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,mysql,source-s3,reviews-api,oauth2-idp,sftp}
   HOLON_IDENTITY_URL: http://identity:8000
 
 services:
@@ -76,7 +78,7 @@ services:
       retries: 15
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       # Default root user for local S3 storage
@@ -90,7 +92,7 @@ services:
 
   # Infra only: creates the warehouse bucket, no fixture files copied in.
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       - minio
     entrypoint: >
@@ -101,7 +103,7 @@ services:
   # csv-seed`) copies it in when actually needed.
   csv-seed:
     profiles: [ "test-fixtures" ]
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -113,7 +115,7 @@ services:
   # External S3 store fixture for testing object storage connector
   source-s3:
     profiles: [ "test-fixtures" ]
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: source
@@ -126,13 +128,26 @@ services:
   # Seed utility for object storage connector
   source-s3-seed:
     profiles: [ "test-fixtures" ]
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       - source-s3
     volumes:
       - ./tests/fixtures/csv-seed:/seed:ro
     entrypoint: >
       /bin/sh -c " until mc alias set src http://source-s3:9000 source source12345; do echo waiting for source-s3; sleep 2; done && mc mb -p src/tenant-landing || true && mc cp /seed/suppliers.csv src/tenant-landing/landing/suppliers.csv && echo source-s3 seeded "
+
+  # Test-only SFTP fixture for the no-code SFTP connector.
+  # Seed CSV is mounted at /home/holon/upload → remote path upload/suppliers.csv
+  # (atmoz chroots the user to their home). Hostname `sftp` is allowlisted
+  # in HOLON_CONNECTOR_ALLOWED_HOSTS the same way as source-s3.
+  sftp:
+    profiles: [ "test-fixtures" ]
+    image: atmoz/sftp:alpine
+    ports:
+      - "2222:22"
+    volumes:
+      - ./tests/fixtures/sftp-seed:/home/holon/upload:ro
+    command: holon:holon12345:1001
 
   iceberg-rest:
     image: tabulario/iceberg-rest:1.6.0
@@ -202,6 +217,26 @@ services:
       - mongo-data:/data/db
     ports:
       - "27017:27017"
+
+  # Test-only MySQL fixture for the SQL multi-driver connector (dialect=mysql).
+  mysql:
+    profiles: [ "test-fixtures" ]
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: holon12345
+      MYSQL_DATABASE: source_erp
+      MYSQL_USER: holon
+      MYSQL_PASSWORD: holon12345
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./tests/fixtures/mysql-seed:/docker-entrypoint-initdb.d:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uholon", "-pholon12345" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   # Test-only REST API fixture
   reviews-api:
@@ -469,6 +504,8 @@ services:
       <<: *app-env
       PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
       HOLON_TOOL_PLUGIN_ENTRY_PREFIXES: ${HOLON_TOOL_PLUGIN_ENTRY_PREFIXES:-app.tool_plugins.,holon_test_plugins.}
+      HOLON_TOOL_PLUGIN_ISOLATION: ${HOLON_TOOL_PLUGIN_ISOLATION:-subprocess}
+      HOLON_TOOL_PLUGIN_TIMEOUT_SECONDS: ${HOLON_TOOL_PLUGIN_TIMEOUT_SECONDS:-15}
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_intelligence
       HOLON_MINTABLE_PRINCIPAL_URNS: intelligence-indexer,ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
@@ -566,5 +603,6 @@ volumes:
   minio-data:
   source-s3-data:
   mongo-data:
+  mysql-data:
   opensearch-data:
   qdrant-data:

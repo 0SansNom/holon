@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test test-unit clean
+.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test test-unit test-soak clean
 
 COMPOSE := docker compose
 
@@ -32,8 +32,10 @@ seed:
 	$(COMPOSE) exec -T mongodb mongosh support_desk --quiet < tests/fixtures/mongo-init/init.js
 	$(COMPOSE) --profile test-fixtures up -d reviews-api
 	$(COMPOSE) --profile test-fixtures up -d oauth2-idp
+	$(COMPOSE) --profile test-fixtures up -d mysql
 	$(COMPOSE) --profile test-fixtures run --rm csv-seed
 	$(COMPOSE) --profile test-fixtures run --rm source-s3-seed
+	$(COMPOSE) --profile test-fixtures up -d sftp
 	$(COMPOSE) --profile test-fixtures run --rm inventory-stream-seed
 
 # Provision test fixtures via public APIs (CI)
@@ -46,4 +48,8 @@ test-unit:
 
 test:
 	pip3 install -q -r tests/requirements.txt
-	python3 -m pytest -q -m "not llm" tests
+	python3 -m pytest -q -m "not llm and not soak" tests
+
+test-soak:
+	pip3 install -q -r tests/requirements.txt
+	python3 -m pytest -q -m soak tests

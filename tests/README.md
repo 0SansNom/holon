@@ -17,6 +17,8 @@ tests/
     intelligence/
     experience/
     platform/                 # cross-service / infra (dlq, migrations, …)
+  soak/                       # concurrent / burst — make test-soak / soak-nightly
+    intelligence/
 ```
 
 ## Markers
@@ -24,8 +26,9 @@ tests/
 | Marker | Meaning | Command |
 |---|---|---|
 | `unit` | No live stack (`tests/unit/`) | `make test-unit` |
-| `integration` | Compose / local infra | `make test` / `pytest -m "not llm"` |
-| `llm` | Real LLM spend | `pytest -m llm` (not default CI) |
+| `integration` | Compose / local infra | `make test` / `pytest -m "not llm and not soak"` |
+| `llm` | Real LLM spend | `pytest -m llm` locally / optional `llm-nightly.yml` (skips if no `ANTHROPIC_API_KEY`) — **not** on PR merge CI |
+| `soak` | Concurrent / burst Intelligence | `make test-soak` / nightly `soak-nightly.yml` |
 
 Browser e2e (Playwright) lives in `services/experience/web/e2e` and needs
 the stack plus a built SPA on Experience (`http://localhost:8004`):
@@ -34,7 +37,7 @@ the stack plus a built SPA on Experience (`http://localhost:8004`):
 cd services/experience/web && npm run test:e2e
 ```
 
-Path `tests/unit/` → auto `unit`; everything else under `tests/` → auto `integration`.
+Path `tests/unit/` → auto `unit`; `tests/soak/` → auto `soak`; everything else under `tests/` → auto `integration`.
 
 ## Conventions
 

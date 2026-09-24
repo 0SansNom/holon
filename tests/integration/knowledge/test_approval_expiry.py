@@ -83,7 +83,11 @@ def test_overdue_approval_cannot_be_rejected_either(jdoe_token: str, msmith_toke
 
 
 def test_normal_approval_is_unaffected_by_the_expiry_machinery(jdoe_token: str, msmith_token: str) -> None:
-    customer_id = 10  # Halcyon Pharma — distinct from the other cases in this module
+    # Customer 3 already had an *expired* approval in the test above — account
+    # stays open, so a fresh closeAccount request is valid (and must not be
+    # blocked by the expiry machinery). Avoids colliding with saga's permanent
+    # close on customer 10.
+    customer_id = 3
     approval_id = _request_close_account(jdoe_token, customer_id)
 
     status, decision = _request(

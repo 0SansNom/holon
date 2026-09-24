@@ -18,16 +18,19 @@ What that means in practice:
 - **Applications** — a web UI and an application builder on the same
   APIs people and agents call.
 - **Search** — one index over the ontology, tenant-scoped.
-- **Agents** — optional, experimental. They use the same tools and
-  policy as a human session.
+- **Agents** — optional, beta (opt-in) ontology-grounded agent runtime
+  (not a general AI platform). Same tools and policy as a human session;
+  off by default in production (see `services/intelligence/BETA.md`).
 
 One instance, N orgs (filiales). MIT.
 
 It is **not production-ready**. Empty instance on first boot; you
 create ontology, connectors, and principals through the APIs.
-Intelligence stays off in production (`HOLON_INTELLIGENCE_ENABLED=false`,
-enforced). See [`SECURITY.md`](SECURITY.md) and
-[`docs/ops/deploy.md`](docs/ops/deploy.md).
+Intelligence stays off in production unless you explicitly opt into
+beta (`HOLON_INTELLIGENCE_ENABLED` + `HOLON_INTELLIGENCE_BETA_OPT_IN`
++ sandbox RuntimeClass + subprocess plugin isolation + finite spend caps — see
+[`services/intelligence/BETA.md`](services/intelligence/BETA.md)).
+See [`SECURITY.md`](SECURITY.md) and the Helm production overlay.
 
 ## Services
 
@@ -40,7 +43,7 @@ Six FastAPI services, each with its own Postgres:
 | `knowledge` | 8003 | Ontology, governed reads/writes, Actions, search |
 | `experience` | 8004 | Web UI and Application Builder |
 | `automation` | 8005 | Workflows — sagas and compensation |
-| `intelligence` | 8006 | LLM gateway, agents (experimental) |
+| `intelligence` | 8006 | Ontology-grounded agents / RAG (beta, opt-in) |
 
 Infra: Postgres, MinIO, Iceberg REST, Redpanda, SpiceDB, OPA,
 OpenSearch, Qdrant. Shared primitives in `libs/holon_common`.
@@ -77,7 +80,7 @@ in production.
 ```bash
 pip install -r tests/requirements.txt
 make test-unit
-python3 -m pytest -q -m "not llm" tests   # needs the stack
+python3 -m pytest -q -m "not llm and not soak" tests   # needs the stack.
 ```
 
 ## License
