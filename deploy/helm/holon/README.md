@@ -72,12 +72,18 @@ you've wired the app side to fetch from Vault directly instead.
   overlay; set `networkPolicy.dataPlaneCidrs` to your SI ranges, and
   optionally `networkPolicy.intelligence.llmEgressCidrs` for Anthropic /
   Voyage instead of open public `:443`.
-- **Intelligence sandbox** — set `services.intelligence.runtimeClassName`
-  (production overlay defaults to `gvisor`). The cluster must define that
-  RuntimeClass; leave empty only for clusters without gVisor.
-- **No load / soak suite** in CI — e2e is compose HTTP pytest plus
-  Playwright (login, Object Explorer, Sources). Treat green CI as
-  correctness, not capacity.
+- **Intelligence sandbox** — production beta requires
+  `services.intelligence.runtimeClassName` (overlay defaults to `gvisor`)
+  and `intelligenceBetaOptIn: true` when `intelligenceEnabled: true`
+  (see `services/intelligence/BETA.md`). The cluster must define that
+  RuntimeClass. ConfigMap mirrors the class name into
+  `HOLON_INTELLIGENCE_SANDBOX_RUNTIME` for boot posture checks.
+  Agent tool plugins use `toolPluginIsolation: subprocess` (mirrored to
+  `HOLON_TOOL_PLUGIN_ISOLATION`).
+- **Soak / chaos** — PR e2e excludes `soak`. Nightly workflow
+  `.github/workflows/soak-nightly.yml` (`pytest -m soak`) covers
+  concurrent Intelligence sessions; treat green PR CI as correctness,
+  not capacity.
 - **JWT** — ConfigMap sets `HOLON_JWT_ALG` from `jwt.algorithm` (default
   HS256 in `values.yaml`). The production overlay sets RS256 and
   `jwt.requireAsymmetric: true`; keys live in `existingSecret`.

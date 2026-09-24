@@ -12,6 +12,8 @@ import re
 # punctuation that could break out of a quoted identifier.
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 
+_VALID_QUOTE_DIALECTS = frozenset({"postgres", "mysql", "mssql"})
+
 
 def require_identifier(name: str, *, what: str = "identifier") -> str:
     if not name or not IDENTIFIER_RE.match(name):
@@ -22,7 +24,17 @@ def require_identifier(name: str, *, what: str = "identifier") -> str:
     return name
 
 
-def quote_identifier(name: str) -> str:
-    """Quote each dot-separated part. Safe only after `require_identifier`."""
+def quote_identifier(name: str, *, dialect: str = "postgres") -> str:
+    """Quote each dot-separated part. Safe only after `require_identifier`.
+
+    Dialect quoting: postgres → "x", mysql → `x`, mssql → [x].
+    """
     require_identifier(name)
+    d = (dialect or "postgres").lower()
+    if d not in _VALID_QUOTE_DIALECTS:
+        d = "postgres"
+    if d == "mysql":
+        return ".".join(f"`{part}`" for part in name.split("."))
+    if d == "mssql":
+        return ".".join(f"[{part}]" for part in name.split("."))
     return ".".join(f'"{part}"' for part in name.split("."))

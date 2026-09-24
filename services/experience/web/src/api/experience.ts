@@ -68,4 +68,29 @@ export const experienceApi = {
     ),
   submitForm: (name: string, id: string | number, body: Record<string, unknown>) =>
     api.post<Record<string, unknown>>(`${EXPERIENCE_URL}/api/applications/${name}/form/${id}`, body),
+
+  createAgentSession: (name: string) =>
+    api.post<AgentSession>(`${EXPERIENCE_URL}/api/applications/${name}/agent-sessions`),
+  runAgentSessionTurn: (name: string, sessionUrn: string, message: string) =>
+    api.post<AgentTurnResult>(
+      `${EXPERIENCE_URL}/api/applications/${name}/agent-sessions/${encodeURIComponent(sessionUrn)}/turns`,
+      { message },
+    ),
 };
+
+export interface AgentSession {
+  urn: string;
+  status: string;
+  agent_urn?: string;
+  budget?: Record<string, number>;
+  consumed?: Record<string, number>;
+}
+
+export interface AgentTurnResult {
+  sessionUrn: string;
+  status: string;
+  /** Session lifecycle after the turn — ``running`` for multi-turn, ``completed`` when closed. */
+  sessionStatus?: string;
+  text: string;
+  consumed?: Record<string, number>;
+}

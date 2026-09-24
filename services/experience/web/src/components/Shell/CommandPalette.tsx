@@ -42,6 +42,20 @@ const ACTIONS: Array<{ id: string; label: string; icon: IconName; intent: Palett
     intent: "connect-object-source",
     to: "/sources",
   },
+  {
+    id: "action-connect-sftp",
+    label: "Connect SFTP",
+    icon: "folder-shared",
+    intent: "connect-sftp-source",
+    to: "/sources",
+  },
+  {
+    id: "action-connect-salesforce",
+    label: "Connect Salesforce",
+    icon: "office",
+    intent: "connect-salesforce-source",
+    to: "/sources",
+  },
   { id: "action-connect-stream", label: "New Kafka stream", icon: "pulse", intent: "connect-stream", to: "/sources" },
   { id: "action-connection", label: "New REST connection", icon: "key", intent: "create-connection", to: "/sources" },
   {
@@ -56,6 +70,20 @@ const ACTIONS: Array<{ id: string; label: string; icon: IconName; intent: Palett
     label: "New object connection",
     icon: "cloud",
     intent: "create-object-connection",
+    to: "/sources",
+  },
+  {
+    id: "action-sftp-connection",
+    label: "New SFTP connection",
+    icon: "folder-shared",
+    intent: "create-sftp-connection",
+    to: "/sources",
+  },
+  {
+    id: "action-salesforce-connection",
+    label: "New Salesforce connection",
+    icon: "office",
+    intent: "create-salesforce-connection",
     to: "/sources",
   },
 ];
