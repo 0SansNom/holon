@@ -50,7 +50,7 @@ x-app-env: &app-env
   HOLON_SCIM_BEARER_TOKEN: ${HOLON_SCIM_BEARER_TOKEN:-}
   HOLON_PLUGIN_ENTRY_PREFIXES: ${HOLON_PLUGIN_ENTRY_PREFIXES:-app.plugins.,app.tool_plugins.,holon_test_plugins.}
   # Local compose Postgres/source-s3/reviews-api/oauth2-idp are RFC1918; production leaves this unset (fail closed).
-  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,mysql,source-s3,reviews-api,oauth2-idp}
+  HOLON_CONNECTOR_ALLOWED_HOSTS: ${HOLON_CONNECTOR_ALLOWED_HOSTS:-postgres,mysql,source-s3,reviews-api,oauth2-idp,sftp}
   HOLON_IDENTITY_URL: http://identity:8000
 
 services:
@@ -135,6 +135,19 @@ services:
       - ./tests/fixtures/csv-seed:/seed:ro
     entrypoint: >
       /bin/sh -c " until mc alias set src http://source-s3:9000 source source12345; do echo waiting for source-s3; sleep 2; done && mc mb -p src/tenant-landing || true && mc cp /seed/suppliers.csv src/tenant-landing/landing/suppliers.csv && echo source-s3 seeded "
+
+  # Test-only SFTP fixture for the no-code SFTP connector.
+  # Seed CSV is mounted at /home/holon/upload → remote path upload/suppliers.csv
+  # (atmoz chroots the user to their home). Hostname `sftp` is allowlisted
+  # in HOLON_CONNECTOR_ALLOWED_HOSTS the same way as source-s3.
+  sftp:
+    profiles: [ "test-fixtures" ]
+    image: atmoz/sftp:alpine
+    ports:
+      - "2222:22"
+    volumes:
+      - ./tests/fixtures/sftp-seed:/home/holon/upload:ro
+    command: holon:holon12345:1001
 
   iceberg-rest:
     image: tabulario/iceberg-rest:1.6.0

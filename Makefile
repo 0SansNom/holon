@@ -35,6 +35,7 @@ seed:
 	$(COMPOSE) --profile test-fixtures up -d mysql
 	$(COMPOSE) --profile test-fixtures run --rm csv-seed
 	$(COMPOSE) --profile test-fixtures run --rm source-s3-seed
+	$(COMPOSE) --profile test-fixtures up -d sftp
 	$(COMPOSE) --profile test-fixtures run --rm inventory-stream-seed
 
 # Provision test fixtures via public APIs (CI)
