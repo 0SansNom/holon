@@ -165,6 +165,7 @@ async def _assert_dataset_available(
         ("generic_rest_source", "REST source"),
         ("sql_source", "SQL source"),
         ("object_source", "object source"),
+        ("salesforce_source", "Salesforce source"),
     ):
         conflicting = await pool.fetchval(
             f"SELECT name FROM {table} WHERE tenant_id = $1 AND name = $2 AND status = 'active'",

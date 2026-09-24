@@ -1,7 +1,19 @@
 import { useState } from "react";
 import { Button, Menu, MenuItem, PopoverNext } from "@blueprintjs/core";
-import { useConnections, useSqlConnections, useObjectConnections, useSftpConnections } from "../../api/hooks";
-import type { GenericConnection, SqlConnection, ObjectConnection, SftpConnection } from "../../api/connectivity";
+import {
+  useConnections,
+  useSqlConnections,
+  useObjectConnections,
+  useSftpConnections,
+  useSalesforceConnections,
+} from "../../api/hooks";
+import type {
+  GenericConnection,
+  SqlConnection,
+  ObjectConnection,
+  SftpConnection,
+  SalesforceConnection,
+} from "../../api/connectivity";
 import { EmptyState } from "../common/ListPrimitives";
 import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
 import { ConnectionRow } from "./ConnectionRow";
@@ -12,6 +24,8 @@ import { ObjectConnectionRow } from "./ObjectConnectionRow";
 import { ObjectConnectionDialog } from "./ObjectConnectionDialog";
 import { SftpConnectionRow } from "./SftpConnectionRow";
 import { SftpConnectionDialog } from "./SftpConnectionDialog";
+import { SalesforceConnectionRow } from "./SalesforceConnectionRow";
+import { SalesforceConnectionDialog } from "./SalesforceConnectionDialog";
 import { usePaletteCreateIntent } from "../../hooks/usePaletteCreateIntent";
 
 export function ConnectionsTab() {
@@ -19,32 +33,37 @@ export function ConnectionsTab() {
   const { data: sqlConnections } = useSqlConnections();
   const { data: objectConnections } = useObjectConnections();
   const { data: sftpConnections } = useSftpConnections();
+  const { data: salesforceConnections } = useSalesforceConnections();
   const [creatingRest, setCreatingRest] = useState(false);
   const [creatingSql, setCreatingSql] = useState(false);
   const [creatingObject, setCreatingObject] = useState(false);
   const [creatingSftp, setCreatingSftp] = useState(false);
+  const [creatingSalesforce, setCreatingSalesforce] = useState(false);
   const [editingConnection, setEditingConnection] = useState<GenericConnection | null>(null);
   const [editingSqlConnection, setEditingSqlConnection] = useState<SqlConnection | null>(null);
   const [editingObjectConnection, setEditingObjectConnection] = useState<ObjectConnection | null>(null);
   const [editingSftpConnection, setEditingSftpConnection] = useState<SftpConnection | null>(null);
+  const [editingSalesforceConnection, setEditingSalesforceConnection] = useState<SalesforceConnection | null>(null);
 
   usePaletteCreateIntent("create-connection", setCreatingRest);
   usePaletteCreateIntent("create-sql-connection", setCreatingSql);
   usePaletteCreateIntent("create-object-connection", setCreatingObject);
   usePaletteCreateIntent("create-sftp-connection", setCreatingSftp);
+  usePaletteCreateIntent("create-salesforce-connection", setCreatingSalesforce);
 
   const restDialogOpen = creatingRest || editingConnection !== null;
   const sqlDialogOpen = creatingSql || editingSqlConnection !== null;
   const objectDialogOpen = creatingObject || editingObjectConnection !== null;
   const sftpDialogOpen = creatingSftp || editingSftpConnection !== null;
+  const salesforceDialogOpen = creatingSalesforce || editingSalesforceConnection !== null;
 
   return (
     <div>
       <OntologyTabHeader
         description={
           <>
-            Reusable credentials for REST, SQL, object storage, and SFTP — register once, point several sources at the
-            same connection.
+            Reusable credentials for REST, SQL, object storage, SFTP, and Salesforce — register once, point several
+            sources at the same connection.
           </>
         }
         trailing={
@@ -56,6 +75,7 @@ export function ConnectionsTab() {
                 <MenuItem icon="database" text="SQL connection" onClick={() => setCreatingSql(true)} />
                 <MenuItem icon="cloud" text="Object storage connection" onClick={() => setCreatingObject(true)} />
                 <MenuItem icon="folder-shared" text="SFTP connection" onClick={() => setCreatingSftp(true)} />
+                <MenuItem icon="office" text="Salesforce connection" onClick={() => setCreatingSalesforce(true)} />
               </Menu>
             }
           >
@@ -107,7 +127,7 @@ export function ConnectionsTab() {
       <p className="hl-text-muted-sm hl-mb-sm">
         S3 / Azure Blob / GCS. Required before registering an object source.
       </p>
-      <div className="hl-source-list">
+      <div className="hl-source-list hl-mb-lg">
         {objectConnections?.map((c) => (
           <ObjectConnectionRow key={c.name} connection={c} onEdit={() => setEditingObjectConnection(c)} />
         ))}
@@ -125,13 +145,37 @@ export function ConnectionsTab() {
         </Button>
       </div>
       <p className="hl-text-muted-sm hl-mb-sm">Password-authenticated SFTP hosts. Required before registering an SFTP source.</p>
-      <div className="hl-source-list">
+      <div className="hl-source-list hl-mb-lg">
         {sftpConnections?.map((c) => (
           <SftpConnectionRow key={c.name} connection={c} onEdit={() => setEditingSftpConnection(c)} />
         ))}
         {sftpConnections?.length === 0 && (
           <EmptyState actionLabel="New SFTP connection" onAction={() => setCreatingSftp(true)}>
             No SFTP connections saved yet.
+          </EmptyState>
+        )}
+      </div>
+
+      <div className="hl-flex-between hl-mb-sm">
+        <div className="hl-section-title">Salesforce connections</div>
+        <Button small icon="add" minimal onClick={() => setCreatingSalesforce(true)}>
+          New Salesforce connection
+        </Button>
+      </div>
+      <p className="hl-text-muted-sm hl-mb-sm">
+        Connected App client credentials. Required before registering a Salesforce SOQL source.
+      </p>
+      <div className="hl-source-list">
+        {salesforceConnections?.map((c) => (
+          <SalesforceConnectionRow
+            key={c.name}
+            connection={c}
+            onEdit={() => setEditingSalesforceConnection(c)}
+          />
+        ))}
+        {salesforceConnections?.length === 0 && (
+          <EmptyState actionLabel="New Salesforce connection" onAction={() => setCreatingSalesforce(true)}>
+            No Salesforce connections saved yet.
           </EmptyState>
         )}
       </div>
@@ -169,6 +213,15 @@ export function ConnectionsTab() {
           onClose={() => {
             setCreatingSftp(false);
             setEditingSftpConnection(null);
+          }}
+        />
+      )}
+      {salesforceDialogOpen && (
+        <SalesforceConnectionDialog
+          editing={editingSalesforceConnection}
+          onClose={() => {
+            setCreatingSalesforce(false);
+            setEditingSalesforceConnection(null);
           }}
         />
       )}
