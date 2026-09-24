@@ -7,7 +7,13 @@ from fastapi import APIRouter, Depends, Header, Query
 
 from holon_common import EventActor, HolonError, Principal
 
-from .. import deps, generic_source_registry, object_source_registry, sql_source_registry
+from .. import (
+    deps,
+    generic_source_registry,
+    object_source_registry,
+    salesforce_source_registry,
+    sql_source_registry,
+)
 from ..deps import (
     SyncRequest,
     SyncResult,
@@ -23,7 +29,12 @@ router = APIRouter()
 
 
 async def _resolve_source_for_sync(tenant_id: str, dataset: str) -> Optional[dict]:
-    for registry in (generic_source_registry, sql_source_registry, object_source_registry):
+    for registry in (
+        generic_source_registry,
+        sql_source_registry,
+        object_source_registry,
+        salesforce_source_registry,
+    ):
         source = await registry.get_source(deps.pool, tenant_id, dataset)
         if source is not None:
             return source
