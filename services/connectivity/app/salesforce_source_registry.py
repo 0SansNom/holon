@@ -234,10 +234,12 @@ async def _assert_dataset_available(
             f"dataset {name!r} is already claimed by active plugin {conflicting_plugin!r}"
         )
 
+    # Do not conflict-check salesforce_source itself — re-register updates via ON CONFLICT.
     for table, label in (
         ("generic_rest_source", "REST source"),
         ("sql_source", "SQL source"),
         ("object_source", "object source"),
+        ("sftp_source", "SFTP source"),
     ):
         conflicting = await pool.fetchval(
             f"SELECT name FROM {table} WHERE tenant_id = $1 AND name = $2 AND status = 'active'",

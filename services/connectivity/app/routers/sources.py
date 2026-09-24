@@ -8,7 +8,14 @@ from fastapi import APIRouter, Depends, Header, Query
 from holon_common import HolonError, Principal
 from holon_common.audit import emit_audit
 
-from .. import deps, generic_source_registry, object_source_registry, salesforce_source_registry, sql_source_registry
+from .. import (
+    deps,
+    generic_source_registry,
+    object_source_registry,
+    salesforce_source_registry,
+    sftp_source_registry,
+    sql_source_registry,
+)
 from ..deps import (
     _authorize_source,
     _authorize_workspace,
@@ -27,6 +34,8 @@ from ..ingest import (
     RegisterObjectSourceRequest,
     RegisterSalesforceConnectionRequest,
     RegisterSalesforceSourceRequest,
+    RegisterSftpConnectionRequest,
+    RegisterSftpSourceRequest,
     RegisterSourceRequest,
     RegisterSqlConnectionRequest,
     RegisterSqlSourceRequest,
@@ -391,6 +400,150 @@ async def delete_object_source(name: str, principal: Principal = Depends(current
     return {"deleted": name}
 
 
+@router.post("/sftp-connections")
+async def register_sftp_connection(
+    body: RegisterSftpConnectionRequest, principal: Principal = Depends(current_principal)
+) -> dict:
+    """Register or update an SFTP connection credential."""
+    await _authorize_workspace(principal, "write")
+    try:
+        return await sftp_source_registry.register_connection(
+            deps.pool,
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            host=body.host,
+            port=body.port,
+            username=body.username,
+            password=body.password,
+            secret_ref=body.secret_ref,
+            created_by_urn=principal.urn,
+        )
+    except sftp_source_registry.SourceConfigError as exc:
+        raise HolonError.invalid_argument("SourceValidationFailed", str(exc)) from exc
+
+
+@router.get("/sftp-connections")
+async def list_sftp_connections(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await sftp_source_registry.list_connections(deps.pool, principal.tenant_id)
+
+
+@router.delete("/sftp-connections/{name}")
+async def delete_sftp_connection(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    await _authorize_workspace(principal, "write")
+    if await sftp_source_registry.get_connection(deps.pool, principal.tenant_id, name) is None:
+        raise HolonError.not_found("ConnectionNotFound", f"no SFTP connection registered as {name!r}", name=name)
+    try:
+        await sftp_source_registry.delete_connection(deps.pool, principal.tenant_id, name)
+    except sftp_source_registry.ConnectionInUseError as exc:
+        raise HolonError.conflict("ConnectionConflict", str(exc)) from exc
+    return {"deleted": name}
+
+
+@router.post("/sftp-sources")
+async def register_sftp_source(
+    body: RegisterSftpSourceRequest,
+    principal: Principal = Depends(current_principal),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    x_holon_workspace_id: Optional[str] = Header(None, alias="X-Holon-Workspace-Id"),
+) -> dict:
+    """Register a new SFTP source."""
+    target_workspace = _resolve_workspace(
+        explicit=body.workspace_id,
+        workspace_id=workspace_id,
+        x_holon_workspace_id=x_holon_workspace_id,
+    )
+    await _authorize_workspace(principal, "write", workspace_id=target_workspace)
+    existing = await _authorize_source_update(sftp_source_registry, principal, body.name, target_workspace)
+    try:
+        registration = await sftp_source_registry.register_source(
+            deps.pool,
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            workspace_id=target_workspace,
+            connection_name=body.connection_name,
+            format=body.format,
+            remote_path=body.remote_path,
+            remote_prefix=body.remote_prefix,
+            incremental=body.incremental,
+            schedule_interval_minutes=body.schedule_interval_minutes,
+            created_by_urn=principal.urn,
+            reserved_dataset_names=await _reserved_dataset_names(deps.pool),
+        )
+    except sftp_source_registry.SourceConflictError as exc:
+        raise HolonError.conflict("SourceConflict", str(exc)) from exc
+    except sftp_source_registry.SourceConfigError as exc:
+        raise HolonError.invalid_argument("SourceValidationFailed", str(exc)) from exc
+    await _seed_source_authz(
+        tenant_id=principal.tenant_id,
+        workspace_id=target_workspace,
+        name=body.name,
+        compensate_delete=None
+        if existing is not None
+        else lambda: sftp_source_registry.delete_source(deps.pool, principal.tenant_id, body.name),
+    )
+    emit_audit(
+        category="access",
+        action="connectivity.sftp_source.registered",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="source",
+        resource_urn=source_urn(principal.tenant_id, target_workspace, body.name),
+        extra={"connection_name": body.connection_name},
+    )
+    return registration
+
+
+@router.get("/sftp-sources")
+async def list_sftp_sources(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
+    return await _filter_readable(
+        principal, "source", await sftp_source_registry.list_sources(deps.pool, principal.tenant_id)
+    )
+
+
+@router.post("/sftp-sources/{name}/disable")
+async def disable_sftp_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    source = await sftp_source_registry.get_source(deps.pool, principal.tenant_id, name)
+    if source is None:
+        raise _source_not_found(name)
+    await _authorize_source(principal, "write", name=name, workspace_id=resource_workspace(source))
+    return await sftp_source_registry.set_source_status(deps.pool, principal.tenant_id, name, "disabled")
+
+
+@router.post("/sftp-sources/{name}/enable")
+async def enable_sftp_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    source = await sftp_source_registry.get_source(deps.pool, principal.tenant_id, name)
+    if source is None:
+        raise _source_not_found(name)
+    await _authorize_source(principal, "write", name=name, workspace_id=resource_workspace(source))
+    return await sftp_source_registry.set_source_status(deps.pool, principal.tenant_id, name, "active")
+
+
+@router.delete("/sftp-sources/{name}")
+async def delete_sftp_source(name: str, principal: Principal = Depends(current_principal)) -> dict:
+    source = await sftp_source_registry.get_source(deps.pool, principal.tenant_id, name)
+    if source is None:
+        raise _source_not_found(name)
+    ws = resource_workspace(source)
+    await _authorize_source(principal, "write", name=name, workspace_id=ws)
+    await sftp_source_registry.delete_source(deps.pool, principal.tenant_id, name)
+    await _unlink_resource_authz("source", tenant_id=principal.tenant_id, workspace_id=ws, name=name)
+    emit_audit(
+        category="access",
+        action="connectivity.sftp_source.deleted",
+        outcome="success",
+        tenant_id=principal.tenant_id,
+        actor_urn=principal.urn,
+        actor_type=principal.type,
+        resource_type="source",
+        resource_urn=source_urn(principal.tenant_id, ws, name),
+    )
+    return {"deleted": name}
+
+
 @router.post("/salesforce-connections")
 async def register_salesforce_connection(
     body: RegisterSalesforceConnectionRequest, principal: Principal = Depends(current_principal)
@@ -409,7 +562,7 @@ async def register_salesforce_connection(
             secret_ref=body.secret_ref,
         )
     except salesforce_source_registry.SourceConfigError as exc:
-        raise HolonError.invalid_argument("InvalidSourceConfig", str(exc)) from exc
+        raise HolonError.invalid_argument("SourceValidationFailed", str(exc)) from exc
 
 
 @router.get("/salesforce-connections")
@@ -422,11 +575,11 @@ async def list_salesforce_connections(principal: Principal = Depends(current_pri
 async def delete_salesforce_connection(name: str, principal: Principal = Depends(current_principal)) -> dict:
     await _authorize_workspace(principal, "write")
     if await salesforce_source_registry.get_connection(deps.pool, principal.tenant_id, name) is None:
-        raise HolonError.not_found("ConnectionNotFound", f"unknown connection: {name}")
+        raise HolonError.not_found("ConnectionNotFound", f"no Salesforce connection registered as {name!r}", name=name)
     try:
         await salesforce_source_registry.delete_connection(deps.pool, principal.tenant_id, name)
     except salesforce_source_registry.ConnectionInUseError as exc:
-        raise HolonError.conflict("ConnectionInUse", str(exc)) from exc
+        raise HolonError.conflict("ConnectionConflict", str(exc)) from exc
     return {"deleted": name}
 
 
@@ -439,8 +592,11 @@ async def register_salesforce_source(
 ) -> dict:
     """Register a Salesforce SOQL source."""
     target_workspace = _resolve_workspace(
-        principal, workspace_id=workspace_id, x_holon_workspace_id=x_holon_workspace_id, body_workspace=body.workspace_id
+        explicit=body.workspace_id,
+        workspace_id=workspace_id,
+        x_holon_workspace_id=x_holon_workspace_id,
     )
+    await _authorize_workspace(principal, "write", workspace_id=target_workspace)
     existing = await _authorize_source_update(salesforce_source_registry, principal, body.name, target_workspace)
     try:
         registration = await salesforce_source_registry.register_source(
@@ -459,13 +615,13 @@ async def register_salesforce_source(
     except salesforce_source_registry.SourceConflictError as exc:
         raise HolonError.conflict("SourceConflict", str(exc)) from exc
     except salesforce_source_registry.SourceConfigError as exc:
-        raise HolonError.invalid_argument("InvalidSourceConfig", str(exc)) from exc
+        raise HolonError.invalid_argument("SourceValidationFailed", str(exc)) from exc
     await _seed_source_authz(
-        principal,
-        registration["name"],
-        target_workspace,
-        rollback=None
-        if existing
+        tenant_id=principal.tenant_id,
+        workspace_id=target_workspace,
+        name=body.name,
+        compensate_delete=None
+        if existing is not None
         else lambda: salesforce_source_registry.delete_source(deps.pool, principal.tenant_id, body.name),
     )
     emit_audit(
@@ -477,12 +633,14 @@ async def register_salesforce_source(
         actor_type=principal.type,
         resource_type="source",
         resource_urn=source_urn(principal.tenant_id, target_workspace, body.name),
+        extra={"connection_name": body.connection_name},
     )
     return registration
 
 
 @router.get("/salesforce-sources")
 async def list_salesforce_sources(principal: Principal = Depends(current_principal)) -> list[dict]:
+    await _authorize_workspace(principal, "read")
     return await _filter_readable(
         principal, "source", await salesforce_source_registry.list_sources(deps.pool, principal.tenant_id)
     )

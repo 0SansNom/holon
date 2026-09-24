@@ -18,11 +18,13 @@ export type PaletteIntent =
   | "connect-source"
   | "connect-sql-source"
   | "connect-object-source"
+  | "connect-sftp-source"
   | "connect-salesforce-source"
   | "connect-stream"
   | "create-connection"
   | "create-sql-connection"
   | "create-object-connection"
+  | "create-sftp-connection"
   | "create-salesforce-connection";
 
 interface PaletteIntentState {

@@ -36,6 +36,7 @@ from . import (
     pipeline,
     plugin_registry,
     salesforce_source_registry,
+    sftp_source_registry,
     sql_source_registry,
     stream_connector,
 )
@@ -170,6 +171,27 @@ class RegisterObjectSourceRequest(BaseModel):
     workspace_id: Optional[str] = None
     object_key: Optional[str] = None
     key_prefix: Optional[str] = None
+    incremental: bool = False
+    schedule_interval_minutes: Optional[int] = None
+
+
+class RegisterSftpConnectionRequest(BaseModel):
+    name: str
+    host: str
+    port: int = 22
+    username: str
+    # Optional; if omitted on edit, existing secret is retained
+    password: Optional[str] = None
+    secret_ref: Optional[str] = None
+
+
+class RegisterSftpSourceRequest(BaseModel):
+    name: str
+    connection_name: str
+    format: str
+    workspace_id: Optional[str] = None
+    remote_path: Optional[str] = None
+    remote_prefix: Optional[str] = None
     incremental: bool = False
     schedule_interval_minutes: Optional[int] = None
 
@@ -357,23 +379,40 @@ async def _run_sync_for_dataset(
                     if object_source["incremental"]:
                         write_mode = "append"
                 else:
-                    sf_source = await salesforce_source_registry.get_source(deps.pool, tenant_id, dataset_name)
-                    if sf_source is None:
-                        raise HolonError.not_found(
-                            "DatasetNotFound", f"unknown dataset: {dataset_name}", dataset_name=dataset_name
+                    sftp_source = await sftp_source_registry.get_source(deps.pool, tenant_id, dataset_name)
+                    if sftp_source is not None:
+                        if sftp_source["status"] != "active":
+                            raise HolonError.conflict(
+                                "SourceDisabled",
+                                f"source {dataset_name!r} is disabled — enable it first",
+                                dataset_name=dataset_name,
+                            )
+                        connector_urn = build_urn(tenant_id, "global", "connector", f"sftp-{dataset_name}")
+                        read = functools.partial(
+                            sftp_source_registry.fetch_for_dataset, deps.pool, tenant_id, dataset_name
                         )
-                    if sf_source["status"] != "active":
-                        raise HolonError.conflict(
-                            "SourceDisabled",
-                            f"source {dataset_name!r} is disabled — enable it first",
-                            dataset_name=dataset_name,
+                        if sftp_source["incremental"]:
+                            write_mode = "append"
+                    else:
+                        sf_source = await salesforce_source_registry.get_source(deps.pool, tenant_id, dataset_name)
+                        if sf_source is None:
+                            raise HolonError.not_found(
+                                "DatasetNotFound",
+                                f"unknown dataset: {dataset_name}",
+                                dataset_name=dataset_name,
+                            )
+                        if sf_source["status"] != "active":
+                            raise HolonError.conflict(
+                                "SourceDisabled",
+                                f"source {dataset_name!r} is disabled — enable it first",
+                                dataset_name=dataset_name,
+                            )
+                        connector_urn = build_urn(tenant_id, "global", "connector", f"salesforce-{dataset_name}")
+                        read = functools.partial(
+                            salesforce_source_registry.fetch_for_dataset, deps.pool, tenant_id, dataset_name
                         )
-                    connector_urn = build_urn(tenant_id, "global", "connector", f"salesforce-{dataset_name}")
-                    read = functools.partial(
-                        salesforce_source_registry.fetch_for_dataset, deps.pool, tenant_id, dataset_name
-                    )
-                    if sf_source["cursor_property"]:
-                        write_mode = "append"
+                        if sf_source["cursor_property"]:
+                            write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
     try:
@@ -383,6 +422,8 @@ async def _run_sync_for_dataset(
     except sql_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except object_source_registry.SourceFetchError as exc:
+        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+    except sftp_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except salesforce_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
@@ -481,6 +522,14 @@ async def run_scheduler_forever(pool: asyncpg.Pool) -> None:
                             tenant_id=object_source["tenant_id"],
                             workspace_id=object_source.get("workspace_id") or WORKSPACE_ID,
                             interval=timedelta(minutes=object_source["schedule_interval_minutes"]),
+                        )
+                    sftp_sources = await sftp_source_registry.list_all_scheduled_sources(pool)
+                    for sftp_source in sftp_sources:
+                        await _run_if_due(
+                            dataset_name=sftp_source["name"],
+                            tenant_id=sftp_source["tenant_id"],
+                            workspace_id=sftp_source.get("workspace_id") or WORKSPACE_ID,
+                            interval=timedelta(minutes=sftp_source["schedule_interval_minutes"]),
                         )
                     sf_sources = await salesforce_source_registry.list_all_scheduled_sources(pool)
                     for sf_source in sf_sources:

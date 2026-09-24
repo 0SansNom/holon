@@ -6,10 +6,11 @@ import {
   useKafkaStreams,
   useSqlSources,
   useObjectSources,
+  useSftpSources,
   useSalesforceSources,
   useSyncs,
 } from "../../api/hooks";
-import type { GenericSource, SqlSource, ObjectSource, SalesforceSource } from "../../api/connectivity";
+import type { GenericSource, SqlSource, ObjectSource, SftpSource, SalesforceSource } from "../../api/connectivity";
 import { EmptyState } from "../common/ListPrimitives";
 import { OntologyTabHeader } from "../Ontology/OntologyTabLayout";
 import { SourceRow } from "./SourceRow";
@@ -20,6 +21,8 @@ import { SqlSourceRow } from "./SqlSourceRow";
 import { SqlSourceDialog } from "./SqlSourceDialog";
 import { ObjectSourceRow } from "./ObjectSourceRow";
 import { ObjectSourceDialog } from "./ObjectSourceDialog";
+import { SftpSourceRow } from "./SftpSourceRow";
+import { SftpSourceDialog } from "./SftpSourceDialog";
 import { SalesforceSourceRow } from "./SalesforceSourceRow";
 import { SalesforceSourceDialog } from "./SalesforceSourceDialog";
 import { ConnectSourceDialog } from "./ConnectSourceDialog";
@@ -31,21 +34,25 @@ export function DataSourcesTab() {
   const { data: streams } = useKafkaStreams();
   const { data: sqlSources } = useSqlSources();
   const { data: objectSources } = useObjectSources();
+  const { data: sftpSources } = useSftpSources();
   const { data: salesforceSources } = useSalesforceSources();
   const { data: syncs } = useSyncs();
   const [connectingRest, setConnectingRest] = useState(false);
   const [connectingSql, setConnectingSql] = useState(false);
   const [connectingObject, setConnectingObject] = useState(false);
+  const [connectingSftp, setConnectingSftp] = useState(false);
   const [connectingSalesforce, setConnectingSalesforce] = useState(false);
   const [editingSource, setEditingSource] = useState<GenericSource | null>(null);
   const [editingSqlSource, setEditingSqlSource] = useState<SqlSource | null>(null);
   const [editingObjectSource, setEditingObjectSource] = useState<ObjectSource | null>(null);
+  const [editingSftpSource, setEditingSftpSource] = useState<SftpSource | null>(null);
   const [editingSalesforceSource, setEditingSalesforceSource] = useState<SalesforceSource | null>(null);
   const [addingStream, setAddingStream] = useState(false);
 
   usePaletteCreateIntent("connect-source", setConnectingRest);
   usePaletteCreateIntent("connect-sql-source", setConnectingSql);
   usePaletteCreateIntent("connect-object-source", setConnectingObject);
+  usePaletteCreateIntent("connect-sftp-source", setConnectingSftp);
   usePaletteCreateIntent("connect-salesforce-source", setConnectingSalesforce);
   usePaletteCreateIntent("connect-stream", setAddingStream);
 
@@ -61,6 +68,7 @@ export function DataSourcesTab() {
   const restDialogOpen = connectingRest || editingSource !== null;
   const sqlDialogOpen = connectingSql || editingSqlSource !== null;
   const objectDialogOpen = connectingObject || editingObjectSource !== null;
+  const sftpDialogOpen = connectingSftp || editingSftpSource !== null;
   const salesforceDialogOpen = connectingSalesforce || editingSalesforceSource !== null;
 
   return (
@@ -68,7 +76,7 @@ export function DataSourcesTab() {
       <OntologyTabHeader
         description={
           <>
-            Connect REST, SQL, object storage, Salesforce, Kafka, or registered plugins — no deploy. Synced data is
+            Connect REST, SQL, object storage, SFTP, Salesforce, Kafka, or registered plugins — no deploy. Synced data is
             catalogued the same way; map it to an Object Type under Admin.
           </>
         }
@@ -80,6 +88,7 @@ export function DataSourcesTab() {
                 <MenuItem icon="globe-network" text="REST API" onClick={() => setConnectingRest(true)} />
                 <MenuItem icon="database" text="SQL database" onClick={() => setConnectingSql(true)} />
                 <MenuItem icon="cloud" text="Object storage" onClick={() => setConnectingObject(true)} />
+                <MenuItem icon="folder-shared" text="SFTP" onClick={() => setConnectingSftp(true)} />
                 <MenuItem icon="office" text="Salesforce" onClick={() => setConnectingSalesforce(true)} />
                 <MenuItem icon="pulse" text="Kafka stream" onClick={() => setAddingStream(true)} />
               </Menu>
@@ -178,6 +187,31 @@ export function DataSourcesTab() {
       </div>
 
       <div className="hl-flex-between hl-mb-sm">
+        <div className="hl-section-title">SFTP sources</div>
+        <Button small icon="add" minimal onClick={() => setConnectingSftp(true)}>
+          Connect SFTP
+        </Button>
+      </div>
+      <p className="hl-text-muted-sm hl-mb-sm">
+        Import CSV, NDJSON, or Parquet from a remote file or directory prefix over SFTP.
+      </p>
+      <div className="hl-source-list hl-mb-lg">
+        {sftpSources?.map((s) => (
+          <SftpSourceRow
+            key={s.name}
+            source={s}
+            lastSync={lastSyncByName.get(s.name)}
+            onEdit={() => setEditingSftpSource(s)}
+          />
+        ))}
+        {sftpSources?.length === 0 && (
+          <EmptyState actionLabel="Connect SFTP" onAction={() => setConnectingSftp(true)}>
+            No SFTP sources yet — add an SFTP connection under the Connections tab first.
+          </EmptyState>
+        )}
+      </div>
+
+      <div className="hl-flex-between hl-mb-sm">
         <div className="hl-section-title">Salesforce sources</div>
         <Button small icon="add" minimal onClick={() => setConnectingSalesforce(true)}>
           Connect Salesforce
@@ -238,6 +272,15 @@ export function DataSourcesTab() {
           onClose={() => {
             setConnectingObject(false);
             setEditingObjectSource(null);
+          }}
+        />
+      )}
+      {sftpDialogOpen && (
+        <SftpSourceDialog
+          editing={editingSftpSource}
+          onClose={() => {
+            setConnectingSftp(false);
+            setEditingSftpSource(null);
           }}
         />
       )}

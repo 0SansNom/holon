@@ -12,6 +12,7 @@ from .. import (
     generic_source_registry,
     object_source_registry,
     salesforce_source_registry,
+    sftp_source_registry,
     sql_source_registry,
 )
 from ..deps import (
@@ -33,6 +34,7 @@ async def _resolve_source_for_sync(tenant_id: str, dataset: str) -> Optional[dic
         generic_source_registry,
         sql_source_registry,
         object_source_registry,
+        sftp_source_registry,
         salesforce_source_registry,
     ):
         source = await registry.get_source(deps.pool, tenant_id, dataset)
