@@ -130,7 +130,9 @@ class RegisterSourceRequest(BaseModel):
 class RegisterSqlConnectionRequest(BaseModel):
     name: str
     host: str
-    port: int = 5432
+    dialect: str = "postgres"
+    # Optional; defaults to the dialect's standard port when omitted
+    port: Optional[int] = None
     database: str
     username: str
     # Optional; if omitted on edit, existing secret is retained

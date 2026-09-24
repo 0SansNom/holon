@@ -79,11 +79,44 @@ def assert_production_posture(*, service_name: str) -> None:
         )
 
     if "intelligence" in name:
+        # Beta opt-in (services/intelligence/BETA.md): Intelligence may be
+        # enabled in production only with explicit acknowledgement, a sandbox
+        # RuntimeClass attestation, finite spend caps, and pickle/plugin-register
+        # still off.
         if _truthy("HOLON_INTELLIGENCE_ENABLED"):
-            violations.append(
-                "HOLON_INTELLIGENCE_ENABLED must not be truthy in production "
-                "(experimental — leave unset/false until opted in)"
-            )
+            if not _truthy("HOLON_INTELLIGENCE_BETA_OPT_IN"):
+                violations.append(
+                    "HOLON_INTELLIGENCE_ENABLED requires HOLON_INTELLIGENCE_BETA_OPT_IN=true "
+                    "in production (see services/intelligence/BETA.md — leave both unset/false "
+                    "to keep Intelligence off)"
+                )
+            sandbox = (os.environ.get("HOLON_INTELLIGENCE_SANDBOX_RUNTIME") or "").strip()
+            if not sandbox:
+                violations.append(
+                    "HOLON_INTELLIGENCE_SANDBOX_RUNTIME must be set when Intelligence is "
+                    "enabled in production (e.g. gvisor — must match Deployment runtimeClassName)"
+                )
+            for spend_key in ("HOLON_INTELLIGENCE_RPM", "HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA"):
+                raw = (os.environ.get(spend_key) or "").strip()
+                if not raw:
+                    violations.append(
+                        f"{spend_key} must be set to an integer > 0 when Intelligence is "
+                        "enabled in production (no unlimited spend)"
+                    )
+                else:
+                    try:
+                        if int(raw) <= 0:
+                            violations.append(
+                                f"{spend_key} must be > 0 when Intelligence is enabled in production"
+                            )
+                    except ValueError:
+                        violations.append(f"{spend_key} must be an integer > 0")
+            isolation = (os.environ.get("HOLON_TOOL_PLUGIN_ISOLATION") or "subprocess").strip().lower()
+            if isolation != "subprocess":
+                violations.append(
+                    "HOLON_TOOL_PLUGIN_ISOLATION must be 'subprocess' when Intelligence is "
+                    "enabled in production (plugin invoke must not share the agent process)"
+                )
         if _truthy("HOLON_ALLOW_JOBLIB_MODELS"):
             violations.append(
                 "HOLON_ALLOW_JOBLIB_MODELS must not be truthy in production "
@@ -92,7 +125,8 @@ def assert_production_posture(*, service_name: str) -> None:
         if _truthy("HOLON_ALLOW_TOOL_PLUGIN_REGISTER"):
             violations.append(
                 "HOLON_ALLOW_TOOL_PLUGIN_REGISTER must not be truthy in production "
-                "(in-process plugin load is not a sandbox)"
+                "(dynamic register stays off; baked plugins still run under "
+                "HOLON_TOOL_PLUGIN_ISOLATION=subprocess)"
             )
 
     if violations:

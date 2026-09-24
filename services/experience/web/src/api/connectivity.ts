@@ -94,9 +94,12 @@ export interface RegisterConnectionRequest {
   secret_ref?: string;
 }
 
+export type SqlDialect = "postgres" | "mysql" | "mssql";
+
 export interface SqlConnection {
   tenant_id: string;
   name: string;
+  dialect: SqlDialect;
   host: string;
   port: number;
   database: string;
@@ -109,6 +112,7 @@ export interface SqlConnection {
 export interface RegisterSqlConnectionRequest {
   name: string;
   host: string;
+  dialect?: SqlDialect;
   port?: number;
   database: string;
   username: string;
@@ -140,7 +144,7 @@ export interface RegisterSqlSourceRequest {
   cursor_property?: string;
 }
 
-export type ObjectConnectionKind = "s3" | "azure";
+export type ObjectConnectionKind = "s3" | "azure" | "gcs";
 
 export interface ObjectConnection {
   tenant_id: string;

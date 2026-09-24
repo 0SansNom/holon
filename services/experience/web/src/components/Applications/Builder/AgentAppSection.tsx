@@ -47,7 +47,7 @@ export function AgentAppSection({
       {value.enabled && (
         <div className="hl-builder-fields">
           <p className="hl-text-muted-sm">
-            Ontology-grounded agent runtime (experimental) — not a general AI platform. The agent runs under
+            Ontology-grounded agent runtime (beta) — not a general AI platform. The agent runs under
             ingest-bot with your allowed Knowledge Actions as tools; open the App tab to chat after save.
           </p>
           <label className="hl-text-muted">
