@@ -232,7 +232,7 @@ async def lifespan(app: FastAPI):
     await app.state.pool.close()
 
 
-app = FastAPI(title="Holon — Ontology-grounded agent runtime (experimental)", lifespan=lifespan)
+app = FastAPI(title="Holon — Ontology-grounded agent runtime (beta)", lifespan=lifespan)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)

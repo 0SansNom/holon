@@ -85,7 +85,7 @@ export function ConnectionsTab() {
         </Button>
       </div>
       <p className="hl-text-muted-sm hl-mb-sm">
-        Postgres-wire databases (PostgreSQL, Redshift, CockroachDB). Required before registering a SQL source.
+        PostgreSQL, MySQL/MariaDB, or SQL Server. Required before registering a SQL source.
       </p>
       <div className="hl-source-list hl-mb-lg">
         {sqlConnections?.map((c) => (
@@ -105,7 +105,7 @@ export function ConnectionsTab() {
         </Button>
       </div>
       <p className="hl-text-muted-sm hl-mb-sm">
-        S3-compatible endpoints (MinIO, AWS S3). Required before registering an object source.
+        S3 / Azure Blob / GCS. Required before registering an object source.
       </p>
       <div className="hl-source-list">
         {objectConnections?.map((c) => (

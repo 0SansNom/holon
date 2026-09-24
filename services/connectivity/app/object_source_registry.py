@@ -1,4 +1,4 @@
-"""No-code object storage source registry for S3-compatible and Azure Blob endpoints."""
+"""No-code object storage source registry for S3-compatible, Azure Blob, and GCS."""
 
 from __future__ import annotations
 
@@ -25,7 +25,11 @@ from holon_common.secrets import resolve_optional
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-_CONNECTION_KINDS = frozenset({"s3", "azure"})
+_CONNECTION_KINDS = frozenset({"s3", "azure", "gcs"})
+_DEFAULT_GCS_ENDPOINT = "https://storage.googleapis.com"
+# Soft check that secret looks like a Google service-account JSON key
+# (CData OAuthJWTCertType=GOOGLEJSON / Foundry "JSON credentials").
+_GCS_JSON_MARKERS = ("private_key", "client_email", "type")
 
 _PUBLIC_CONNECTION_COLUMNS = (
     "tenant_id, name, kind, endpoint, region, access_key_id, path_style, "
@@ -70,6 +74,32 @@ def _default_azure_endpoint(account_name: str) -> str:
     return f"https://{account_name}.blob.core.windows.net"
 
 
+def _default_gcs_endpoint() -> str:
+    return _DEFAULT_GCS_ENDPOINT
+
+
+def _validate_gcs_service_account_json(raw: Optional[str]) -> None:
+    """Reject obviously non-JSON secrets early (full auth is checked at fetch)."""
+    if raw is None or not raw.strip():
+        return
+    stripped = raw.strip()
+    if not stripped.startswith("{"):
+        raise SourceConfigError(
+            "GCS secret_access_key must be a Google service account JSON key "
+            "(or use secret_ref pointing at one) — see ProjectId + GOOGLEJSON in CData/Foundry docs"
+        )
+    try:
+        import json
+
+        info = json.loads(stripped)
+    except ValueError as exc:
+        raise SourceConfigError(f"GCS service account JSON is not valid JSON: {exc}") from exc
+    if not isinstance(info, dict) or not all(k in info for k in _GCS_JSON_MARKERS):
+        raise SourceConfigError(
+            "GCS service account JSON must include type, client_email, and private_key"
+        )
+
+
 async def register_connection(
     pool: asyncpg.Pool,
     *,
@@ -89,14 +119,30 @@ async def register_connection(
     For kind='azure', access_key_id/secret_access_key hold the storage
     account name/key rather than S3 credentials, and endpoint defaults to
     the account's public Blob endpoint when omitted.
+
+    For kind='gcs', access_key_id is the GCP Project Id and
+    secret_access_key/secret_ref hold the service account JSON key
+    (Foundry "JSON credentials" / CData OAuthJWTCertType=GOOGLEJSON).
+    Endpoint defaults to https://storage.googleapis.com; region is the
+    default bucket location (e.g. US).
     """
     if kind not in _CONNECTION_KINDS:
         raise SourceConfigError(f"kind must be one of {sorted(_CONNECTION_KINDS)}")
     if not endpoint:
         if kind == "azure":
             endpoint = _default_azure_endpoint(access_key_id)
+        elif kind == "gcs":
+            endpoint = _default_gcs_endpoint()
         else:
             raise SourceConfigError("endpoint is required for kind='s3'")
+    if kind == "gcs":
+        if not access_key_id.strip():
+            raise SourceConfigError("access_key_id (GCP Project Id) is required for kind='gcs'")
+        # GCS does not use S3 path-style addressing.
+        path_style = False
+        if region == "us-east-1":
+            region = "US"
+        _validate_gcs_service_account_json(secret_access_key)
     hostname = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}").hostname
     existing = await pool.fetchrow(
         "SELECT secret_access_key, secret_ref FROM object_connection WHERE tenant_id = $1 AND name = $2",
@@ -115,6 +161,8 @@ async def register_connection(
         assert_production_requires_secret_ref(secret_ref, is_update=is_update)
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
+    if kind == "gcs" and secret_access_key:
+        _validate_gcs_service_account_json(secret_access_key)
 
     await pool.execute(
         """
@@ -301,6 +349,37 @@ async def is_registered(pool: asyncpg.Pool, tenant_id: str, name: str) -> bool:
     ) or False
 
 
+def _build_gcs_filesystem(*, project_id: str, service_account_json: str, location: str) -> pafs.FileSystem:
+    """Native GCS via PyArrow, authenticated with a service-account JSON key.
+
+    Mirrors Foundry "JSON credentials" / CData AuthScheme=OAuthJWT +
+    OAuthJWTCertType=GOOGLEJSON: mint an access token from the key, then
+    hand it to GcsFileSystem (avoids process-global ADC / temp files).
+    """
+    import json
+
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
+
+    try:
+        info = json.loads(service_account_json)
+    except ValueError as exc:
+        raise ValueError(f"invalid GCS service account JSON: {exc}") from exc
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
+    )
+    creds.refresh(Request())
+    if not creds.token or creds.expiry is None:
+        raise ValueError("failed to mint a GCS access token from the service account JSON")
+    return pafs.GcsFileSystem(
+        access_token=creds.token,
+        credential_token_expiration=creds.expiry,
+        project_id=project_id or info.get("project_id"),
+        default_bucket_location=location or "US",
+    )
+
+
 def _build_filesystem(
     *, kind: str, endpoint: str, access_key_id: str, secret_access_key: str, region: str, path_style: bool
 ) -> pafs.FileSystem:
@@ -309,6 +388,12 @@ def _build_filesystem(
         # name/key here; container addressing (container/blob) mirrors S3's
         # bucket/key, so the read/list code below is shared as-is.
         return pafs.AzureFileSystem(account_name=access_key_id, account_key=secret_access_key)
+    if kind == "gcs":
+        return _build_gcs_filesystem(
+            project_id=access_key_id,
+            service_account_json=secret_access_key,
+            location=region,
+        )
     parsed = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
     scheme = parsed.scheme or "https"
     endpoint_override = parsed.netloc or parsed.path

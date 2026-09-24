@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS object_connection (
     PRIMARY KEY (tenant_id, name)
 );
 
--- 's3' or 'azure' (Blob Storage).
+-- 's3', 'azure' (Blob Storage), or 'gcs' (Google Cloud Storage).
 ALTER TABLE object_connection ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 's3';
 
 CREATE TABLE IF NOT EXISTS object_source (
