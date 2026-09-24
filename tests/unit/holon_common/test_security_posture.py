@@ -27,6 +27,10 @@ def _clear_posture_env(monkeypatch) -> None:
         "HOLON_ALLOW_LOCAL_USER_MINT",
         "HOLON_SERVING_STORE_REQUIRE_MATERIALIZED",
         "HOLON_INTELLIGENCE_ENABLED",
+        "HOLON_INTELLIGENCE_BETA_OPT_IN",
+        "HOLON_INTELLIGENCE_SANDBOX_RUNTIME",
+        "HOLON_INTELLIGENCE_RPM",
+        "HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA",
         "HOLON_ALLOW_JOBLIB_MODELS",
         "HOLON_ALLOW_TOOL_PLUGIN_REGISTER",
         "HOLON_JWT_ALG",
@@ -84,11 +88,61 @@ def test_assert_production_posture_knowledge_requires_materialized(monkeypatch) 
         assert_production_posture(service_name="knowledge-platform")
 
 
-def test_assert_production_posture_rejects_enabled_intelligence(monkeypatch) -> None:
+def test_assert_production_posture_rejects_enabled_intelligence_without_beta_opt_in(
+    monkeypatch,
+) -> None:
     _base_prod(monkeypatch)
     monkeypatch.setenv("HOLON_MINTABLE_PRINCIPAL_URNS", "intelligence-indexer")
     monkeypatch.setenv("HOLON_INTELLIGENCE_ENABLED", "true")
-    with pytest.raises(ProductionSecurityError, match="HOLON_INTELLIGENCE_ENABLED"):
+    with pytest.raises(ProductionSecurityError, match="HOLON_INTELLIGENCE_BETA_OPT_IN"):
+        assert_production_posture(service_name="intelligence-platform")
+
+
+def test_assert_production_posture_rejects_beta_without_sandbox(monkeypatch) -> None:
+    _base_prod(monkeypatch)
+    monkeypatch.setenv("HOLON_MINTABLE_PRINCIPAL_URNS", "intelligence-indexer")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_ENABLED", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_BETA_OPT_IN", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_RPM", "30")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA", "200000")
+    with pytest.raises(ProductionSecurityError, match="HOLON_INTELLIGENCE_SANDBOX_RUNTIME"):
+        assert_production_posture(service_name="intelligence-platform")
+
+
+def test_assert_production_posture_rejects_beta_with_unlimited_spend(monkeypatch) -> None:
+    _base_prod(monkeypatch)
+    monkeypatch.setenv("HOLON_MINTABLE_PRINCIPAL_URNS", "intelligence-indexer")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_ENABLED", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_BETA_OPT_IN", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_SANDBOX_RUNTIME", "gvisor")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_RPM", "0")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA", "200000")
+    with pytest.raises(ProductionSecurityError, match="HOLON_INTELLIGENCE_RPM"):
+        assert_production_posture(service_name="intelligence-platform")
+
+
+def test_assert_production_posture_passes_intelligence_beta_opt_in(monkeypatch) -> None:
+    _base_prod(monkeypatch)
+    monkeypatch.setenv("HOLON_MINTABLE_PRINCIPAL_URNS", "intelligence-indexer")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_ENABLED", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_BETA_OPT_IN", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_SANDBOX_RUNTIME", "gvisor")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_RPM", "30")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA", "200000")
+    monkeypatch.setenv("HOLON_TOOL_PLUGIN_ISOLATION", "subprocess")
+    assert_production_posture(service_name="intelligence-platform")
+
+
+def test_assert_production_posture_rejects_inprocess_plugin_isolation(monkeypatch) -> None:
+    _base_prod(monkeypatch)
+    monkeypatch.setenv("HOLON_MINTABLE_PRINCIPAL_URNS", "intelligence-indexer")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_ENABLED", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_BETA_OPT_IN", "true")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_SANDBOX_RUNTIME", "gvisor")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_RPM", "30")
+    monkeypatch.setenv("HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA", "200000")
+    monkeypatch.setenv("HOLON_TOOL_PLUGIN_ISOLATION", "inprocess")
+    with pytest.raises(ProductionSecurityError, match="HOLON_TOOL_PLUGIN_ISOLATION"):
         assert_production_posture(service_name="intelligence-platform")
 
 

@@ -1,0 +1,80 @@
+name: soak-nightly
+
+# Intelligence soak / light chaos with fake LLM (no Anthropic spend).
+# Concurrent sessions, multi-turn reuse, pause resilience.
+# Excluded from PR e2e (`not soak`); run here on schedule or manually.
+
+on:
+  schedule:
+    - cron: "30 4 * * *" # 04:30 UTC (after llm-nightly)
+  workflow_dispatch:
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Create .env
+        run: |
+          sed -e 's/=change-me$/=ci-only-not-a-secret/' \
+              -e 's/^OPENSEARCH_ADMIN_PASSWORD=.*/OPENSEARCH_ADMIN_PASSWORD=Holon-CiOnly-Not-A-Secret-2026!/' \
+              -e 's/^HOLON_JWT_SECRET=.*/HOLON_JWT_SECRET=dev-only-walking-skeleton-secret/' \
+              .env.example > .env
+          echo "HOLON_EMBEDDING_PROVIDER=local" >> .env
+          echo "HOLON_INTELLIGENCE_RUNTIME=runc" >> .env
+          echo "HOLON_LLM_PROVIDER=fake" >> .env
+          echo "HOLON_INTELLIGENCE_ENABLED=true" >> .env
+          echo "HOLON_TOOL_PLUGIN_ISOLATION=subprocess" >> .env
+          grep '^POSTGRES_PASSWORD=' .env >> "$GITHUB_ENV"
+          grep '^OPENSEARCH_ADMIN_PASSWORD=' .env >> "$GITHUB_ENV"
+
+      - name: Build the frontend
+        run: |
+          cd services/experience/web
+          npm ci
+          npm run build
+
+      - name: Start the stack
+        run: make up
+
+      - name: Wait for platforms
+        run: |
+          for i in $(seq 1 90); do
+            all_ok=true
+            for port in 8001 8002 8003 8004 8005 8006; do
+              if ! curl -sf -m 2 "http://localhost:${port}/health" > /dev/null; then
+                all_ok=false
+                break
+              fi
+            done
+            if [ "$all_ok" = "true" ]; then
+              echo "All 6 platform services are healthy!"
+              break
+            fi
+            sleep 3
+          done
+          for port in 8001 8002 8003 8004 8005 8006; do
+            curl -sf -m 2 "http://localhost:${port}/health" > /dev/null \
+              || { echo "service on port ${port} never became healthy"; docker compose logs; exit 1; }
+          done
+
+      - name: Provision test fixtures
+        run: make provision-test-fixtures
+
+      - name: Install test deps
+        run: pip install -r tests/requirements.txt
+
+      - name: Soak suite
+        run: python3 -m pytest -q -m soak tests
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200 intelligence

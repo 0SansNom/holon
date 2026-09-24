@@ -6,7 +6,8 @@ Unit tests under ``tests/unit/`` should not need the compose stack.
 Markers (see ``pytest.ini``):
 - ``unit`` — no live stack
 - ``integration`` — compose HTTP / local infra
-- ``llm`` — real LLM spend (excluded from default CI)
+- ``llm`` — real LLM spend (optional nightly / local; excluded from PR CI)
+- ``soak`` — concurrent / burst Intelligence suite (nightly; excluded from default)
 """
 
 from __future__ import annotations
@@ -38,11 +39,15 @@ WORKSPACE_ID = "main"
 
 
 def pytest_collection_modifyitems(config, items) -> None:
-    """Auto-mark by path: ``tests/unit/`` → unit, else integration (unless llm-only)."""
+    """Auto-mark by path: ``tests/unit/`` → unit, ``tests/soak/`` → soak, else integration."""
     for item in items:
         path = Path(str(getattr(item, "path", item.fspath)))
         if "unit" in path.parts:
             item.add_marker(pytest.mark.unit)
+            continue
+        if "soak" in path.parts:
+            item.add_marker(pytest.mark.soak)
+            item.add_marker(pytest.mark.integration)
             continue
         markers = {m.name for m in item.iter_markers()}
         if "llm" in markers:

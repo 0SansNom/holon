@@ -23,6 +23,8 @@ x-app-env: &app-env
   # so every service would spam connection-refused forever.
   HOLON_OTLP_ENDPOINT: ${HOLON_OTLP_ENDPOINT:-}
   HOLON_INTELLIGENCE_ENABLED: ${HOLON_INTELLIGENCE_ENABLED:-true}
+  HOLON_INTELLIGENCE_RPM: ${HOLON_INTELLIGENCE_RPM:-30}
+  HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA: ${HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA:-200000}
   HOLON_LLM_PROVIDER: ${HOLON_LLM_PROVIDER:-anthropic}
   HOLON_METRICS_TOKEN: ${HOLON_METRICS_TOKEN:-}
   HOLON_CORS_ORIGINS: ${HOLON_CORS_ORIGINS:-http://localhost:5173,http://localhost:8004}
@@ -489,6 +491,8 @@ services:
       <<: *app-env
       PYTHONPATH: /app:/app/libs:/opt/holon-test-plugins
       HOLON_TOOL_PLUGIN_ENTRY_PREFIXES: ${HOLON_TOOL_PLUGIN_ENTRY_PREFIXES:-app.tool_plugins.,holon_test_plugins.}
+      HOLON_TOOL_PLUGIN_ISOLATION: ${HOLON_TOOL_PLUGIN_ISOLATION:-subprocess}
+      HOLON_TOOL_PLUGIN_TIMEOUT_SECONDS: ${HOLON_TOOL_PLUGIN_TIMEOUT_SECONDS:-15}
       HOLON_DB_URL: postgresql://holon:${POSTGRES_PASSWORD}@postgres:5432/holon_intelligence
       HOLON_MINTABLE_PRINCIPAL_URNS: intelligence-indexer,ingest-bot
       HOLON_KNOWLEDGE_URL: http://knowledge:8000
