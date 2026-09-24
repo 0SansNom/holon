@@ -201,3 +201,44 @@ def test_only_the_launching_principal_can_drive_their_agent_app_session(
         token=jdoe_token, body={"message": "hello"},
     )
     assert status == 404, missing
+
+
+def test_agent_app_reuses_one_session_across_turns(jdoe_token: str, ingest_bot_token: str) -> None:
+    """Multi-turn: second message keeps the same running session (fake LLM in e2e)."""
+    name = _unique_name("multi-turn-app")
+    status, app = _request(
+        "POST", f"{EXPERIENCE}/api/applications/{name}", token=jdoe_token,
+        body={"definition": _agent_app_definition(tools=[])},
+    )
+    assert status == 200, app
+    status, _ = _request("POST", f"{EXPERIENCE}/api/applications/{name}/promote", token=jdoe_token)
+    assert status == 200
+
+    status, session = _request("POST", f"{EXPERIENCE}/api/applications/{name}/agent-sessions", token=jdoe_token)
+    assert status == 200, session
+    session_urn = session["urn"]
+
+    status, turn1 = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{name}/agent-sessions/{session_urn}/turns",
+        token=jdoe_token,
+        body={"message": "hello from turn one"},
+    )
+    assert status == 200, turn1
+    assert turn1.get("sessionStatus") == "running", turn1
+    assert turn1["text"], turn1
+
+    status, turn2 = _request(
+        "POST",
+        f"{EXPERIENCE}/api/applications/{name}/agent-sessions/{session_urn}/turns",
+        token=jdoe_token,
+        body={"message": "and turn two on the same session"},
+    )
+    assert status == 200, turn2
+    assert turn2.get("sessionStatus") == "running", turn2
+    assert turn2["sessionUrn"] == session_urn, turn2
+
+    status, fetched = _request("GET", f"{INTELLIGENCE}/sessions/{session_urn}", token=ingest_bot_token)
+    assert status == 200, fetched
+    assert fetched["status"] == "running", fetched
+    assert fetched["consumed"]["iterations"] >= 2, fetched

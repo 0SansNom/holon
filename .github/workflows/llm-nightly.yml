@@ -1,7 +1,8 @@
 name: llm-nightly
 
-# Real Anthropic/Voyage spend — never on PR. Requires repo secrets
-# ANTHROPIC_API_KEY (+ optional VOYAGE_API_KEY). Skips cleanly when unset.
+# Optional real Anthropic/Voyage suite. Not a merge gate — PR CI stays on
+# fake LLM (zero spend). Skips cleanly when ANTHROPIC_API_KEY is unset.
+# Enable only if you choose to pay for a daily / manual signal.
 
 on:
   schedule:

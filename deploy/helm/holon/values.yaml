@@ -86,6 +86,14 @@ corsOrigins: ""
 # holonEnv empty = not production (compose/local DX). Set to "production" in prod.
 holonEnv: ""
 intelligenceEnabled: true
+# Production-only acknowledgement when enabling Intelligence under HOLON_ENV=production
+# (ADR 027). Ignored when intelligenceEnabled is false.
+intelligenceBetaOptIn: false
+intelligenceRpm: 30
+intelligenceDailyTokenQuota: 200000
+# Agent tool plugins: subprocess isolation (required in production when Intelligence is on).
+toolPluginIsolation: subprocess
+toolPluginTimeoutSeconds: 15
 llmProvider: anthropic
 servingStoreRequireMaterialized: true
 

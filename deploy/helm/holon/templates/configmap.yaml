@@ -47,6 +47,18 @@ data:
   HOLON_OIDC_WORKSPACE_GROUP_PREFIX: {{ .Values.oidc.workspaceGroupPrefix | default "workspace:" | quote }}
   {{- end }}
   HOLON_INTELLIGENCE_ENABLED: {{ .Values.intelligenceEnabled | default true | quote }}
+  {{- if .Values.intelligenceEnabled }}
+  {{- if .Values.intelligenceBetaOptIn }}
+  HOLON_INTELLIGENCE_BETA_OPT_IN: "true"
+  {{- end }}
+  {{- if .Values.services.intelligence.runtimeClassName }}
+  HOLON_INTELLIGENCE_SANDBOX_RUNTIME: {{ .Values.services.intelligence.runtimeClassName | quote }}
+  {{- end }}
+  HOLON_INTELLIGENCE_RPM: {{ .Values.intelligenceRpm | default 30 | quote }}
+  HOLON_INTELLIGENCE_DAILY_TOKEN_QUOTA: {{ .Values.intelligenceDailyTokenQuota | default 200000 | quote }}
+  HOLON_TOOL_PLUGIN_ISOLATION: {{ .Values.toolPluginIsolation | default "subprocess" | quote }}
+  HOLON_TOOL_PLUGIN_TIMEOUT_SECONDS: {{ .Values.toolPluginTimeoutSeconds | default 15 | quote }}
+  {{- end }}
   HOLON_LLM_PROVIDER: {{ .Values.llmProvider | default "anthropic" | quote }}
   HOLON_SERVING_STORE_REQUIRE_MATERIALIZED: {{ .Values.servingStoreRequireMaterialized | default true | quote }}
   {{- if .Values.corsOrigins }}
