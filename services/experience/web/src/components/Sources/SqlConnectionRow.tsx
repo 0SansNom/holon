@@ -31,6 +31,7 @@ export function SqlConnectionRow({ connection, onEdit }: { connection: SqlConnec
             <Tag minimal icon="database">
               SQL
             </Tag>
+            <Tag minimal>{connection.dialect ?? "postgres"}</Tag>
           </div>
         </div>
         <div className="hl-source-row-buttons">

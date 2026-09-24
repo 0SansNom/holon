@@ -32,6 +32,7 @@ seed:
 	$(COMPOSE) exec -T mongodb mongosh support_desk --quiet < tests/fixtures/mongo-init/init.js
 	$(COMPOSE) --profile test-fixtures up -d reviews-api
 	$(COMPOSE) --profile test-fixtures up -d oauth2-idp
+	$(COMPOSE) --profile test-fixtures up -d mysql
 	$(COMPOSE) --profile test-fixtures run --rm csv-seed
 	$(COMPOSE) --profile test-fixtures run --rm source-s3-seed
 	$(COMPOSE) --profile test-fixtures run --rm inventory-stream-seed
