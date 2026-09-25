@@ -81,9 +81,11 @@ def _normalize_api_version(api_version: str) -> str:
 
 
 def _require_soql(soql: str) -> str:
-    cleaned = (soql or "").strip()
+    cleaned = (soql or "").strip().rstrip(";").strip()
     if not cleaned:
         raise SourceConfigError("soql is required")
+    if ";" in cleaned:
+        raise SourceConfigError("soql must be a single SELECT statement — no semicolons")
     if not cleaned.lower().startswith("select"):
         raise SourceConfigError("soql must be a SELECT statement")
     return cleaned
