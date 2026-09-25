@@ -200,9 +200,10 @@ def test_fetch_for_dataset_mints_token_and_paginates() -> None:
         patch("app.salesforce_source_registry.assert_http_url"),
         patch("app.salesforce_source_registry.httpx.AsyncClient", return_value=client),
     ):
-        rows = asyncio.run(fetch_for_dataset(pool, "t1", "sf_accounts"))
+        rows, commit = asyncio.run(fetch_for_dataset(pool, "t1", "sf_accounts"))
 
     assert rows == [{"Id": "001A", "Name": "A"}, {"Id": "001B", "Name": "B"}]
+    assert commit is None
     assert client.get.await_count == 2
-    # token cache write
+    # token cache write only (cursor commit deferred until after Iceberg write)
     assert pool.execute.await_count >= 1

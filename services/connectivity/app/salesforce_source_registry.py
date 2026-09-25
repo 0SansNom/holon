@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import asyncpg
@@ -437,7 +437,9 @@ def _next_page_url(*, instance_url: str, next_records_url: Optional[str]) -> Opt
     return next_url
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, soql, api_version, cursor_property, last_cursor_value "
         "FROM salesforce_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -498,6 +500,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
                 instance_url=instance_url, next_records_url=body.get("nextRecordsUrl")
             )
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
         candidates = [
             r[row["cursor_property"]]
@@ -507,10 +510,14 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
         if candidates:
             new_cursor = str(max(candidates, key=_coerce_cursor))
             if new_cursor != row["last_cursor_value"]:
-                await pool.execute(
-                    "UPDATE salesforce_source SET last_cursor_value = $1 "
-                    "WHERE tenant_id = $2 AND name = $3",
-                    new_cursor, tenant_id, name,
-                )
 
-    return records
+                async def _commit_cursor(cursor: str = new_cursor) -> None:
+                    await pool.execute(
+                        "UPDATE salesforce_source SET last_cursor_value = $1 "
+                        "WHERE tenant_id = $2 AND name = $3",
+                        cursor, tenant_id, name,
+                    )
+
+                commit = _commit_cursor
+
+    return records, commit
