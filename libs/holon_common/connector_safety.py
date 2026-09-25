@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 from typing import Optional
 from urllib.parse import urlsplit
@@ -41,7 +42,24 @@ _BLOCKED_ENV_PREFIXES = (
     "HOLON_SAML",
     "HOLON_METRICS",
     "HOLON_DB",
+    "HOLON_SOURCE",
+    "HOLON_MONGO",
+    "HOLON_S3",
+    "HOLON_ICEBERG",
+    "HOLON_KAFKA",
+    "HOLON_OPENSEARCH",
+    "HOLON_QDRANT",
+    "HOLON_IDENTITY",
+    "HOLON_CONNECTIVITY",
+    "HOLON_KNOWLEDGE",
+    "HOLON_EXPERIENCE",
+    "HOLON_AUTOMATION",
+    "HOLON_INTELLIGENCE",
     "POSTGRES",
+    "DATABASE",
+    "MONGO",
+    "MYSQL",
+    "REDIS",
     "AWS_SECRET",
     "AWS_ACCESS",
     "MINIO",
@@ -187,11 +205,49 @@ def same_origin(left: str, right: str) -> bool:
     return (a.scheme, _hostname(a.hostname or ""), a.port) == (b.scheme, _hostname(b.hostname or ""), b.port)
 
 
+def _tenant_env_slug(tenant_id: str) -> str:
+    """Normalize a tenant id for HOLON_CONN_<TENANT>_* env names."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", (tenant_id or "").strip()).strip("_").upper()
+    if not slug:
+        raise ConnectorSafetyError("secret_ref requires a tenant_id")
+    return slug
+
+
 def _assert_not_platform_secret_name(name: str) -> None:
     upper = name.upper()
     for prefix in _BLOCKED_ENV_PREFIXES:
         if upper == prefix.rstrip("_") or upper.startswith(prefix):
             raise ConnectorSafetyError("secret_ref must not resolve a platform secret")
+
+
+def _assert_env_secret_name(name: str, *, tenant_id: str) -> None:
+    """Restrict env: refs so tenants cannot read platform or peer secrets.
+
+    Production: only ``HOLON_CONN_<TENANT>_*`` (tenant-scoped allowlist).
+    Non-production: same allowlist *or* a name that is not a blocked platform
+    prefix (keeps local ``env:ERP_PASSWORD`` demos working).
+    """
+    from .security_posture import is_production
+
+    if not tenant_id or not str(tenant_id).strip():
+        raise ConnectorSafetyError("secret_ref requires a tenant_id")
+    upper = (name or "").strip().upper()
+    if not upper:
+        raise ConnectorSafetyError("env secret_ref name is required")
+    expected = f"HOLON_CONN_{_tenant_env_slug(tenant_id)}_"
+    if upper.startswith(expected):
+        return
+    if is_production():
+        raise ConnectorSafetyError(
+            f"env secret_ref in production must start with {expected!r} "
+            "(or use vault:/k8s:/aws: with a tenant-scoped path)"
+        )
+    _assert_not_platform_secret_name(name)
+    # Non-prod still forbids any other HOLON_* (platform process env).
+    if upper.startswith("HOLON_"):
+        raise ConnectorSafetyError(
+            f"env secret_ref must start with {expected!r} — other HOLON_* vars are platform secrets"
+        )
 
 
 def assert_no_inline_connector_secret(value: Optional[str], *, field: str) -> None:
@@ -235,7 +291,7 @@ def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
     scheme, rest = ref.split(":", 1)
     if scheme == "env":
         name = rest.removeprefix("env:") if rest.startswith("env:") else rest
-        _assert_not_platform_secret_name(name)
+        _assert_env_secret_name(name, tenant_id=tenant_id)
         return
     if scheme in {"vault", "k8s", "aws"}:
         if not tenant_id:
