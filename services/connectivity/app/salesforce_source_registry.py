@@ -30,6 +30,11 @@ _DEFAULT_LOGIN_URL = "https://login.salesforce.com"
 _DEFAULT_API_VERSION = "v59.0"
 _API_VERSION_RE = re.compile(r"^v\d+(?:\.\d+)?$")
 _CURSOR_PROPERTY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+# ISO-8601 date or datetime (optionally with 'Z' or a +/-HH:MM offset), which
+# SOQL requires as an unquoted Date/DateTime literal on Date/DateTime fields.
+_ISO_DATE_OR_DATETIME_SHAPE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$"
+)
 _MAX_PAGES = 100
 _OAUTH2_REFRESH_MARGIN_SECONDS = 60
 _OAUTH2_DEFAULT_TTL_SECONDS = 300
@@ -111,10 +116,27 @@ def _require_cursor_property(cursor_property: Optional[str]) -> Optional[str]:
     return name
 
 
+def _looks_like_iso_date_or_datetime(value: str) -> bool:
+    """True for genuine ISO-8601 dates/datetimes (validated, not just shaped)."""
+    if not _ISO_DATE_OR_DATETIME_SHAPE_RE.match(value):
+        return False
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        datetime.datetime.fromisoformat(candidate)
+    except ValueError:
+        return False
+    return True
+
+
 def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> str:
     """Append an incremental filter without rewriting the user's SELECT list."""
-    literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
-    clause = f"{cursor_property} > '{literal}'"
+    if _looks_like_iso_date_or_datetime(last_cursor_value):
+        # SOQL Date/DateTime literals must be unquoted — a quoted string
+        # would compare against a Date/DateTime field as a type mismatch.
+        clause = f"{cursor_property} > {last_cursor_value}"
+    else:
+        literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
+        clause = f"{cursor_property} > '{literal}'"
     lowered = soql.lower()
     # Insert before ORDER BY / LIMIT / OFFSET when present.
     for keyword in (" order by ", " limit ", " offset "):
