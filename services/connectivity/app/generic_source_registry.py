@@ -6,7 +6,7 @@ Allows registering REST data sources, authentication headers, record extraction 
 from __future__ import annotations
 
 import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import asyncpg
@@ -465,7 +465,9 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
     return token
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT base_url, auth_header_name, auth_header_value, secret_ref, record_path, next_page_path, connection_name, "
         "cursor_property, incremental_param, last_cursor_value "
@@ -534,12 +536,17 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
                 else None
             )
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
         new_cursor = _compute_new_cursor(records, row["cursor_property"], row["last_cursor_value"])
         if new_cursor != row["last_cursor_value"]:
-            await pool.execute(
-                "UPDATE generic_rest_source SET last_cursor_value = $1 WHERE tenant_id = $2 AND name = $3",
-                new_cursor, tenant_id, name,
-            )
 
-    return records
+            async def _commit_cursor(cursor: str = new_cursor) -> None:
+                await pool.execute(
+                    "UPDATE generic_rest_source SET last_cursor_value = $1 WHERE tenant_id = $2 AND name = $3",
+                    cursor, tenant_id, name,
+                )
+
+            commit = _commit_cursor
+
+    return records, commit
