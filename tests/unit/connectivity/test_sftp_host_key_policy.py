@@ -20,12 +20,14 @@ class _AutoAddPolicy:
     pass
 
 
-# Host unit tests mock paramiko (not always installed in the host venv).
+# Host unit tests mock paramiko only when it isn't installed — never replace a
+# real one in sys.modules, or later tests in the same session get the stub.
 _paramiko = types.ModuleType("paramiko")
 _paramiko.RejectPolicy = _RejectPolicy  # type: ignore[attr-defined]
 _paramiko.AutoAddPolicy = _AutoAddPolicy  # type: ignore[attr-defined]
 _paramiko.SSHClient = MagicMock  # type: ignore[attr-defined]
-sys.modules["paramiko"] = _paramiko
+_paramiko.SSHException = Exception  # type: ignore[attr-defined]
+sys.modules.setdefault("paramiko", _paramiko)
 sys.modules.setdefault("asyncpg", MagicMock())
 sys.modules.setdefault("pyarrow", MagicMock())
 sys.modules.setdefault("pyarrow.csv", MagicMock())
@@ -35,7 +37,16 @@ sys.modules.setdefault("pyarrow.lib", MagicMock())
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "connectivity"))
 
+from app import sftp_source_registry  # noqa: E402
 from app.sftp_source_registry import _configure_host_key_policy  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_policies(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Patch the policy classes on whichever paramiko the module imported
+    # (real or stub), restored after each test.
+    monkeypatch.setattr(sftp_source_registry.paramiko, "RejectPolicy", _RejectPolicy)
+    monkeypatch.setattr(sftp_source_registry.paramiko, "AutoAddPolicy", _AutoAddPolicy)
 
 
 @pytest.fixture(autouse=True)
