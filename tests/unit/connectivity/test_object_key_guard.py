@@ -34,6 +34,20 @@ def test_object_key_rejects_traversal_and_junk() -> None:
     with pytest.raises(SourceConfigError):
         _require_object_key("landing/../secret", what="key_prefix")
     with pytest.raises(SourceConfigError):
-        _require_object_key("landing/foo;rm", what="object_key")
-    with pytest.raises(SourceConfigError):
         _require_object_key("", what="object_key")
+
+
+def test_object_key_accepts_hive_partitions_and_common_characters() -> None:
+    _require_object_key("landing/year=2024/month=01/", what="key_prefix")
+    _require_object_key("exports/Q1 2024/report+final.csv", what="object_key")
+    # Keys go to pyarrow's filesystem API, never a shell: ';' is just a legal S3 key byte.
+    _require_object_key("landing/foo;rm", what="object_key")
+
+
+def test_object_key_rejects_control_characters_and_empty_segments() -> None:
+    with pytest.raises(SourceConfigError):
+        _require_object_key("landing/\x00evil.csv", what="object_key")
+    with pytest.raises(SourceConfigError):
+        _require_object_key("landing//a.csv", what="object_key")
+    with pytest.raises(SourceConfigError):
+        _require_object_key("landing\\a.csv", what="object_key")
