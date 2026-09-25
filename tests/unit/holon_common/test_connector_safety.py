@@ -15,6 +15,7 @@ from holon_common.connector_safety import (  # noqa: E402
     ConnectorSafetyError,
     assert_connector_host,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_http_url,
     assert_kafka_topic,
     assert_no_inline_connector_secret,
@@ -280,6 +281,22 @@ def test_production_requires_secret_ref_on_create(monkeypatch) -> None:
 def test_production_secret_ref_not_required_outside_production(monkeypatch) -> None:
     monkeypatch.delenv("HOLON_ENV", raising=False)
     assert_production_requires_secret_ref(None, is_update=False)
+
+
+def test_destination_change_requires_secret() -> None:
+    assert_destination_change_requires_secret(
+        is_update=True, destination_changed=False, secret_provided=False
+    )
+    assert_destination_change_requires_secret(
+        is_update=True, destination_changed=True, secret_provided=True
+    )
+    assert_destination_change_requires_secret(
+        is_update=False, destination_changed=True, secret_provided=False
+    )
+    with pytest.raises(ConnectorSafetyError, match="destination changed"):
+        assert_destination_change_requires_secret(
+            is_update=True, destination_changed=True, secret_provided=False
+        )
 
 
 def test_unwrap_mapped_ip() -> None:
