@@ -17,7 +17,7 @@ sys.modules.setdefault("asyncpg", MagicMock())
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "connectivity"))
 
-from app.sql_source_registry import _bind_cursor_value  # noqa: E402
+from app.sql_source_registry import _bind_cursor_value, _cursor_to_str  # noqa: E402
 
 
 def test_bind_cursor_value_coerces_integers() -> None:
@@ -71,3 +71,24 @@ def test_bind_cursor_value_leaves_invalid_date_shape_as_string() -> None:
 def test_bind_cursor_value_leaves_plain_strings_as_strings() -> None:
     assert _bind_cursor_value("some-opaque-id") == "some-opaque-id"
     assert _bind_cursor_value("abc123") == "abc123"
+
+
+def test_bind_cursor_value_parses_str_of_a_datetime() -> None:
+    # Cursors saved before _cursor_to_str used str(datetime): space, not 'T'.
+    value = datetime.datetime(2024, 1, 1, 12, 0, 0, 123456, tzinfo=datetime.timezone.utc)
+    assert _bind_cursor_value(str(value)) == value
+
+
+def test_bind_cursor_value_parses_offset_without_colon() -> None:
+    result = _bind_cursor_value("2024-01-15T10:30:00.000+0000")
+    assert result == datetime.datetime(2024, 1, 15, 10, 30, tzinfo=datetime.timezone.utc)
+
+
+def test_cursor_round_trips_through_storage() -> None:
+    for value in (
+        datetime.datetime(2024, 1, 1, 12, 0, 0, 123456, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2024, 1, 1, 12, 0, 0),
+    ):
+        assert _bind_cursor_value(_cursor_to_str(value)) == value
+    assert _cursor_to_str(datetime.date(2024, 1, 1)) == "2024-01-01"
+    assert _cursor_to_str(42) == "42"
