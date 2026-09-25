@@ -25,8 +25,10 @@ from holon_common.secrets import resolve_optional
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-# Object keys / prefixes: same shape as SFTP remote paths, trailing slash OK for prefixes.
-_OBJECT_KEY_RE = re.compile(r"^/?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*/?$")
+# Object keys / prefixes: any printable segments (Hive partitions like
+# `year=2024/`, spaces, `+` are all common in real buckets), no empty or
+# `..` segments, no control characters; trailing slash OK for prefixes.
+_OBJECT_KEY_RE = re.compile(r"^/?[^/\x00-\x1f\x7f\\]+(/[^/\x00-\x1f\x7f\\]+)*/?$")
 _CONNECTION_KINDS = frozenset({"s3", "azure", "gcs"})
 _DEFAULT_GCS_ENDPOINT = "https://storage.googleapis.com"
 # Soft check that secret looks like a Google service-account JSON key
