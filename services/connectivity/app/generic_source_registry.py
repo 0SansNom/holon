@@ -15,6 +15,7 @@ import httpx
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
@@ -97,8 +98,8 @@ async def register_connection(
         )
 
     existing = await pool.fetchrow(
-        "SELECT auth_header_value, oauth2_client_secret, secret_ref FROM generic_rest_connection "
-        "WHERE tenant_id = $1 AND name = $2",
+        "SELECT auth_type, oauth2_token_url, oauth2_client_id, auth_header_value, oauth2_client_secret, secret_ref "
+        "FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
     is_update = existing is not None
@@ -108,6 +109,21 @@ async def register_connection(
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
         assert_no_inline_connector_secret(oauth2_client_secret, field="oauth2_client_secret")
+        if existing is not None:
+            destination_changed = (
+                existing["auth_type"] != auth_type
+                or (existing["oauth2_token_url"] or None) != (oauth2_token_url or None)
+                or (existing["oauth2_client_id"] or None) != (oauth2_client_id or None)
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=(
+                    auth_header_value is not None
+                    or oauth2_client_secret is not None
+                    or secret_ref is not None
+                ),
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if auth_header_value is None and existing is not None:
@@ -197,9 +213,20 @@ async def register_source(
     reserved_dataset_names: frozenset[str] = frozenset(),
 ) -> dict:
     """Verify dataset name availability and validate REST source parameters."""
+    existing_source = await pool.fetchrow(
+        "SELECT base_url, auth_header_value FROM generic_rest_source WHERE tenant_id = $1 AND name = $2",
+        tenant_id, name,
+    )
     try:
         assert_http_url(base_url, resolve=False)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
+        if existing_source is not None and not connection_name:
+            # Inline-auth sources: retargeting base_url must re-supply the header secret.
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=existing_source["base_url"] != base_url,
+                secret_provided=auth_header_value is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if connection_name and (auth_header_name or auth_header_value):

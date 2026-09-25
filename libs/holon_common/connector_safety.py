@@ -280,6 +280,24 @@ def assert_no_inline_connector_secret(value: Optional[str], *, field: str) -> No
         )
 
 
+def assert_destination_change_requires_secret(
+    *,
+    is_update: bool,
+    destination_changed: bool,
+    secret_provided: bool,
+) -> None:
+    """Refuse keeping a stored secret when the remote destination moved.
+
+    Connections/sources are tenant-shared: without this check, an editor can
+    retarget host/URL and have Holon send the existing credential there.
+    """
+    if is_update and destination_changed and not secret_provided:
+        raise ConnectorSafetyError(
+            "destination changed — re-enter the secret or secret_ref "
+            "(stored credentials cannot follow a new host)"
+        )
+
+
 def assert_production_requires_secret_ref(ref: Optional[str], *, is_update: bool) -> None:
     """Brand-new connector credentials in production must be a secret_ref.
 
