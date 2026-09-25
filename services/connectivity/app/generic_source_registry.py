@@ -19,8 +19,8 @@ from holon_common.connector_safety import (
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
     same_origin,
+    resolve_connector_secret,
 )
-from holon_common.secrets import resolve_optional
 
 # Columns safe to return to caller (excludes raw credential values).
 _PUBLIC_COLUMNS = (
@@ -50,6 +50,14 @@ class SourceConfigError(ValueError):
 
 class SourceFetchError(ValueError):
     pass
+
+
+def _resolve_secret(ref, tenant_id: str):
+    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
+    try:
+        return resolve_connector_secret(ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
 
 
 class ConnectionConflictError(ValueError):
@@ -430,7 +438,7 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
         if (expires_at - now).total_seconds() > _OAUTH2_REFRESH_MARGIN_SECONDS:
             return connection["oauth2_cached_token"]
 
-    client_secret = resolve_optional(connection["secret_ref"]) or connection["oauth2_client_secret"]
+    client_secret = _resolve_secret(connection["secret_ref"], tenant_id) or connection["oauth2_client_secret"]
     form = {
         "grant_type": "client_credentials",
         "client_id": connection["oauth2_client_id"],
@@ -493,10 +501,10 @@ async def fetch_for_dataset(
             token = await _oauth2_bearer_token(pool, tenant_id, row["connection_name"], connection)
             headers["Authorization"] = f"Bearer {token}"
         else:
-            value = resolve_optional(connection["secret_ref"]) or connection["auth_header_value"]
+            value = _resolve_secret(connection["secret_ref"], tenant_id) or connection["auth_header_value"]
             headers[connection["auth_header_name"]] = value
     elif row["auth_header_name"]:
-        value = resolve_optional(row["secret_ref"]) or row["auth_header_value"]
+        value = _resolve_secret(row["secret_ref"], tenant_id) or row["auth_header_value"]
         if value:
             headers[row["auth_header_name"]] = value
 

@@ -24,8 +24,8 @@ from holon_common.connector_safety import (
     assert_connector_secret_ref,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    resolve_connector_secret,
 )
-from holon_common.secrets import resolve_optional
 from holon_common.security_posture import is_production
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,14 @@ class SourceConfigError(ValueError):
 
 class SourceFetchError(ValueError):
     pass
+
+
+def _resolve_secret(ref, tenant_id: str):
+    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
+    try:
+        return resolve_connector_secret(ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
 
 
 class ConnectionInUseError(ValueError):
@@ -473,7 +481,7 @@ async def fetch_for_dataset(
         assert_connector_host(connection["host"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    password = resolve_optional(connection["secret_ref"]) or connection["password"] or ""
+    password = _resolve_secret(connection["secret_ref"], tenant_id) or connection["password"] or ""
 
     try:
         rows, new_cursor = await asyncio.to_thread(

@@ -205,11 +205,23 @@ def same_origin(left: str, right: str) -> bool:
     return (a.scheme, _hostname(a.hostname or ""), a.port) == (b.scheme, _hostname(b.hostname or ""), b.port)
 
 
+# HOLON_CONN_<TENANT>__<KEY>: the tenant segment never contains "__", so the
+# first "__" is an unambiguous delimiter (no tenant can claim a peer's names).
+_TENANT_ENV_NAME_RE = re.compile(r"^HOLON_CONN_([A-Z0-9]+(?:_[A-Z0-9]+)*)__([A-Z0-9][A-Z0-9_]*)$")
+_TENANT_ENV_SLUG_RE = re.compile(r"^[A-Z0-9]+(?:_[A-Z0-9]+)*$")
+
+
 def _tenant_env_slug(tenant_id: str) -> str:
-    """Normalize a tenant id for HOLON_CONN_<TENANT>_* env names."""
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", (tenant_id or "").strip()).strip("_").upper()
-    if not slug:
-        raise ConnectorSafetyError("secret_ref requires a tenant_id")
+    """Map a tenant id to its HOLON_CONN_<TENANT>__* segment ('-' → '_').
+
+    Injective only when the result has no '__' and no edge '_' (tenant ids
+    with '--' or a trailing '-'); those tenants must use vault:/k8s:/aws:.
+    """
+    slug = (tenant_id or "").strip().upper().replace("-", "_")
+    if not _TENANT_ENV_SLUG_RE.match(slug):
+        raise ConnectorSafetyError(
+            f"tenant {tenant_id!r} cannot use env: secret_refs — use vault:/k8s:/aws: instead"
+        )
     return slug
 
 
@@ -223,7 +235,7 @@ def _assert_not_platform_secret_name(name: str) -> None:
 def _assert_env_secret_name(name: str, *, tenant_id: str) -> None:
     """Restrict env: refs so tenants cannot read platform or peer secrets.
 
-    Production: only ``HOLON_CONN_<TENANT>_*`` (tenant-scoped allowlist).
+    Production: only ``HOLON_CONN_<TENANT>__*`` (tenant-scoped allowlist).
     Non-production: same allowlist *or* a name that is not a blocked platform
     prefix (keeps local ``env:ERP_PASSWORD`` demos working).
     """
@@ -234,8 +246,10 @@ def _assert_env_secret_name(name: str, *, tenant_id: str) -> None:
     upper = (name or "").strip().upper()
     if not upper:
         raise ConnectorSafetyError("env secret_ref name is required")
-    expected = f"HOLON_CONN_{_tenant_env_slug(tenant_id)}_"
-    if upper.startswith(expected):
+    slug = _tenant_env_slug(tenant_id)
+    expected = f"HOLON_CONN_{slug}__"
+    match = _TENANT_ENV_NAME_RE.match(upper)
+    if match and match.group(1) == slug:
         return
     if is_production():
         raise ConnectorSafetyError(
@@ -304,22 +318,38 @@ def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
             if not path.startswith(prefix):
                 raise ConnectorSafetyError(f"vault secret_ref must start with {prefix!r}")
         elif scheme == "k8s":
+            # '.' delimits the suffix: tenant ids are [a-z0-9-], so a '-'
+            # suffix would let tenant "acme" claim "holon-connector-acme-corp".
             expected = f"holon-connector-{tenant_id}"
-            if path != expected and not path.startswith(f"{expected}-"):
+            if path != expected and not path.startswith(f"{expected}."):
                 raise ConnectorSafetyError(
-                    f"k8s secret_ref must be {expected} or {expected}-<suffix>"
+                    f"k8s secret_ref must be {expected} or {expected}.<suffix>"
                 )
         else:
             expected = f"holon-connector-{tenant_id}"
             prefix = f"connectors/{tenant_id}/"
-            if not (path.startswith(prefix) or path == expected or path.startswith(f"{expected}-")):
+            if not (path.startswith(prefix) or path == expected):
                 raise ConnectorSafetyError(
-                    f"aws secret_ref must start with {prefix!r} or {expected}"
+                    f"aws secret_ref must start with {prefix!r} or be {expected}"
                 )
         if key:
             _assert_not_platform_secret_name(key)
         return
     raise ConnectorSafetyError(f"unsupported secret_ref scheme: {scheme!r}")
+
+
+def resolve_connector_secret(ref: Optional[str], *, tenant_id: str) -> Optional[str]:
+    """Re-check a stored secret_ref at use time, then resolve it.
+
+    Refs saved before a guard tightened must not keep resolving platform or
+    peer-tenant secrets, so validation runs on every fetch, not only on save.
+    """
+    if ref is None or ref == "":
+        return None
+    assert_connector_secret_ref(ref, tenant_id=tenant_id)
+    from .secrets import get_secret
+
+    return get_secret(ref)
 
 
 def assert_kafka_topic(topic: str) -> None:
