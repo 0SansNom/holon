@@ -22,8 +22,8 @@ from holon_common.connector_safety import (
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
     same_origin,
+    resolve_connector_secret,
 )
-from holon_common.secrets import resolve_optional
 
 _DEFAULT_LOGIN_URL = "https://login.salesforce.com"
 _DEFAULT_API_VERSION = "v59.0"
@@ -56,6 +56,14 @@ class SourceConfigError(ValueError):
 
 class SourceFetchError(ValueError):
     pass
+
+
+def _resolve_secret(ref, tenant_id: str):
+    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
+    try:
+        return resolve_connector_secret(ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
 
 
 class ConnectionInUseError(ValueError):
@@ -373,7 +381,7 @@ async def _bearer_token(
     ):
         return connection["oauth2_cached_token"], connection["instance_url"]
 
-    client_secret = resolve_optional(connection["secret_ref"]) or connection["client_secret"]
+    client_secret = _resolve_secret(connection["secret_ref"], tenant_id) or connection["client_secret"]
     if not client_secret:
         raise SourceFetchError(
             f"connection {connection_name!r}: client_secret (or secret_ref) is required"

@@ -133,7 +133,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
             id="sql-connection-secret-ref"
             value={secretRef}
             onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:HOLON_CONN_ACME_ERP_PASSWORD"
+            placeholder="env:HOLON_CONN_<TENANT>__ERP_PASSWORD"
           />
         </FormGroup>
         {error && (

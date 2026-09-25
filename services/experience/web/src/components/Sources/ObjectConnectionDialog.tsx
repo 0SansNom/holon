@@ -157,10 +157,10 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
             onChange={(e) => setSecretRef(e.target.value)}
             placeholder={
               isAzure
-                ? "env:HOLON_CONN_ACME_AZURE_STORAGE_KEY"
+                ? "env:HOLON_CONN_<TENANT>__AZURE_STORAGE_KEY"
                 : isGcs
-                  ? "env:HOLON_CONN_ACME_GCS_SERVICE_ACCOUNT_JSON"
-                  : "env:HOLON_CONN_ACME_S3_SECRET_KEY"
+                  ? "env:HOLON_CONN_<TENANT>__GCS_SERVICE_ACCOUNT_JSON"
+                  : "env:HOLON_CONN_<TENANT>__S3_SECRET_KEY"
             }
           />
         </FormGroup>
