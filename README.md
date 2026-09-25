@@ -39,7 +39,7 @@ Six FastAPI services, each with its own Postgres:
 | Service | Port | Role |
 |---|---|---|
 | `identity` | 8001 | Principals, tokens, ReBAC/ABAC |
-| `connectivity` | 8002 | Connectors (Postgres, MongoDB, REST, SQL, Kafka) → Iceberg |
+| `connectivity` | 8002 | Connectors (SQL, object storage, REST, SFTP, Salesforce, Kafka) → Iceberg |
 | `knowledge` | 8003 | Ontology, governed reads/writes, Actions, search |
 | `experience` | 8004 | Web UI and Application Builder |
 | `automation` | 8005 | Workflows — sagas and compensation |
