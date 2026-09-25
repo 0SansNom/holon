@@ -36,12 +36,12 @@ _SELECT_INTO = re.compile(
 _FOR_LOCK = re.compile(r"\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b", re.IGNORECASE)
 # MySQL / MariaDB exfiltration and side-effect helpers.
 _MYSQL_FORBIDDEN = re.compile(
-    r"\b(load_file\s*\(|into\s+outfile\b|into\s+dumpfile\b|benchmark\s*\()",
+    r"\b(load_file\s*\(|into\s+outfile\b|into\s+dumpfile\b|benchmark\s*\(|sleep\s*\()",
     re.IGNORECASE,
 )
-# SQL Server file / OLE / extended-proc helpers.
+# SQL Server file / OLE / extended-proc / linked-server helpers.
 _MSSQL_FORBIDDEN = re.compile(
-    r"\b(openrowset\s*\(|opendatasource\s*\(|xp_\w+|sp_oacreate\b)",
+    r"\b(openrowset\s*\(|opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
     re.IGNORECASE,
 )
 
@@ -396,6 +396,10 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     else:
         sql = row["query"]
         args = []
+        try:
+            _require_select_only(sql, dialect)
+        except SourceConfigError as exc:
+            raise SourceFetchError(str(exc)) from exc
 
     try:
         rows = await sql_drivers.fetch_dicts(

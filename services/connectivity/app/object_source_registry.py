@@ -25,6 +25,8 @@ from holon_common.secrets import resolve_optional
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+# Object keys / prefixes: same shape as SFTP remote paths, trailing slash OK for prefixes.
+_OBJECT_KEY_RE = re.compile(r"^/?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*/?$")
 _CONNECTION_KINDS = frozenset({"s3", "azure", "gcs"})
 _DEFAULT_GCS_ENDPOINT = "https://storage.googleapis.com"
 # Soft check that secret looks like a Google service-account JSON key
@@ -67,6 +69,14 @@ def _require_bucket(bucket: str) -> None:
     if not bucket or not _BUCKET_RE.match(bucket):
         raise SourceConfigError(
             f"invalid bucket {bucket!r} — must be 3-63 chars, lowercase letters/digits/dot/hyphen"
+        )
+
+
+def _require_object_key(path: str, *, what: str) -> None:
+    if not path or not _OBJECT_KEY_RE.match(path) or ".." in path.split("/"):
+        raise SourceConfigError(
+            f"invalid {what} {path!r} — use a plain object key or prefix "
+            "(e.g. 'landing/data.csv' or 'landing/'), no '..'"
         )
 
 
@@ -232,6 +242,10 @@ async def register_source(
     if format not in _FORMATS:
         raise SourceConfigError(f"format must be one of {sorted(_FORMATS)}")
     _require_bucket(bucket)
+    if object_key:
+        _require_object_key(object_key, what="object_key")
+    if key_prefix:
+        _require_object_key(key_prefix, what="key_prefix")
     if incremental and object_key:
         raise SourceConfigError("incremental only applies to key_prefix sources, not a single object_key")
     if await get_connection(pool, tenant_id, connection_name) is None:

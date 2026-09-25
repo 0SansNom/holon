@@ -45,6 +45,8 @@ def test_mysql_file_helpers_are_rejected() -> None:
         _require_select_only("SELECT LOAD_FILE('/etc/passwd')", "mysql")
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT id FROM orders INTO OUTFILE '/tmp/x'", "mysql")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT SLEEP(5)", "mysql")
 
 
 def test_mssql_file_helpers_are_rejected() -> None:
@@ -52,6 +54,8 @@ def test_mssql_file_helpers_are_rejected() -> None:
         _require_select_only("SELECT * FROM OPENROWSET('x', 'y')", "mssql")
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT xp_cmdshell('dir')", "mssql")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT * FROM OPENQUERY(linked, 'SELECT 1')", "mssql")
 
 
 def test_default_ports_per_dialect() -> None:
