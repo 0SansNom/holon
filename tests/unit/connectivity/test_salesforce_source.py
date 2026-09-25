@@ -74,20 +74,29 @@ def test_apply_cursor_appends_where_or_and() -> None:
 
 
 def test_apply_cursor_datetime_variants_are_unquoted() -> None:
-    # Bare date.
+    # Bare date stays a Date literal.
     assert (
         _apply_cursor("SELECT Id FROM Account", "LastModifiedDate", "2024-01-01")
         == "SELECT Id FROM Account WHERE LastModifiedDate > 2024-01-01"
     )
-    # Datetime with fractional seconds and 'Z'.
+    # Fractional seconds are dropped (cursor moves back < 1s: re-read, never skip).
     assert (
         _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-01T12:34:56.789Z")
-        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T12:34:56.789Z"
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T12:34:56Z"
     )
-    # Datetime with a numeric UTC offset instead of 'Z'.
+    # Offsets are normalized to UTC 'Z'.
     assert (
         _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-01T12:34:56+02:00")
-        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T12:34:56+02:00"
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T10:34:56Z"
+    )
+
+
+def test_apply_cursor_accepts_the_format_salesforce_actually_returns() -> None:
+    # REST query JSON returns DateTime fields as ...000+0000 (no colon in the
+    # offset); that value is what gets stored as last_cursor_value.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-15T10:30:00.000+0000")
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-15T10:30:00Z"
     )
 
 
