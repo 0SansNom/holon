@@ -388,6 +388,12 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
       HOLON_S3_ENDPOINT: http://minio:9000
+      # The `sftp` test-fixtures container has no pinned host key, so the SFTP
+      # connector's default fail-closed RejectPolicy would break the
+      # integration suite. Explicit opt-in for local/demo/CI only — never set
+      # in production (the connector refuses AutoAdd there regardless).
+      HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY: ${HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY:-1}
+      HOLON_SFTP_KNOWN_HOSTS: ${HOLON_SFTP_KNOWN_HOSTS:-}
     volumes:
       - ./libs:/app/libs
       - ./services/connectivity/app:/app/app
