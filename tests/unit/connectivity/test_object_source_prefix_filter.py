@@ -145,3 +145,12 @@ def test_fetch_sync_key_prefix_incremental_still_filters_by_format() -> None:
 
     assert rows == [{"path": "bucket/landing/2024-01-02.ndjson"}]
     assert cursor == "landing/2024-01-02.ndjson"
+
+
+def test_matches_format_accepts_compressed_and_uppercase_extensions() -> None:
+    assert osr._matches_format("bucket/landing/2024.csv.gz", "csv")
+    assert osr._matches_format("bucket/landing/REPORT.CSV", "csv")
+    assert osr._matches_format("bucket/landing/events.ndjson.zst", "ndjson")
+    assert not osr._matches_format("bucket/landing/_SUCCESS", "parquet")
+    assert not osr._matches_format("bucket/landing/.part-0.parquet.crc", "parquet")
+    assert not osr._matches_format("bucket/landing/notes.txt", "csv")
