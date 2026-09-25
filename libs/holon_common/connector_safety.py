@@ -138,7 +138,13 @@ def _platform_blocked_ips() -> set[str]:
     return blocked
 
 
-def assert_connector_host(host: str) -> None:
+def assert_connector_host(host: str, *, resolve: bool = True) -> None:
+    """Reject platform / private / loopback targets for tenant connectors.
+
+    When ``resolve`` is False (config registration), only the hostname
+    blocklist and IP literals are checked — DNS failures are deferred to
+    fetch so admins can save a source before the remote host is up.
+    """
     name = _hostname(host)
     if not name:
         raise ConnectorSafetyError("host is required")
@@ -146,7 +152,7 @@ def assert_connector_host(host: str) -> None:
         raise ConnectorSafetyError(f"host {host!r} is not allowed for connectors")
 
     allow_private = name in _allowed_hosts()
-    platform_ips = _platform_blocked_ips()
+    platform_ips = _platform_blocked_ips() if resolve else set()
 
     try:
         literal = ipaddress.ip_address(name.strip("[]"))
@@ -159,18 +165,21 @@ def assert_connector_host(host: str) -> None:
             raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
         return
 
+    if not resolve:
+        return
+
     for ip in _resolve_ips(name):
         if _is_blocked_ip(ip, allow_private=allow_private) or str(ip) in platform_ips:
             raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
 
 
-def assert_http_url(url: str) -> None:
+def assert_http_url(url: str, *, resolve: bool = True) -> None:
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
         raise ConnectorSafetyError("URL must be http or https")
     if not parsed.hostname:
         raise ConnectorSafetyError("URL missing host")
-    assert_connector_host(parsed.hostname)
+    assert_connector_host(parsed.hostname, resolve=resolve)
 
 
 def same_origin(left: str, right: str) -> bool:
