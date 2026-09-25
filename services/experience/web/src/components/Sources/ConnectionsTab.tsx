@@ -105,7 +105,7 @@ export function ConnectionsTab() {
         </Button>
       </div>
       <p className="hl-text-muted-sm hl-mb-sm">
-        PostgreSQL, MySQL/MariaDB, or SQL Server. Required before registering a SQL source.
+        PostgreSQL, MySQL/MariaDB, SQL Server, or Snowflake. Required before registering a SQL source.
       </p>
       <div className="hl-source-list hl-mb-lg">
         {sqlConnections?.map((c) => (

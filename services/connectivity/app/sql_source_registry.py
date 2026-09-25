@@ -1,4 +1,4 @@
-"""No-code SQL source registry for Postgres, MySQL/MariaDB, and SQL Server."""
+"""No-code SQL source registry for Postgres, MySQL/MariaDB, SQL Server, and Snowflake."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ _ISO_CURSOR_RE = re.compile(
 )
 
 _PUBLIC_CONNECTION_COLUMNS = (
-    "tenant_id, name, dialect, host, port, database, username, "
+    "tenant_id, name, dialect, host, port, database, warehouse, username, "
     "(password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
     "created_by_urn, created_at"
 )
@@ -188,6 +188,7 @@ async def register_connection(
     created_by_urn: str,
     dialect: str = "postgres",
     port: Optional[int] = None,
+    warehouse: Optional[str] = None,
     password: Optional[str] = None,
     secret_ref: Optional[str] = None,
 ) -> dict:
@@ -196,6 +197,15 @@ async def register_connection(
         dialect = sql_drivers.normalize_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
+    if dialect == "snowflake":
+        try:
+            host = sql_drivers.normalize_snowflake_host(host)
+        except ValueError as exc:
+            raise SourceConfigError(str(exc)) from exc
+        if warehouse is not None:
+            warehouse = warehouse.strip() or None
+    else:
+        warehouse = None
     if port is None:
         port = sql_drivers.default_port_for(dialect)
 
@@ -233,18 +243,19 @@ async def register_connection(
     await pool.execute(
         """
         INSERT INTO sql_connection
-            (tenant_id, name, dialect, host, port, database, username, password, secret_ref, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            (tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
             dialect = EXCLUDED.dialect,
             host = EXCLUDED.host,
             port = EXCLUDED.port,
             database = EXCLUDED.database,
+            warehouse = EXCLUDED.warehouse,
             username = EXCLUDED.username,
             password = EXCLUDED.password,
             secret_ref = EXCLUDED.secret_ref
         """,
-        tenant_id, name, dialect, host, port, database, username, password, secret_ref, created_by_urn,
+        tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -441,7 +452,7 @@ async def fetch_for_dataset(
         raise SourceFetchError(f"no active SQL source registered as {name!r}")
 
     connection = await pool.fetchrow(
-        "SELECT dialect, host, port, database, username, password, secret_ref "
+        "SELECT dialect, host, port, database, warehouse, username, password, secret_ref "
         "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, row["connection_name"],
     )
@@ -484,6 +495,7 @@ async def fetch_for_dataset(
             password=password,
             sql=sql,
             args=args,
+            warehouse=connection["warehouse"],
         )
     except Exception as exc:
         # Drivers raise a mix of OSError, asyncpg/aiomysql/aioodbc errors.

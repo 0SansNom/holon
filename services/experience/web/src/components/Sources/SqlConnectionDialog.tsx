@@ -18,12 +18,14 @@ const DEFAULT_PORTS: Record<SqlDialect, number> = {
   postgres: 5432,
   mysql: 3306,
   mssql: 1433,
+  snowflake: 443,
 };
 
 const DIALECT_LABELS: Record<SqlDialect, string> = {
   postgres: "PostgreSQL",
   mysql: "MySQL / MariaDB",
   mssql: "SQL Server",
+  snowflake: "Snowflake",
 };
 
 function isDefaultPort(port: string, dialect: SqlDialect): boolean {
@@ -39,6 +41,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
   const [host, setHost] = useState(editing?.host ?? "");
   const [port, setPort] = useState(editing != null ? String(editing.port) : String(DEFAULT_PORTS.postgres));
   const [database, setDatabase] = useState(editing?.database ?? "");
+  const [warehouse, setWarehouse] = useState(editing?.warehouse ?? "");
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState("");
   const [secretRef, setSecretRef] = useState("");
@@ -61,6 +64,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         host,
         port: Number(port) || DEFAULT_PORTS[dialect],
         database,
+        warehouse: dialect === "snowflake" ? warehouse.trim() || undefined : undefined,
         username,
         password: requireSecretRef ? undefined : password || undefined,
         secret_ref: secretRef || undefined,
@@ -72,6 +76,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
   }
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(password));
+  const isSnowflake = dialect === "snowflake";
 
   return (
     <Dialog isOpen title={isEditing ? "Edit SQL connection" : "New SQL connection"} onClose={onClose} style={{ width: 480 }}>
@@ -79,7 +84,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "PostgreSQL, MySQL/MariaDB, or SQL Server. Register once, point several SQL sources at it."}
+            : "PostgreSQL, MySQL/MariaDB, SQL Server, or Snowflake. Register once, point several SQL sources at it."}
         </p>
         <FormGroup label="Name" helperText="e.g. erp_prod — referenced by SQL sources, not a dataset name">
           <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_db" disabled={isEditing} />
@@ -98,8 +103,19 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
             ))}
           </HTMLSelect>
         </FormGroup>
-        <FormGroup label="Host">
-          <InputGroup value={host} onChange={(e) => setHost(e.target.value)} placeholder="db.example.com" />
+        <FormGroup
+          label={isSnowflake ? "Account / host" : "Host"}
+          helperText={
+            isSnowflake
+              ? "Account locator (xy12345.eu-central-1) or full *.snowflakecomputing.com hostname"
+              : undefined
+          }
+        >
+          <InputGroup
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            placeholder={isSnowflake ? "xy12345.eu-central-1" : "db.example.com"}
+          />
         </FormGroup>
         <FormGroup label="Port">
           <InputGroup
@@ -112,6 +128,18 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <FormGroup label="Database">
           <InputGroup value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="analytics" />
         </FormGroup>
+        {isSnowflake && (
+          <FormGroup
+            label="Warehouse"
+            helperText="Optional compute warehouse. Leave blank to use the user default."
+          >
+            <InputGroup
+              value={warehouse}
+              onChange={(e) => setWarehouse(e.target.value)}
+              placeholder="COMPUTE_WH"
+            />
+          </FormGroup>
+        )}
         <FormGroup label="Username">
           <InputGroup value={username} onChange={(e) => setUsername(e.target.value)} placeholder="readonly_user" />
         </FormGroup>
