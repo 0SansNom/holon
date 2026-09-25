@@ -193,6 +193,22 @@ def _bind_cursor_value(value: str) -> Any:
     return parsed if parsed is not None else value
 
 
+def _row_get(row: dict, key: str, *, dialect: str) -> Any:
+    """Read a column from a driver row dict.
+
+    Snowflake DictCursor returns unquoted column names in UPPER case, so
+    a cursor_property entered as `updated_at` must still match `UPDATED_AT`.
+    """
+    if key in row:
+        return row[key]
+    if dialect == "snowflake":
+        upper = key.upper()
+        for name, value in row.items():
+            if isinstance(name, str) and name.upper() == upper:
+                return value
+    return None
+
+
 async def register_connection(
     pool: asyncpg.Pool,
     *,
@@ -519,7 +535,12 @@ async def fetch_for_dataset(
 
     commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
-        candidates = [r[row["cursor_property"]] for r in rows if r.get(row["cursor_property"]) is not None]
+        cursor_key = row["cursor_property"]
+        candidates = [
+            value
+            for r in rows
+            if (value := _row_get(r, cursor_key, dialect=dialect)) is not None
+        ]
         if candidates:
             new_cursor = _cursor_to_str(max(candidates))
             if new_cursor != row["last_cursor_value"]:

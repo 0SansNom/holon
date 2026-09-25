@@ -147,7 +147,10 @@ export function SqlSourceDialog({ editing, onClose }: { editing: SqlSource | nul
           </HTMLSelect>
         </FormGroup>
         {form.mode === "table" ? (
-          <FormGroup label="Table name" helperText="Schema-qualified if needed, e.g. public.orders">
+          <FormGroup
+            label="Table name"
+            helperText="Schema-qualified if needed, e.g. public.orders (Snowflake folds unquoted names to UPPERCASE)"
+          >
             <InputGroup
               value={form.tableName}
               onChange={(e) => setForm((f) => ({ ...f, tableName: e.target.value }))}

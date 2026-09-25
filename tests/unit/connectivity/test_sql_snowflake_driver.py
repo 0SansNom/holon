@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "connectivity"))
 
 from app import sql_drivers  # noqa: E402
+from app.sql_source_registry import _row_get  # noqa: E402
 
 
 def test_normalize_snowflake_host_expands_account() -> None:
@@ -111,3 +112,13 @@ def test_snowflake_fetch_omits_empty_warehouse() -> None:
         assert "warehouse" not in kwargs
 
     asyncio.run(_run())
+
+
+def test_row_get_matches_snowflake_uppercase_keys() -> None:
+    row = {"UPDATED_AT": "2024-01-02", "ID": 1}
+    assert _row_get(row, "updated_at", dialect="snowflake") == "2024-01-02"
+    assert _row_get(row, "UPDATED_AT", dialect="snowflake") == "2024-01-02"
+    assert _row_get(row, "missing", dialect="snowflake") is None
+    # Other dialects stay case-sensitive.
+    assert _row_get(row, "updated_at", dialect="postgres") is None
+    assert _row_get({"updated_at": 1}, "updated_at", dialect="postgres") == 1
