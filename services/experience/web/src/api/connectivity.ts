@@ -79,6 +79,7 @@ export interface GenericConnection {
   auth_header_name: string;
   has_auth_header_value: boolean;
   has_secret_ref?: boolean;
+  allowed_origin: string | null;
   created_by_urn: string;
   created_at: string;
 }
@@ -92,6 +93,9 @@ export interface RegisterConnectionRequest {
   // the create form, not by this type.
   auth_header_value?: string;
   secret_ref?: string;
+  // Origin the credential may be sent to, e.g. "https://api.hubapi.com".
+  // Changing it on edit requires re-entering the secret.
+  allowed_origin?: string;
 }
 
 export type SqlDialect = "postgres" | "mysql" | "mssql";

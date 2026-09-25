@@ -112,6 +112,9 @@ class RegisterConnectionRequest(BaseModel):
     oauth2_client_secret: Optional[str] = None
     oauth2_scope: Optional[str] = None
     secret_ref: Optional[str] = None
+    # Origin (scheme://host[:port]) sources using this connection must target.
+    # Required on create; omitted on edit keeps the stored one.
+    allowed_origin: Optional[str] = None
 
 
 class RegisterSourceRequest(BaseModel):
