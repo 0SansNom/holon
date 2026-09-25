@@ -98,7 +98,7 @@ export interface RegisterConnectionRequest {
   allowed_origin?: string;
 }
 
-export type SqlDialect = "postgres" | "mysql" | "mssql";
+export type SqlDialect = "postgres" | "mysql" | "mssql" | "snowflake";
 
 export interface SqlConnection {
   tenant_id: string;
@@ -107,6 +107,7 @@ export interface SqlConnection {
   host: string;
   port: number;
   database: string;
+  warehouse?: string | null;
   username: string;
   has_password: boolean;
   created_by_urn: string;
@@ -119,6 +120,7 @@ export interface RegisterSqlConnectionRequest {
   dialect?: SqlDialect;
   port?: number;
   database: string;
+  warehouse?: string;
   username: string;
   password?: string;
   secret_ref?: string;

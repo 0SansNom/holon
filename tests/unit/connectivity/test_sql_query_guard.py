@@ -62,14 +62,17 @@ def test_default_ports_per_dialect() -> None:
     assert sql_drivers.default_port_for("postgres") == 5432
     assert sql_drivers.default_port_for("mysql") == 3306
     assert sql_drivers.default_port_for("mssql") == 1433
+    assert sql_drivers.default_port_for("snowflake") == 443
 
 
 def test_normalize_dialect_rejects_unknown() -> None:
     with pytest.raises(ValueError):
         sql_drivers.normalize_dialect("oracle")
+    assert sql_drivers.normalize_dialect("snowflake") == "snowflake"
 
 
 def test_cursor_placeholders() -> None:
     assert sql_drivers.cursor_placeholder("postgres") == "$1"
     assert sql_drivers.cursor_placeholder("mysql") == "%s"
     assert sql_drivers.cursor_placeholder("mssql") == "?"
+    assert sql_drivers.cursor_placeholder("snowflake") == "%s"

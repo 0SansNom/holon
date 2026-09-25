@@ -38,3 +38,4 @@ def test_quote_identifier_dialects() -> None:
     assert quote_identifier("orders", dialect="postgres") == '"orders"'
     assert quote_identifier("public.orders", dialect="mysql") == "`public`.`orders`"
     assert quote_identifier("dbo.orders", dialect="mssql") == "[dbo].[orders]"
+    assert quote_identifier("ANALYTICS.ORDERS", dialect="snowflake") == '"ANALYTICS"."ORDERS"'

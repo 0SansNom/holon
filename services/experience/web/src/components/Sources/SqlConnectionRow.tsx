@@ -26,6 +26,9 @@ export function SqlConnectionRow({ connection, onEdit }: { connection: SqlConnec
           <strong>{connection.name}</strong>
           <div className="hl-mono hl-text-muted-sm hl-mt-xs">
             {connection.username}@{connection.host}:{connection.port}/{connection.database}
+            {connection.dialect === "snowflake" && connection.warehouse
+              ? ` · wh=${connection.warehouse}`
+              : ""}
           </div>
           <div className="hl-tag-row hl-mt-xs">
             <Tag minimal icon="database">
