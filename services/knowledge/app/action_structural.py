@@ -430,6 +430,43 @@ def property_edit_keys(edits: Optional[dict]) -> list[str]:
     return [k for k in edits.keys() if k != STRUCTURAL_KEY]
 
 
+def property_changes(edits, prior_values) -> list[dict]:
+    """Before/after for an invocation. Skips the structural bag as a property."""
+    if isinstance(edits, str):
+        edits = json.loads(edits)
+    if isinstance(prior_values, str):
+        prior_values = json.loads(prior_values)
+    if not isinstance(edits, dict):
+        return []
+    prior = prior_values if isinstance(prior_values, dict) else {}
+    changes: list[dict] = []
+    for key in property_edit_keys(edits):
+        entry = prior.get(key)
+        if isinstance(entry, dict) and "existed" in entry:
+            before = entry.get("value") if entry.get("existed") else None
+        else:
+            before = None
+        changes.append({"property": key, "before": before, "after": edits.get(key)})
+    structural = edits.get(STRUCTURAL_KEY)
+    if isinstance(structural, dict):
+        for link in structural.get("links") or []:
+            changes.append({
+                "property": link.get("relation_type") or "link",
+                "before": None,
+                "after": (
+                    f"{link.get('kind')} {link.get('source_object_type')}:{link.get('source_id')}"
+                    f" → {link.get('target_object_type')}:{link.get('target_id')}"
+                ),
+            })
+        for obj in structural.get("objects") or []:
+            changes.append({
+                "property": obj.get("object_type") or "object",
+                "before": None,
+                "after": f"{obj.get('kind')} {obj.get('instance_id')}",
+            })
+    return changes
+
+
 def split_result_for_response(result: dict) -> dict:
     """Drop internal keys before splatting into the HTTP response."""
     return {k: v for k, v in result.items() if k != STRUCTURAL_KEY}

@@ -51,6 +51,32 @@ def test_valid_sync_completed_payload_validates():
         },
     )
     assert model.snapshot_id == 42
+    assert model.producer is None
+
+
+def test_sync_completed_accepts_a_pipeline_producer():
+    model = registry.validate(
+        "connectivity.sync.completed",
+        1,
+        {
+            "connector_urn": "hl:acme:global:connector:pipeline-transform",
+            "dataset_name": "customers",
+            "dataset_urn": "hl:acme:main:dataset:customers",
+            "dataset_version_urn": "hl:acme:main:dataset-version:42",
+            "iceberg_namespace": "holon",
+            "iceberg_table": "customers",
+            "snapshot_id": 42,
+            "row_count": 100,
+            "location": "s3://holon-warehouse/holon/customers",
+            "producer": {
+                "kind": "pipeline",
+                "pipeline_name": "customers",
+                "step_name": "clean",
+                "function_name": "drop_nulls",
+            },
+        },
+    )
+    assert model.producer["function_name"] == "drop_nulls"
 
 
 def test_unknown_event_type_rejected():

@@ -31,6 +31,15 @@ export function useDatasetVersions(datasetName: string, enabled: boolean) {
   });
 }
 
+export function useDatasetSchema(datasetName: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.datasetSchema(datasetName),
+    queryFn: () => knowledgeApi.getDatasetSchema(datasetName),
+    enabled: enabled && !!datasetName,
+    retry: false,
+  });
+}
+
 export function useDatasetStats(datasetName: string, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.datasetStats(datasetName),
@@ -441,6 +450,16 @@ export function useBranchReviews(kind: BranchKind, resourceName: string, branchN
 
 export function useLineage(urn: string | undefined) {
   return useOptionalSuspenseQuery(!!urn, queryKeys.lineage(urn as string), () => knowledgeApi.getLineage(urn as string));
+}
+
+export function useLineageGraph(
+  urn: string | undefined,
+  depth = 4,
+  direction: "both" | "upstream" | "downstream" = "both",
+) {
+  return useOptionalSuspenseQuery(!!urn, queryKeys.lineageGraph(urn as string, depth, direction), () =>
+    knowledgeApi.getLineageGraph(urn as string, depth, direction),
+  );
 }
 
 export function useObjectGraph(objectType: string, id: string | number | undefined, hops = 2) {

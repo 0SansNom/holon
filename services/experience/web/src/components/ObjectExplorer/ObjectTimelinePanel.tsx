@@ -49,6 +49,18 @@ export function ObjectTimelinePanel({
               </span>
             </span>
             <span className="hl-timeline-reason">{event.reason}</span>
+            {(event.changes?.length ?? 0) > 0 && (
+              <div className="hl-timeline-changes">
+                {event.changes.map((change) => (
+                  <div key={`${change.property}-${String(change.after)}`} className="hl-timeline-change">
+                    <span className="hl-mono">{change.property}</span>
+                    <span className="hl-timeline-before">{formatChange(change.before)}</span>
+                    <span aria-hidden="true">→</span>
+                    <span className="hl-timeline-after">{formatChange(change.after)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             {event.reverted && (
               <Tag minimal intent="none">
                 reverted
@@ -67,4 +79,10 @@ export function ObjectTimelinePanel({
       </div>
     </div>
   );
+}
+
+function formatChange(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
 }
