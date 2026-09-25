@@ -369,11 +369,21 @@ async def unified_search(
 
 
 @router.get("/lineage/{urn:path}")
-async def get_lineage(urn: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
+async def get_lineage(
+    urn: str,
+    principal: Principal = Depends(core.current_principal),
+    view: str = Query(default="edges"),
+    depth: int = Query(default=lineage.DEFAULT_GRAPH_DEPTH, ge=1, le=lineage.MAX_GRAPH_DEPTH),
+    direction: str = Query(default="both"),
+) -> list[dict] | dict:
     """`urn` can be a dataset-version or an ObjectType, on either side of a
     `maps_to`/`derived_from` edge — same "spans everything, no single
     object_type_urn to check" situation `unified_search` above already
     handles, so this reduces to the same workspace `read` permission.
+
+    `view=edges` is the one-hop list. `view=graph` walks ancestors and
+    descendants, collapsed to one node per dataset, with schema, producer,
+    and staleness.
     """
     decision = await core.authz.authorize(
         principal,
@@ -383,4 +393,6 @@ async def get_lineage(urn: str, principal: Principal = Depends(core.current_prin
     )
     if not decision.allowed:
         raise HolonError.forbidden("PermissionDenied", decision.reason)
+    if view == "graph":
+        return await lineage.graph(core.pool, principal.tenant_id, urn, depth=depth, direction=direction)
     return await lineage.edges_touching(core.pool, principal.tenant_id, urn)
