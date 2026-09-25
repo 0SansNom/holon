@@ -140,6 +140,15 @@ def test_assert_http_url_rejects_non_http() -> None:
         assert_http_url("ftp://files.example.com/x")
 
 
+def test_assert_http_url_resolve_false_skips_dns_but_blocks_literals() -> None:
+    assert_http_url("https://idp.example.com/token", resolve=False)
+    assert_http_url("http://this-host-does-not-exist.invalid/x", resolve=False)
+    with pytest.raises(ConnectorSafetyError):
+        assert_http_url("http://127.0.0.1/secret", resolve=False)
+    with pytest.raises(ConnectorSafetyError):
+        assert_http_url("http://identity/internal", resolve=False)
+
+
 def test_inline_secret_allowed_outside_production(monkeypatch) -> None:
     monkeypatch.delenv("HOLON_ENV", raising=False)
     assert_no_inline_connector_secret("super-secret", field="password")

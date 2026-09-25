@@ -50,8 +50,11 @@ def test_normalize_api_version() -> None:
 
 def test_require_soql_must_be_select() -> None:
     assert _require_soql("  SELECT Id FROM Account  ").startswith("SELECT")
+    assert _require_soql("SELECT Id FROM Account;") == "SELECT Id FROM Account"
     with pytest.raises(SourceConfigError, match="SELECT"):
         _require_soql("DELETE FROM Account")
+    with pytest.raises(SourceConfigError, match="semicolon"):
+        _require_soql("SELECT Id FROM Account; DELETE FROM Account")
 
 
 def test_apply_cursor_appends_where_or_and() -> None:

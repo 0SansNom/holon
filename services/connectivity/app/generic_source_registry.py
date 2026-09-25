@@ -95,6 +95,8 @@ async def register_connection(
     )
     is_update = existing is not None
     try:
+        if oauth2_token_url:
+            assert_http_url(oauth2_token_url, resolve=False)
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
         assert_no_inline_connector_secret(oauth2_client_secret, field="oauth2_client_secret")
@@ -188,6 +190,7 @@ async def register_source(
 ) -> dict:
     """Verify dataset name availability and validate REST source parameters."""
     try:
+        assert_http_url(base_url, resolve=False)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
