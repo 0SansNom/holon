@@ -25,14 +25,18 @@ def require_identifier(name: str, *, what: str = "identifier") -> str:
 
 
 def quote_identifier(name: str, *, dialect: str = "postgres") -> str:
-    """Quote each dot-separated part. Safe only after `require_identifier`.
+    """Render each dot-separated part for the dialect. Safe only after `require_identifier`.
 
-    Dialect quoting: postgres/snowflake → "x", mysql → `x`, mssql → [x].
+    Dialect quoting: postgres → "x", mysql → `x`, mssql → [x].
+    Snowflake leaves identifiers unquoted so the server folds them to
+    UPPERCASE (quoted names would be case-sensitive and miss default objects).
     """
     require_identifier(name)
     d = (dialect or "postgres").lower()
     if d not in _VALID_QUOTE_DIALECTS:
         d = "postgres"
+    if d == "snowflake":
+        return name
     if d == "mysql":
         return ".".join(f"`{part}`" for part in name.split("."))
     if d == "mssql":
