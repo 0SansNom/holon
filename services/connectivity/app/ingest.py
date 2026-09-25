@@ -335,7 +335,13 @@ async def _run_sync_for_dataset(
     if plugin is not None:
         local_name = plugin.manifest.connector_local_name or f"plugin-{plugin.manifest.name}"
         connector_urn = build_urn(tenant_id, "global", "connector", local_name)
-        read = plugin.fetch
+
+        async def read():
+            # ConnectorPlugin.fetch() returns plain rows (no cursor to
+            # defer) — wrap so the call site below can treat every
+            # source uniformly as (rows, commit_cursor).
+            plugin_rows = await plugin.fetch()
+            return plugin_rows, None
     else:
         source = await generic_source_registry.get_source(deps.pool, tenant_id, dataset_name)
         if source is not None:
