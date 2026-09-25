@@ -28,12 +28,14 @@ import type {
   PropertyTypeRule,
   DerivedPropertyValue,
   LineageEdge,
+  LineageGraph,
   InstanceGraph,
   TimelineEvent,
   ObjectLinksResponse,
   SearchResult,
   GlossaryTerm,
   DatasetPreviewColumn,
+  DatasetSchema,
   CatalogDataset,
   DatasetVersion,
   DatasetStats,
@@ -51,6 +53,8 @@ export const knowledgeApi = {
   listDatasets: () => api.get<CatalogDataset[]>(`${holonUrl('/catalog/datasets')}`),
   previewDataset: (datasetName: string) =>
     api.get<{ columns: DatasetPreviewColumn[] }>(`${holonUrl(`/catalog/datasets/${datasetName}/preview`)}`),
+  getDatasetSchema: (datasetName: string) =>
+    api.get<DatasetSchema>(`${holonUrl(`/catalog/datasets/${encodeURIComponent(datasetName)}/schema`)}`),
   getDatasetVersions: (datasetName: string) =>
     api.get<DatasetVersion[]>(`${holonUrl(`/catalog/datasets/${datasetName}/versions`)}`),
   getDatasetStats: (datasetName: string) =>
@@ -305,6 +309,10 @@ export const knowledgeApi = {
     api.post<Record<string, unknown>>(`${holonUrl(`/action-invocations/${invocationId}/revert`)}`),
 
   getLineage: (urn: string) => api.get<LineageEdge[]>(`${holonUrl(`/lineage/${encodeURIComponent(urn)}`)}`),
+  getLineageGraph: (urn: string, depth = 4, direction: "both" | "upstream" | "downstream" = "both") =>
+    api.get<LineageGraph>(
+      `${holonUrl(`/lineage/${encodeURIComponent(urn)}?view=graph&depth=${depth}&direction=${direction}`)}`,
+    ),
 
   getObjectGraph: (objectType: string, id: string | number, hops = 2) =>
     api.get<InstanceGraph>(`${ontologyUrl(`/objects/${objectType}/${encodeURIComponent(String(id))}/graph?hops=${hops}`)}`),

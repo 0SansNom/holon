@@ -244,6 +244,7 @@ async def _finalize_sync(
     finished_at: datetime,
     actor: EventActor,
     source_dataset_version_urn: Optional[str] = None,
+    producer: Optional[dict] = None,
     tenant_id: str = TENANT_ID,
     workspace_id: str = WORKSPACE_ID,
 ) -> SyncResult:
@@ -274,6 +275,7 @@ async def _finalize_sync(
             "row_count": result.row_count,
             "location": result.location,
             "source_dataset_version_urn": source_dataset_version_urn,
+            "producer": producer,
         },
     )
 
@@ -642,6 +644,12 @@ async def _run_pipeline(name: str, *, actor: EventActor, tenant_id: str) -> dict
                 finished_at=step_finished_at,
                 actor=actor,
                 source_dataset_version_urn=source_dataset_version_urn,
+                producer={
+                    "kind": "pipeline",
+                    "pipeline_name": name,
+                    "step_name": step["step_name"],
+                    "function_name": step["function_name"],
+                },
             )
             step_results.append({"step_name": step["step_name"], **sync_result.model_dump()})
     except Exception as exc:

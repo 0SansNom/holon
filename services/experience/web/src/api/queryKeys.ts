@@ -13,6 +13,7 @@ export const queryKeys = {
   datasetPreview: (datasetName: string) => ["datasetPreview", datasetName] as const,
   datasetVersions: (datasetName: string) => ["datasetVersions", datasetName] as const,
   datasetStats: (datasetName: string) => ["datasetStats", datasetName] as const,
+  datasetSchema: (datasetName: string) => ["datasetSchema", datasetName] as const,
 
   relationTypes: () => ["relationTypes"] as const,
   actions: () => ["actions"] as const,
@@ -35,6 +36,7 @@ export const queryKeys = {
     ["branchReviews", kind, resourceName, branchName] as const,
 
   lineage: (urn: string) => ["lineage", urn] as const,
+  lineageGraph: (urn: string, depth: number, direction: string) => ["lineageGraph", urn, depth, direction] as const,
   objectGraph: (objectType: string, id: string | number, hops: number) =>
     ["objectGraph", objectType, id, hops] as const,
   objectTimeline: (objectType: string, id: string | number) => ["objectTimeline", objectType, id] as const,

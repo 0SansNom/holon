@@ -341,9 +341,13 @@ async def list_experience_audit_events(
 async def get_lineage(
     urn: str, request: Request, _: Principal = Depends(current_principal)
 ) -> Response:
+    query = str(request.url.query)
+    target = f"{KNOWLEDGE_URL}/api/holon/lineage/{urn}"
+    if query:
+        target = f"{target}?{query}"
     return await _proxy(
         "GET",
-        f"{KNOWLEDGE_URL}/api/holon/lineage/{urn}",
+        target,
         authorization=_upstream_authorization(request),
     )
 

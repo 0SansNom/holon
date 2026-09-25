@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -70,6 +71,17 @@ async def list_dataset_versions(pool: asyncpg.Pool, tenant_id: str, dataset_urn:
     return [dict(row) for row in rows]
 
 
+def _producer_json(payload: dict) -> str | None:
+    producer = payload.get("producer")
+    if not isinstance(producer, dict) or not producer:
+        connector_urn = payload.get("connector_urn")
+        if connector_urn:
+            producer = {"kind": "connector", "connector_urn": connector_urn}
+        else:
+            return None
+    return json.dumps(producer)
+
+
 async def _catalogue_sync(conn: asyncpg.Connection, tenant_id: str, workspace_id: str, payload: dict) -> None:
     dataset_name = payload["dataset_name"]
 
@@ -84,8 +96,8 @@ async def _catalogue_sync(conn: asyncpg.Connection, tenant_id: str, workspace_id
         """
         INSERT INTO dataset_version (
             urn, dataset_urn, tenant_id, iceberg_namespace, iceberg_table,
-            snapshot_id, row_count, location
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            snapshot_id, row_count, location, producer
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
         ON CONFLICT (urn) DO NOTHING
         """,
         payload["dataset_version_urn"],
@@ -96,6 +108,7 @@ async def _catalogue_sync(conn: asyncpg.Connection, tenant_id: str, workspace_id
         payload["snapshot_id"],
         payload["row_count"],
         payload["location"],
+        _producer_json(payload),
     )
 
     source_dataset_version_urn = payload.get("source_dataset_version_urn")
