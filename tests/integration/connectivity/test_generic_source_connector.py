@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "libs"))
 from holon_sdk import HolonClient  # noqa: E402
 
 REVIEWS_API = "http://reviews-api:8000/reviews.json"  # Connectivity's own network view, not the test runner's
+REVIEWS_ORIGIN = "http://reviews-api:8000"
 
 
 client = HolonClient(identity_url=IDENTITY)
@@ -255,7 +256,7 @@ def test_a_connection_can_be_reused_by_two_different_sources(jdoe_token: str) ->
     connection_name = _unique_name("shared_auth")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={"name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+        body={"allowed_origin": REVIEWS_ORIGIN, "name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
     )
     assert status == 200, connection
     assert "auth_header_value" not in connection, connection  # never echoed back
@@ -279,7 +280,7 @@ def test_connection_name_and_inline_auth_header_together_is_400(jdoe_token: str)
     connection_name = _unique_name("shared_auth")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={"name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+        body={"allowed_origin": REVIEWS_ORIGIN, "name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
     )
     assert status == 200, connection
 
@@ -307,7 +308,7 @@ def test_deleting_a_connection_still_in_use_is_409_deleting_after_unlinking_work
     connection_name = _unique_name("deletable_connection")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={"name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+        body={"allowed_origin": REVIEWS_ORIGIN, "name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
     )
     assert status == 200, connection
 
@@ -337,7 +338,7 @@ def test_deleting_an_unknown_connection_is_404(jdoe_token: str) -> None:
 def test_invalid_auth_type_is_400(jdoe_token: str) -> None:
     status, body = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={"name": _unique_name("bad_auth_type"), "auth_type": "basic_auth"},
+        body={"allowed_origin": REVIEWS_ORIGIN, "name": _unique_name("bad_auth_type"), "auth_type": "basic_auth"},
     )
     assert status == 400, body
 
@@ -345,7 +346,7 @@ def test_invalid_auth_type_is_400(jdoe_token: str) -> None:
 def test_oauth2_connection_missing_token_url_is_400(jdoe_token: str) -> None:
     status, body = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={
+        body={"allowed_origin": REVIEWS_ORIGIN, 
             "name": _unique_name("oauth2_missing_url"),
             "auth_type": "oauth2_client_credentials",
             "oauth2_client_id": "some-client",
@@ -358,7 +359,7 @@ def test_oauth2_connection_missing_token_url_is_400(jdoe_token: str) -> None:
 def test_oauth2_connection_missing_secret_is_400(jdoe_token: str) -> None:
     status, body = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={
+        body={"allowed_origin": REVIEWS_ORIGIN, 
             "name": _unique_name("oauth2_missing_secret"),
             "auth_type": "oauth2_client_credentials",
             "oauth2_token_url": "https://idp.example.com/token",
@@ -372,7 +373,7 @@ def test_editing_an_oauth2_connection_without_resending_the_secret_keeps_it(jdoe
     connection_name = _unique_name("oauth2_edit")
     status, connection = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={
+        body={"allowed_origin": REVIEWS_ORIGIN, 
             "name": connection_name,
             "auth_type": "oauth2_client_credentials",
             "oauth2_token_url": "https://idp.example.com/token",
@@ -386,7 +387,7 @@ def test_editing_an_oauth2_connection_without_resending_the_secret_keeps_it(jdoe
     # Re-register without oauth2_client_secret — only the scope changes.
     status, edited = _request(
         "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
-        body={
+        body={"allowed_origin": REVIEWS_ORIGIN, 
             "name": connection_name,
             "auth_type": "oauth2_client_credentials",
             "oauth2_token_url": "https://idp.example.com/token",
@@ -546,3 +547,43 @@ def test_registering_a_source_with_only_one_of_the_incremental_fields_is_accepte
     assert status == 200, registration
     assert registration["cursor_property"] == "id", registration
     assert registration["incremental_param"] is None, registration
+
+
+def test_a_source_cannot_send_a_connection_credential_to_another_origin(jdoe_token: str) -> None:
+    """A new source must not be able to point a shared connection's secret at its own host."""
+    connection_name = _unique_name("pinned_auth")
+    status, connection = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={"allowed_origin": REVIEWS_ORIGIN, "name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+    )
+    assert status == 200, connection
+    assert connection["allowed_origin"] == REVIEWS_ORIGIN, connection
+
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/sources", token=jdoe_token,
+        body={"name": _unique_name("exfil_source"), "base_url": "https://attacker.example/steal", "connection_name": connection_name},
+    )
+    assert status == 400, body
+
+
+def test_changing_a_connection_origin_requires_the_secret_again(jdoe_token: str) -> None:
+    connection_name = _unique_name("origin_move")
+    status, connection = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={"allowed_origin": REVIEWS_ORIGIN, "name": connection_name, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+    )
+    assert status == 200, connection
+
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={"allowed_origin": "https://attacker.example", "name": connection_name, "auth_header_name": "X-Api-Key"},
+    )
+    assert status == 400, body
+
+
+def test_a_connection_requires_an_allowed_origin(jdoe_token: str) -> None:
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/connections", token=jdoe_token,
+        body={"name": _unique_name("no_origin"), "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+    )
+    assert status == 400, body

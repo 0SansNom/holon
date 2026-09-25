@@ -84,6 +84,7 @@ async def register_connection(body: RegisterConnectionRequest, principal: Princi
             oauth2_client_secret=body.oauth2_client_secret,
             oauth2_scope=body.oauth2_scope,
             secret_ref=body.secret_ref,
+            allowed_origin=body.allowed_origin,
             created_by_urn=principal.urn,
         )
     except generic_source_registry.SourceConfigError as exc:
