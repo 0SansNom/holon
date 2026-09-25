@@ -432,6 +432,14 @@ def _build_filesystem(
     )
 
 
+def _format_suffix(format: str) -> str:
+    """Mirrors `sftp_source_registry._format_suffix` — kept local since the
+    two registries don't share a base module."""
+    if format == "ndjson":
+        return ".ndjson"
+    return f".{format}"
+
+
 def _read_table(fs: pafs.FileSystem, path: str, format: str):
     with fs.open_input_stream(path) as stream:
         if format == "csv":
@@ -471,10 +479,11 @@ def _fetch_sync(
 
     selector = pafs.FileSelector(f"{bucket}/{key_prefix}", recursive=True)
     infos = fs.get_file_info(selector)
+    suffix = _format_suffix(format)
     keys = sorted(
         info.path[len(bucket) + 1:]
         for info in infos
-        if info.type == pafs.FileType.File
+        if info.type == pafs.FileType.File and info.path.endswith(suffix)
     )
     if incremental and last_synced_key:
         keys = [key for key in keys if key > last_synced_key]
