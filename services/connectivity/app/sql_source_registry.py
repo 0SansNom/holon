@@ -46,6 +46,18 @@ _MSSQL_FORBIDDEN = re.compile(
     r"\b(openrowset\s*\(|opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
     re.IGNORECASE,
 )
+# Snowflake stage / system helpers with side effects or file access.
+# Role grants remain the real control plane; this mirrors MySQL/MSSQL denylists.
+_SNOWFLAKE_FORBIDDEN = re.compile(
+    r"("
+    r"\bfrom\s+@"  # SELECT … FROM @stage[/path]
+    r"|directory\s*\(\s*@"  # DIRECTORY(@stage) / TABLE(DIRECTORY(@stage))
+    r"|\bsystem\$\w+"  # SYSTEM$CANCEL_ALL_QUERIES, etc.
+    r"|\bget_presigned_url\s*\("
+    r"|\bbuild_scoped_file_url\s*\("
+    r")",
+    re.IGNORECASE,
+)
 
 # ISO-8601 date or datetime cursor. Naive (no Z/offset) values parse as naive
 # datetimes; asyncpg still binds those against timestamp-without-timezone.
@@ -119,6 +131,10 @@ def _require_select_only(query: str, dialect: str = "postgres") -> None:
         raise SourceConfigError("query must be a read-only SELECT — MySQL file helpers are not allowed")
     if d == "mssql" and _MSSQL_FORBIDDEN.search(stripped):
         raise SourceConfigError("query must be a read-only SELECT — SQL Server file helpers are not allowed")
+    if d == "snowflake" and _SNOWFLAKE_FORBIDDEN.search(stripped):
+        raise SourceConfigError(
+            "query must be a read-only SELECT — Snowflake stage and SYSTEM$ helpers are not allowed"
+        )
 
 
 def _parse_iso_cursor(value: str) -> Optional[datetime.datetime]:
