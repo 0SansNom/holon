@@ -77,9 +77,11 @@ services:
       timeout: 5s
       retries: 15
 
+  # Quay anonymous pulls of quay.io/minio/* now return unauthorized, and
+  # Docker Hub deleted minio/minio. Bitnami's legacy tags are the last
+  # public community images. Default entrypoint already serves :9000/:9001.
   minio:
-    image: quay.io/minio/minio:latest
-    command: server /data --console-address ":9001"
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
     environment:
       # Default root user for local S3 storage
       MINIO_ROOT_USER: holon
@@ -88,53 +90,52 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio-data:/data
+      - minio-data:/bitnami/minio/data
 
   # Infra only: creates the warehouse bucket, no fixture files copied in.
   minio-init:
-    image: quay.io/minio/mc:latest
+    image: bitnamilegacy/minio-client:2025.7.21-debian-12-r3
     depends_on:
       - minio
     entrypoint: >
-      /bin/sh -c " until mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD}; do echo waiting for minio; sleep 2; done && mc mb -p local/holon-warehouse || true && echo bucket ready "
+      /bin/sh -c "export PATH=/opt/bitnami/minio-client/bin:$$PATH; until mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD}; do echo waiting for minio; sleep 2; done && mc mb -p local/holon-warehouse || true && echo bucket ready "
 
   # Test-only fixture file for the CSV connector — not started by default.
   # `make seed` (or `docker compose --profile test-fixtures run --rm
   # csv-seed`) copies it in when actually needed.
   csv-seed:
     profiles: [ "test-fixtures" ]
-    image: quay.io/minio/mc:latest
+    image: bitnamilegacy/minio-client:2025.7.21-debian-12-r3
     depends_on:
       minio-init:
         condition: service_completed_successfully
     volumes:
       - ./tests/fixtures/csv-seed:/seed:ro
     entrypoint: >
-      /bin/sh -c " mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD} && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo csv seeded "
+      /bin/sh -c "export PATH=/opt/bitnami/minio-client/bin:$$PATH; mc alias set local http://minio:9000 holon ${MINIO_ROOT_PASSWORD} && mc cp /seed/suppliers.csv local/holon-warehouse/landing/suppliers.csv && echo csv seeded "
 
   # External S3 store fixture for testing object storage connector
   source-s3:
     profiles: [ "test-fixtures" ]
-    image: quay.io/minio/minio:latest
-    command: server /data --console-address ":9001"
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
     environment:
       MINIO_ROOT_USER: source
       MINIO_ROOT_PASSWORD: source12345
     ports:
       - "9500:9000"
     volumes:
-      - source-s3-data:/data
+      - source-s3-data:/bitnami/minio/data
 
   # Seed utility for object storage connector
   source-s3-seed:
     profiles: [ "test-fixtures" ]
-    image: quay.io/minio/mc:latest
+    image: bitnamilegacy/minio-client:2025.7.21-debian-12-r3
     depends_on:
       - source-s3
     volumes:
       - ./tests/fixtures/csv-seed:/seed:ro
     entrypoint: >
-      /bin/sh -c " until mc alias set src http://source-s3:9000 source source12345; do echo waiting for source-s3; sleep 2; done && mc mb -p src/tenant-landing || true && mc cp /seed/suppliers.csv src/tenant-landing/landing/suppliers.csv && echo source-s3 seeded "
+      /bin/sh -c "export PATH=/opt/bitnami/minio-client/bin:$$PATH; until mc alias set src http://source-s3:9000 source source12345; do echo waiting for source-s3; sleep 2; done && mc mb -p src/tenant-landing || true && mc cp /seed/suppliers.csv src/tenant-landing/landing/suppliers.csv && echo source-s3 seeded "
 
   # Test-only SFTP fixture for the no-code SFTP connector.
   # Seed CSV is mounted at /home/holon/upload → remote path upload/suppliers.csv
