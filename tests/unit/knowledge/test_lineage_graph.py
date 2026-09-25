@@ -11,7 +11,7 @@ KNOWLEDGE_DIR = Path(__file__).resolve().parents[3] / "services" / "knowledge"
 sys.path.insert(0, str(LIBS))
 sys.path.insert(0, str(KNOWLEDGE_DIR))
 
-from app.actions.timeline import property_changes  # noqa: E402
+from app.action_structural import property_changes  # noqa: E402
 from app.lineage import assemble_graph  # noqa: E402
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
