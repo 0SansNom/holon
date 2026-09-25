@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 from typing import Any, Awaitable, Callable, Optional
 
@@ -44,6 +45,13 @@ _MYSQL_FORBIDDEN = re.compile(
 _MSSQL_FORBIDDEN = re.compile(
     r"\b(openrowset\s*\(|opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
     re.IGNORECASE,
+)
+
+# ISO-8601 date or datetime (optionally with 'Z' or a +/-HH:MM offset). Naive
+# (no Z/offset) values are parsed as naive datetimes; asyncpg still binds
+# those correctly against timestamp-without-timezone columns.
+_ISO_DATE_OR_DATETIME_SHAPE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$"
 )
 
 _PUBLIC_CONNECTION_COLUMNS = (
@@ -118,14 +126,25 @@ def _bind_cursor_value(value: str) -> Any:
     """Coerce a stored cursor string so drivers can bind typed columns.
 
     Avoids a dialect-specific catalog lookup (pg_attribute) while still
-    comparing integers/floats natively instead of lexicographically.
+    comparing integers/floats/timestamps natively instead of lexicographically.
+    A bare ISO string bound against a `timestamptz` column fails on asyncpg
+    (it does not implicitly cast text -> timestamptz), so date/datetime
+    cursors are parsed into `datetime.datetime` — timezone-aware when the
+    value carries a 'Z' or UTC offset, naive otherwise.
     """
     if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
         return int(value)
     try:
         return float(value)
     except ValueError:
-        return value
+        pass
+    if _ISO_DATE_OR_DATETIME_SHAPE_RE.match(value):
+        iso_value = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            return datetime.datetime.fromisoformat(iso_value)
+        except ValueError:
+            pass
+    return value
 
 
 async def register_connection(
