@@ -18,6 +18,8 @@ import pyarrow.json as pajson
 import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
+from app.file_cursor import mtime_ns_from_stamp, select_files
+
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
@@ -401,7 +403,7 @@ def _fetch_sync(
             prefix = remote_prefix or ""
             # List one directory level when prefix has no trailing slash file match;
             # walk recursively under the prefix directory.
-            paths: list[str] = []
+            listed: list[tuple[int, str]] = []
 
             def _walk(directory: str) -> None:
                 try:
@@ -414,7 +416,7 @@ def _fetch_sync(
                     if stat.S_ISDIR(mode):
                         _walk(child)
                     elif stat.S_ISREG(mode) and child.endswith(_format_suffix(format)):
-                        paths.append(child)
+                        listed.append((mtime_ns_from_stamp(entry.st_mtime), child))
 
             # If prefix points at a directory, walk it; if it is a path prefix
             # of filenames in a parent dir, list that parent and filter.
@@ -434,22 +436,22 @@ def _fetch_sync(
                         if stat.S_ISREG(mode) and entry.filename.startswith(base) and child.endswith(
                             _format_suffix(format)
                         ):
-                            paths.append(child)
+                            listed.append((mtime_ns_from_stamp(entry.st_mtime), child))
                         elif stat.S_ISDIR(mode) and entry.filename.startswith(base):
                             _walk(child)
                 except OSError as exc:
                     raise SourceFetchError(f"could not list remote prefix {prefix!r}: {exc}") from exc
 
-            paths = sorted(paths)
-            if incremental and last_synced_path:
-                paths = [p for p in paths if p > last_synced_path]
+            if incremental:
+                paths, new_cursor = select_files(listed, last_synced_path)
+            else:
+                paths = sorted(key for _, key in listed)
+                new_cursor = None
 
             rows: list[dict] = []
-            new_cursor = last_synced_path
             for path in paths:
                 with sftp.open(path, "rb") as handle:
                     rows.extend(_read_bytes(handle.read(), format))
-                new_cursor = path
             return rows, (new_cursor if incremental else None)
         finally:
             sftp.close()
