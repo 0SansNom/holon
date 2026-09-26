@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Awaitable, Callable, Optional
 from urllib.parse import urlsplit
@@ -22,6 +23,8 @@ from holon_common.connector_safety import (
     assert_production_requires_secret_ref,
 )
 from holon_common.secrets import resolve_optional
+
+logger = logging.getLogger(__name__)
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
@@ -432,6 +435,25 @@ def _build_filesystem(
     )
 
 
+# open_input_stream() auto-detects these from the extension, so
+# `landing/2024.csv.gz` is a readable csv file, not a stray sidecar.
+_COMPRESSION_SUFFIXES = ("", ".gz", ".bz2", ".zst", ".lz4")
+
+
+def _matches_format(path: str, format: str) -> bool:
+    lower = path.lower()
+    suffix = _format_suffix(format)
+    return any(lower.endswith(suffix + compression) for compression in _COMPRESSION_SUFFIXES)
+
+
+def _format_suffix(format: str) -> str:
+    """Mirrors `sftp_source_registry._format_suffix` — kept local since the
+    two registries don't share a base module."""
+    if format == "ndjson":
+        return ".ndjson"
+    return f".{format}"
+
+
 def _read_table(fs: pafs.FileSystem, path: str, format: str):
     with fs.open_input_stream(path) as stream:
         if format == "csv":
@@ -471,11 +493,13 @@ def _fetch_sync(
 
     selector = pafs.FileSelector(f"{bucket}/{key_prefix}", recursive=True)
     infos = fs.get_file_info(selector)
-    keys = sorted(
-        info.path[len(bucket) + 1:]
-        for info in infos
-        if info.type == pafs.FileType.File
-    )
+    files = [info.path for info in infos if info.type == pafs.FileType.File]
+    keys = sorted(path[len(bucket) + 1:] for path in files if _matches_format(path, format))
+    skipped = len(files) - len(keys)
+    if skipped:
+        # Spark `_SUCCESS` / `.crc` markers are expected; anything else here
+        # is a file the user may think is being synced.
+        logger.info("object prefix %s/%s: skipped %d file(s) not matching format %r", bucket, key_prefix, skipped, format)
     if incremental and last_synced_key:
         keys = [key for key in keys if key > last_synced_key]
 
