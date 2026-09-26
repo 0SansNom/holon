@@ -16,7 +16,7 @@ pymongo==4.17.0
 paramiko==5.0.0
 google-auth==2.38.0
 # 4.x drops the cffi<2 pin that conflicted with cryptography>=50.
-snowflake-connector-python==4.5.0
+snowflake-connector-python==4.7.1
 # Snowflake pulls boto3; keep botocore inside the window required by
 # aiobotocore (via pyiceberg[s3fs]) so pip does not ResolutionImpossible.
 boto3>=1.43.66,<1.43.76
