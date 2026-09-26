@@ -60,7 +60,7 @@ def test_require_soql_must_be_select() -> None:
 def test_apply_cursor_appends_where_or_and() -> None:
     assert (
         _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-01T00:00:00Z")
-        == "SELECT Id FROM Account WHERE SystemModstamp > '2024-01-01T00:00:00Z'"
+        == "SELECT Id FROM Account WHERE SystemModstamp >= '2024-01-01T00:00:00Z'"
     )
     assert (
         _apply_cursor(
@@ -68,7 +68,7 @@ def test_apply_cursor_appends_where_or_and() -> None:
             "SystemModstamp",
             "2024-01-01T00:00:00Z",
         )
-        == "SELECT Id FROM Account WHERE Name != null AND SystemModstamp > '2024-01-01T00:00:00Z' ORDER BY Name"
+        == "SELECT Id FROM Account WHERE Name != null AND SystemModstamp >= '2024-01-01T00:00:00Z' ORDER BY Name"
     )
 
 

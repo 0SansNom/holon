@@ -492,14 +492,11 @@ def test_incremental_cursor_is_computed_and_persisted_after_a_sync(jdoe_token: s
 
 
 def test_a_cursor_configured_source_appends_instead_of_overwriting(jdoe_token: str) -> None:
-    """The bug this exists to catch: a source with `cursor_property` set
-    fetches only what's new each time — overwriting the Iceberg table
-    with just that batch would silently discard every row synced
-    before it. `reviews-api` doesn't actually filter by the cursor (see
-    the previous test), which is exactly what makes this provable here:
-    each of these three syncs writes the *same* 8 rows again, so the
-    table's total only grows (8, 16, 24) if they're genuinely being
-    appended rather than replacing one another.
+    """A cursor source appends. `reviews-api` ignores `since_id` and
+    returns the same 8 rows every time; boundary de-duplication drops
+    those copies, so a second sync must leave the table in place
+    (same snapshot, same row count). Overwrite of an empty batch would
+    fail or replace the table.
     """
     name = _unique_name("append_accumulates")
     status, registration = _request(
@@ -512,11 +509,8 @@ def test_a_cursor_configured_source_appends_instead_of_overwriting(jdoe_token: s
     assert status == 200 and first["row_count"] == 8, first
 
     status, second = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
-    assert status == 200 and second["row_count"] == 16, second
-    assert second["snapshot_id"] != first["snapshot_id"], second
-
-    status, third = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
-    assert status == 200 and third["row_count"] == 24, third
+    assert status == 200 and second["row_count"] == 8, second
+    assert second["snapshot_id"] == first["snapshot_id"], second
 
 
 def test_a_non_cursor_source_still_overwrites_like_before(jdoe_token: str) -> None:

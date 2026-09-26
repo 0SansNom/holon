@@ -18,6 +18,7 @@ from holon_common.connector_safety import (
 from holon_common.sql_ident import quote_identifier, require_identifier
 
 from app import sql_drivers
+from app.cursor_window import advance_cursor
 
 _FORBIDDEN_STMT = re.compile(
     r"\b(insert|update|delete|truncate|alter|drop|create|grant|revoke|call|execute)\b",
@@ -370,7 +371,8 @@ async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
 ) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
-        "SELECT connection_name, table_name, query, cursor_property, last_cursor_value "
+        "SELECT connection_name, table_name, query, cursor_property, last_cursor_value, "
+        "cursor_boundary_keys "
         "FROM sql_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
         tenant_id, name,
     )
@@ -401,7 +403,7 @@ async def fetch_for_dataset(
         if row["cursor_property"] and row["last_cursor_value"] is not None:
             # Uniform bind across dialects (no pg_attribute type cast).
             col = quote_identifier(row["cursor_property"], dialect=dialect)
-            sql += f" WHERE {col} > {sql_drivers.cursor_placeholder(dialect)}"
+            sql += f" WHERE {col} >= {sql_drivers.cursor_placeholder(dialect)}"
             args.append(_bind_cursor_value(row["last_cursor_value"]))
     else:
         sql = row["query"]
@@ -427,7 +429,28 @@ async def fetch_for_dataset(
         raise SourceFetchError(f"could not fetch source {name!r}: {exc}") from exc
 
     commit: Optional[Callable[[], Awaitable[None]]] = None
-    if row["cursor_property"]:
+    if row["table_name"] and row["cursor_property"]:
+        advanced = advance_cursor(
+            rows,
+            cursor_property=row["cursor_property"],
+            last_cursor=row["last_cursor_value"],
+            boundary_keys=row["cursor_boundary_keys"],
+        )
+        rows = advanced.rows
+        if advanced.changed and advanced.cursor is not None:
+
+            async def _commit_cursor(
+                cursor: str = advanced.cursor,
+                boundary: str = advanced.boundary_keys,
+            ) -> None:
+                await pool.execute(
+                    "UPDATE sql_source SET last_cursor_value = $1, cursor_boundary_keys = $2 "
+                    "WHERE tenant_id = $3 AND name = $4",
+                    cursor, boundary, tenant_id, name,
+                )
+
+            commit = _commit_cursor
+    elif row["cursor_property"]:
         candidates = [r[row["cursor_property"]] for r in rows if r.get(row["cursor_property"]) is not None]
         if candidates:
             new_cursor = str(max(candidates))

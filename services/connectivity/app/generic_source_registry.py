@@ -22,6 +22,8 @@ from holon_common.connector_safety import (
     resolve_connector_secret,
 )
 
+from app.cursor_window import advance_cursor, lookback_value
+
 # Columns safe to return to caller (excludes raw credential values).
 _PUBLIC_COLUMNS = (
     "tenant_id, name, workspace_id, base_url, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
@@ -384,39 +386,6 @@ def _extract_next_url(body: Any, next_page_path: str, *, origin_url: str) -> Opt
     return next_url
 
 
-def _coerce_cursor(value: Any) -> Any:
-    """Same try-int-else-string trick `resolver.fetch_generic` already
-    uses for `id_value` — a self-serve source's cursor field type isn't
-    known ahead of time either, and comparing "10" < "9" as strings would
-    silently pick the wrong "newest" value for a numeric cursor.
-    """
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _compute_new_cursor(records: list[dict], cursor_property: str, previous: Optional[str]) -> Optional[str]:
-    """The new resume point is simply the largest value seen for
-    `cursor_property` across every record just fetched (plus the previous
-    cursor, so a page with no new rows never regresses it). Comparable
-    only when every candidate coerces the same way (all int, or all
-    string); a source that mixes types for the same field is treated as
-    string-comparable — the same "don't guess a convention" stance this
-    connector takes everywhere else.
-    """
-    candidates = [_coerce_cursor(record[cursor_property]) for record in records if record.get(cursor_property) is not None]
-    if previous is not None:
-        candidates.append(_coerce_cursor(previous))
-    if not candidates:
-        return previous
-    try:
-        newest = max(candidates)
-    except TypeError:
-        newest = max(str(candidate) for candidate in candidates)
-    return str(newest)
-
-
 def _add_query_param(url: str, key: str, value: str) -> str:
     parsed = urlsplit(url)
     query = parse_qsl(parsed.query, keep_blank_values=True)
@@ -478,7 +447,7 @@ async def fetch_for_dataset(
 ) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT base_url, auth_header_name, auth_header_value, secret_ref, record_path, next_page_path, connection_name, "
-        "cursor_property, incremental_param, last_cursor_value "
+        "cursor_property, incremental_param, last_cursor_value, cursor_boundary_keys "
         "FROM generic_rest_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
         tenant_id, name,
     )
@@ -517,7 +486,7 @@ async def fetch_for_dataset(
     origin_url = url
     # Append incremental parameter only to the first page request.
     if row["incremental_param"] and row["last_cursor_value"] is not None:
-        url = _add_query_param(url, row["incremental_param"], row["last_cursor_value"])
+        url = _add_query_param(url, row["incremental_param"], lookback_value(row["last_cursor_value"]))
     pages_fetched = 0
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -546,13 +515,23 @@ async def fetch_for_dataset(
 
     commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
-        new_cursor = _compute_new_cursor(records, row["cursor_property"], row["last_cursor_value"])
-        if new_cursor != row["last_cursor_value"]:
+        advanced = advance_cursor(
+            records,
+            cursor_property=row["cursor_property"],
+            last_cursor=row["last_cursor_value"],
+            boundary_keys=row["cursor_boundary_keys"],
+        )
+        records = advanced.rows
+        if advanced.changed and advanced.cursor is not None:
 
-            async def _commit_cursor(cursor: str = new_cursor) -> None:
+            async def _commit_cursor(
+                cursor: str = advanced.cursor,
+                boundary: str = advanced.boundary_keys,
+            ) -> None:
                 await pool.execute(
-                    "UPDATE generic_rest_source SET last_cursor_value = $1 WHERE tenant_id = $2 AND name = $3",
-                    cursor, tenant_id, name,
+                    "UPDATE generic_rest_source SET last_cursor_value = $1, cursor_boundary_keys = $2 "
+                    "WHERE tenant_id = $3 AND name = $4",
+                    cursor, boundary, tenant_id, name,
                 )
 
             commit = _commit_cursor

@@ -15,6 +15,8 @@ import pyarrow.json as pajson
 import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
+from app.file_cursor import info_mtime_ns, select_files
+
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
@@ -501,22 +503,24 @@ def _fetch_sync(
 
     selector = pafs.FileSelector(f"{bucket}/{key_prefix}", recursive=True)
     infos = fs.get_file_info(selector)
-    files = [info.path for info in infos if info.type == pafs.FileType.File]
-    keys = sorted(path[len(bucket) + 1:] for path in files if _matches_format(path, format))
-    skipped = len(files) - len(keys)
+    files = [info for info in infos if info.type == pafs.FileType.File]
+    matched = [info for info in files if _matches_format(info.path, format)]
+    skipped = len(files) - len(matched)
     if skipped:
         # Spark `_SUCCESS` / `.crc` markers are expected; anything else here
         # is a file the user may think is being synced.
         logger.info("object prefix %s/%s: skipped %d file(s) not matching format %r", bucket, key_prefix, skipped, format)
-    if incremental and last_synced_key:
-        keys = [key for key in keys if key > last_synced_key]
+    entries = [(info_mtime_ns(info), info.path[len(bucket) + 1:]) for info in matched]
+    if incremental:
+        keys, new_cursor = select_files(entries, last_synced_key)
+    else:
+        keys = sorted(key for _, key in entries)
+        new_cursor = None
 
     rows: list[dict] = []
-    new_cursor = last_synced_key
     for key in keys:
         table = _read_table(fs, f"{bucket}/{key}", format)
         rows.extend(table.to_pylist())
-        new_cursor = key
 
     return rows, (new_cursor if incremental else None)
 
