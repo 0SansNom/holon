@@ -177,10 +177,22 @@ def test_secret_ref_k8s_tenant_secret_name() -> None:
 
 def test_kafka_holon_topics_reserved() -> None:
     with pytest.raises(ConnectorSafetyError, match="reserved"):
-        assert_kafka_topic("holon.events")
+        assert_kafka_topic("holon.events", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="reserved"):
-        assert_kafka_topic("holon.identity.out")
-    assert_kafka_topic("inventory.updates")
+        assert_kafka_topic("holon.identity.out", tenant_id="acme")
+    assert_kafka_topic("acme.inventory.updates", tenant_id="acme")
+
+
+def test_kafka_topic_must_belong_to_the_tenant() -> None:
+    with pytest.raises(ConnectorSafetyError, match="acme."):
+        assert_kafka_topic("beta.orders", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="acme."):
+        assert_kafka_topic("inventory.updates", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="acme."):
+        assert_kafka_topic("acme.", tenant_id="acme")
+    # `ac` must not be able to claim `acme.…` by prefix.
+    with pytest.raises(ConnectorSafetyError, match="'ac."):
+        assert_kafka_topic("acme.orders", tenant_id="ac")
 
 
 def test_same_origin_normalizes_trailing_dot() -> None:

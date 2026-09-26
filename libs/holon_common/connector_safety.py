@@ -352,12 +352,24 @@ def resolve_connector_secret(ref: Optional[str], *, tenant_id: str) -> Optional[
     return get_secret(ref)
 
 
-def assert_kafka_topic(topic: str) -> None:
+def assert_kafka_topic(topic: str, *, tenant_id: str) -> None:
+    """Reject platform topics and any topic that is not `{tenant_id}.<name>`.
+
+    The first segment is the owning tenant, so one tenant cannot subscribe
+    to a topic that carries another's data. `holon.*` stays reserved for
+    the platform bus even when it would otherwise match a tenant prefix.
+    """
     if not topic or not topic.strip():
         raise ConnectorSafetyError("topic is required")
+    tenant = (tenant_id or "").strip()
+    if not tenant:
+        raise ConnectorSafetyError("topic requires a tenant_id")
     name = topic.strip()
     if name in _PLATFORM_KAFKA_TOPICS or name.startswith("holon."):
         raise ConnectorSafetyError(f"topic {topic!r} is reserved for the platform event bus")
     configured = (os.environ.get("HOLON_KAFKA_TOPIC") or "").strip()
     if configured and name == configured:
         raise ConnectorSafetyError(f"topic {topic!r} is reserved for the platform event bus")
+    prefix = f"{tenant}."
+    if not name.startswith(prefix) or name == prefix:
+        raise ConnectorSafetyError(f"topic {topic!r} must start with {prefix!r}")

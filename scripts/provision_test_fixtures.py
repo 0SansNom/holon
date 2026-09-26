@@ -343,7 +343,7 @@ def main() -> None:
         token=editor_token,
         body={
             "name": "inventory-levels-stream",
-            "topic": "external-inventory-stream",
+            "topic": "acme.external-inventory-stream",
             "key_field": "sku",
             "dataset_name": "inventory_levels",
             "batch_interval_seconds": 5,

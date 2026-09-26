@@ -40,7 +40,7 @@ export function StreamDialog({ onClose }: { onClose: () => void }) {
           <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="inventory-levels-stream" />
         </FormGroup>
         <FormGroup label="Topic">
-          <InputGroup value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="external-inventory-stream" />
+          <InputGroup value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="acme.external-inventory-stream" />
         </FormGroup>
         <FormGroup label="Key field" helperText="The JSON field naming each record's unique key">
           <InputGroup value={keyField} onChange={(e) => setKeyField(e.target.value)} placeholder="sku" />
