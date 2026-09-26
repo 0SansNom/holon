@@ -587,3 +587,18 @@ def test_a_connection_requires_an_allowed_origin(jdoe_token: str) -> None:
         body={"name": _unique_name("no_origin"), "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
     )
     assert status == 400, body
+
+
+def test_moving_an_inline_auth_source_to_another_origin_requires_the_secret(jdoe_token: str) -> None:
+    name = _unique_name("inline_origin_move")
+    status, first = _request(
+        "POST", f"{CONNECTIVITY}/sources", token=jdoe_token,
+        body={"name": name, "base_url": REVIEWS_API, "auth_header_name": "X-Api-Key", "auth_header_value": "shh"},
+    )
+    assert status == 200, first
+
+    status, body = _request(
+        "POST", f"{CONNECTIVITY}/sources", token=jdoe_token,
+        body={"name": name, "base_url": "https://attacker.example/steal", "auth_header_name": "X-Api-Key"},
+    )
+    assert status == 400, body

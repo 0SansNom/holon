@@ -262,10 +262,11 @@ async def register_source(
         assert_http_url(base_url, resolve=False)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
         if existing_source is not None and not connection_name:
-            # Inline-auth sources: retargeting base_url must re-supply the header secret.
+            # Inline-auth sources: moving base_url to another origin must re-supply
+            # the header secret (path/query edits on the same origin keep it).
             assert_destination_change_requires_secret(
                 is_update=True,
-                destination_changed=existing_source["base_url"] != base_url,
+                destination_changed=not same_origin(existing_source["base_url"], base_url),
                 secret_provided=auth_header_value is not None,
             )
     except ConnectorSafetyError as exc:
