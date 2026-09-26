@@ -19,6 +19,7 @@ from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
     resolve_connector_secret,
@@ -168,7 +169,8 @@ async def register_connection(
         _validate_gcs_service_account_json(secret_access_key)
     hostname = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}").hostname
     existing = await pool.fetchrow(
-        "SELECT secret_access_key, secret_ref FROM object_connection WHERE tenant_id = $1 AND name = $2",
+        "SELECT kind, endpoint, region, access_key_id, path_style, secret_access_key, secret_ref "
+        "FROM object_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
     is_update = existing is not None
@@ -176,6 +178,17 @@ async def register_connection(
         assert_connector_host(hostname or "")
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(secret_access_key, field="secret_access_key")
+        if existing is not None:
+            destination_changed = (
+                existing["kind"] != kind
+                or existing["endpoint"] != endpoint
+                or existing["access_key_id"] != access_key_id
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=secret_access_key is not None or secret_ref is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if secret_access_key is None and secret_ref is None and existing is not None:

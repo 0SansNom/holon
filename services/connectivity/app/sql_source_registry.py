@@ -11,6 +11,7 @@ from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
     resolve_connector_secret,
@@ -150,7 +151,8 @@ async def register_connection(
         port = sql_drivers.default_port_for(dialect)
 
     existing = await pool.fetchrow(
-        "SELECT password, secret_ref FROM sql_connection WHERE tenant_id = $1 AND name = $2",
+        "SELECT host, port, dialect, database, username, password, secret_ref "
+        "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
     is_update = existing is not None
@@ -158,6 +160,18 @@ async def register_connection(
         assert_connector_host(host)
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(password, field="password")
+        if existing is not None:
+            destination_changed = (
+                existing["host"] != host
+                or int(existing["port"]) != int(port)
+                or (existing["dialect"] or "postgres") != dialect
+                or existing["database"] != database
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=password is not None or secret_ref is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if password is None and secret_ref is None and existing is not None:
