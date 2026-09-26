@@ -1,4 +1,4 @@
-"""No-code SQL source registry for Postgres, MySQL/MariaDB, and SQL Server."""
+"""No-code SQL source registry for Postgres, MySQL/MariaDB, SQL Server, and Snowflake."""
 
 from __future__ import annotations
 
@@ -46,6 +46,18 @@ _MSSQL_FORBIDDEN = re.compile(
     r"\b(openrowset\s*\(|opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
     re.IGNORECASE,
 )
+# Snowflake stage / system helpers with side effects or file access.
+# Role grants remain the real control plane; this mirrors MySQL/MSSQL denylists.
+_SNOWFLAKE_FORBIDDEN = re.compile(
+    r"("
+    r"\bfrom\s+@"  # SELECT … FROM @stage[/path]
+    r"|directory\s*\(\s*@"  # DIRECTORY(@stage) / TABLE(DIRECTORY(@stage))
+    r"|\bsystem\$\w+"  # SYSTEM$CANCEL_ALL_QUERIES, etc.
+    r"|\bget_presigned_url\s*\("
+    r"|\bbuild_scoped_file_url\s*\("
+    r")",
+    re.IGNORECASE,
+)
 
 # ISO-8601 date or datetime cursor. Naive (no Z/offset) values parse as naive
 # datetimes; asyncpg still binds those against timestamp-without-timezone.
@@ -54,7 +66,7 @@ _ISO_CURSOR_RE = re.compile(
 )
 
 _PUBLIC_CONNECTION_COLUMNS = (
-    "tenant_id, name, dialect, host, port, database, username, "
+    "tenant_id, name, dialect, host, port, database, warehouse, username, "
     "(password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
     "created_by_urn, created_at"
 )
@@ -119,6 +131,10 @@ def _require_select_only(query: str, dialect: str = "postgres") -> None:
         raise SourceConfigError("query must be a read-only SELECT — MySQL file helpers are not allowed")
     if d == "mssql" and _MSSQL_FORBIDDEN.search(stripped):
         raise SourceConfigError("query must be a read-only SELECT — SQL Server file helpers are not allowed")
+    if d == "snowflake" and _SNOWFLAKE_FORBIDDEN.search(stripped):
+        raise SourceConfigError(
+            "query must be a read-only SELECT — Snowflake stage and SYSTEM$ helpers are not allowed"
+        )
 
 
 def _parse_iso_cursor(value: str) -> Optional[datetime.datetime]:
@@ -177,6 +193,22 @@ def _bind_cursor_value(value: str) -> Any:
     return parsed if parsed is not None else value
 
 
+def _row_get(row: dict, key: str, *, dialect: str) -> Any:
+    """Read a column from a driver row dict.
+
+    Snowflake DictCursor returns unquoted column names in UPPER case, so
+    a cursor_property entered as `updated_at` must still match `UPDATED_AT`.
+    """
+    if key in row:
+        return row[key]
+    if dialect == "snowflake":
+        upper = key.upper()
+        for name, value in row.items():
+            if isinstance(name, str) and name.upper() == upper:
+                return value
+    return None
+
+
 async def register_connection(
     pool: asyncpg.Pool,
     *,
@@ -188,6 +220,7 @@ async def register_connection(
     created_by_urn: str,
     dialect: str = "postgres",
     port: Optional[int] = None,
+    warehouse: Optional[str] = None,
     password: Optional[str] = None,
     secret_ref: Optional[str] = None,
 ) -> dict:
@@ -196,6 +229,15 @@ async def register_connection(
         dialect = sql_drivers.normalize_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
+    if dialect == "snowflake":
+        try:
+            host = sql_drivers.normalize_snowflake_host(host)
+        except ValueError as exc:
+            raise SourceConfigError(str(exc)) from exc
+        if warehouse is not None:
+            warehouse = warehouse.strip() or None
+    else:
+        warehouse = None
     if port is None:
         port = sql_drivers.default_port_for(dialect)
 
@@ -233,18 +275,19 @@ async def register_connection(
     await pool.execute(
         """
         INSERT INTO sql_connection
-            (tenant_id, name, dialect, host, port, database, username, password, secret_ref, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            (tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
             dialect = EXCLUDED.dialect,
             host = EXCLUDED.host,
             port = EXCLUDED.port,
             database = EXCLUDED.database,
+            warehouse = EXCLUDED.warehouse,
             username = EXCLUDED.username,
             password = EXCLUDED.password,
             secret_ref = EXCLUDED.secret_ref
         """,
-        tenant_id, name, dialect, host, port, database, username, password, secret_ref, created_by_urn,
+        tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -441,7 +484,7 @@ async def fetch_for_dataset(
         raise SourceFetchError(f"no active SQL source registered as {name!r}")
 
     connection = await pool.fetchrow(
-        "SELECT dialect, host, port, database, username, password, secret_ref "
+        "SELECT dialect, host, port, database, warehouse, username, password, secret_ref "
         "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, row["connection_name"],
     )
@@ -484,6 +527,7 @@ async def fetch_for_dataset(
             password=password,
             sql=sql,
             args=args,
+            warehouse=connection["warehouse"],
         )
     except Exception as exc:
         # Drivers raise a mix of OSError, asyncpg/aiomysql/aioodbc errors.
@@ -491,7 +535,12 @@ async def fetch_for_dataset(
 
     commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
-        candidates = [r[row["cursor_property"]] for r in rows if r.get(row["cursor_property"]) is not None]
+        cursor_key = row["cursor_property"]
+        candidates = [
+            value
+            for r in rows
+            if (value := _row_get(r, cursor_key, dialect=dialect)) is not None
+        ]
         if candidates:
             new_cursor = _cursor_to_str(max(candidates))
             if new_cursor != row["last_cursor_value"]:

@@ -139,6 +139,8 @@ class RegisterSqlConnectionRequest(BaseModel):
     port: Optional[int] = None
     database: str
     username: str
+    # Snowflake compute warehouse (ignored for other dialects)
+    warehouse: Optional[str] = None
     # Optional; if omitted on edit, existing secret is retained
     password: Optional[str] = None
     secret_ref: Optional[str] = None
