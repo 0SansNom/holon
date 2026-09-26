@@ -155,7 +155,13 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
             id="object-connection-secret-ref"
             value={secretRef}
             onChange={(e) => setSecretRef(e.target.value)}
-            placeholder={isAzure ? "env:AZURE_STORAGE_KEY" : isGcs ? "env:GCS_SERVICE_ACCOUNT_JSON" : "env:MINIO_SECRET_KEY"}
+            placeholder={
+              isAzure
+                ? "env:HOLON_CONN_<TENANT>__AZURE_STORAGE_KEY"
+                : isGcs
+                  ? "env:HOLON_CONN_<TENANT>__GCS_SERVICE_ACCOUNT_JSON"
+                  : "env:HOLON_CONN_<TENANT>__S3_SECRET_KEY"
+            }
           />
         </FormGroup>
         {kind === "s3" && (

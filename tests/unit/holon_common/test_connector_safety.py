@@ -19,6 +19,7 @@ from holon_common.connector_safety import (  # noqa: E402
     assert_kafka_topic,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    resolve_connector_secret,
     same_origin,
 )
 
@@ -106,6 +107,53 @@ def test_secret_ref_env_platform_prefix() -> None:
         assert_connector_secret_ref("HOLON_JWT_SECRET", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="platform secret"):
         assert_connector_secret_ref("env:POSTGRES_PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="platform secret|HOLON_CONN_ACME__"):
+        assert_connector_secret_ref("env:HOLON_SOURCE_DB_URL", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="platform secret|HOLON_CONN_ACME__"):
+        assert_connector_secret_ref("env:HOLON_MONGO_URL", tenant_id="acme")
+
+
+def test_secret_ref_env_tenant_allowlist(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    assert_connector_secret_ref("env:HOLON_CONN_ACME__ERP_PASSWORD", tenant_id="acme")
+    assert_connector_secret_ref("env:ERP_PASSWORD", tenant_id="acme")  # non-prod demo names OK
+    monkeypatch.setenv("HOLON_ENV", "production")
+    assert_connector_secret_ref("env:HOLON_CONN_ACME__ERP_PASSWORD", tenant_id="acme")
+    assert_connector_secret_ref("env:HOLON_CONN_ACME_CORP__ERP", tenant_id="acme-corp")
+    with pytest.raises(ConnectorSafetyError, match="HOLON_CONN_ACME__"):
+        assert_connector_secret_ref("env:ERP_PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="HOLON_CONN_ACME__"):
+        assert_connector_secret_ref("env:HOLON_CONN_OTHER__ERP", tenant_id="acme")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HOLON_CONN_ACME_CORP__ERP_PASSWORD",  # acme-corp's secret
+        "HOLON_CONN_ACME___ERP_PASSWORD",  # would be tenant "acme-"
+        "HOLON_CONN_ACME_ERP_PASSWORD",  # old single-underscore shape
+    ],
+)
+def test_secret_ref_env_tenant_prefix_cannot_claim_peer(monkeypatch, name) -> None:
+    monkeypatch.setenv("HOLON_ENV", "production")
+    with pytest.raises(ConnectorSafetyError, match="HOLON_CONN_ACME__"):
+        assert_connector_secret_ref(f"env:{name}", tenant_id="acme")
+
+
+def test_secret_ref_env_ambiguous_tenant_ids_must_use_vault(monkeypatch) -> None:
+    monkeypatch.setenv("HOLON_ENV", "production")
+    for tenant in ("a--b", "acme-"):
+        with pytest.raises(ConnectorSafetyError, match="vault"):
+            assert_connector_secret_ref("env:HOLON_CONN_A__B__X", tenant_id=tenant)
+
+
+def test_resolve_connector_secret_rechecks_stored_ref(monkeypatch) -> None:
+    monkeypatch.setenv("HOLON_SOURCE_DB_URL", "postgresql://holon:pw@postgres/source_erp")
+    monkeypatch.setenv("HOLON_CONN_ACME__ERP_PASSWORD", "s3cret")
+    with pytest.raises(ConnectorSafetyError):
+        resolve_connector_secret("env:HOLON_SOURCE_DB_URL", tenant_id="acme")
+    assert resolve_connector_secret("env:HOLON_CONN_ACME__ERP_PASSWORD", tenant_id="acme") == "s3cret"
+    assert resolve_connector_secret(None, tenant_id="acme") is None
 
 
 def test_secret_ref_vault_requires_tenant_prefix() -> None:
@@ -118,7 +166,11 @@ def test_secret_ref_vault_requires_tenant_prefix() -> None:
 
 def test_secret_ref_k8s_tenant_secret_name() -> None:
     assert_connector_secret_ref("k8s:holon-connector-acme#PASSWORD", tenant_id="acme")
-    assert_connector_secret_ref("k8s:holon-connector-acme-sql#PASSWORD", tenant_id="acme")
+    assert_connector_secret_ref("k8s:holon-connector-acme.sql#PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="holon-connector-acme"):
+        assert_connector_secret_ref("k8s:holon-connector-acme-corp#PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="holon-connector-acme"):
+        assert_connector_secret_ref("aws:holon-connector-acme-corp#PASSWORD", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="platform secret"):
         assert_connector_secret_ref("k8s:holon-connector-acme#HOLON_JWT_SECRET", tenant_id="acme")
 
@@ -168,7 +220,7 @@ def test_production_requires_secret_ref_on_create(monkeypatch) -> None:
         assert_production_requires_secret_ref(None, is_update=False)
     with pytest.raises(ConnectorSafetyError, match="secret_ref is required"):
         assert_production_requires_secret_ref("  ", is_update=False)
-    assert_production_requires_secret_ref("env:ERP_PASSWORD", is_update=False)
+    assert_production_requires_secret_ref("env:HOLON_CONN_ACME__ERP_PASSWORD", is_update=False)
     assert_production_requires_secret_ref(None, is_update=True)
 
 

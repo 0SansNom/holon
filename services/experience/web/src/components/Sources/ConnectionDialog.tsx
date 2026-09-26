@@ -70,7 +70,7 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
             id="connection-secret-ref"
             value={secretRef}
             onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:HUBSPOT_TOKEN"
+            placeholder="env:HOLON_CONN_<TENANT>__HUBSPOT_TOKEN"
           />
         </FormGroup>
         {error && (
