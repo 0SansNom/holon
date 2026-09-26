@@ -13,6 +13,7 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
   const [authHeaderName, setAuthHeaderName] = useState(editing?.auth_header_name ?? "");
   const [authHeaderValue, setAuthHeaderValue] = useState("");
   const [secretRef, setSecretRef] = useState("");
+  const [allowedOrigin, setAllowedOrigin] = useState(editing?.allowed_origin ?? "");
   const [error, setError] = useState<string | null>(null);
   const register = useRegisterConnection();
 
@@ -24,6 +25,7 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
         auth_header_name: authHeaderName,
         auth_header_value: requireSecretRef ? undefined : authHeaderValue || undefined,
         secret_ref: secretRef || undefined,
+        allowed_origin: allowedOrigin || undefined,
       });
       onClose();
     } catch (err) {
@@ -47,6 +49,16 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
             onChange={(e) => setName(e.target.value)}
             placeholder="my_api_credential"
             disabled={isEditing}
+          />
+        </FormGroup>
+        <FormGroup
+          label="Allowed origin"
+          helperText="The only origin sources using this connection may call, e.g. https://api.hubapi.com. Changing it requires re-entering the secret."
+        >
+          <InputGroup
+            value={allowedOrigin}
+            onChange={(e) => setAllowedOrigin(e.target.value)}
+            placeholder="https://api.example.com"
           />
         </FormGroup>
         <FormGroup label="Auth header name" helperText='e.g. "Authorization" or "X-API-Key"'>
@@ -88,7 +100,7 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
             <Button
               intent="primary"
               loading={register.isPending}
-              disabled={!name || !authHeaderName || !secretOk}
+              disabled={!name || !authHeaderName || !allowedOrigin || !secretOk}
               onClick={() => void save()}
             >
               Save

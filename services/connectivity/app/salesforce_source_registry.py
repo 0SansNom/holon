@@ -18,6 +18,7 @@ import httpx
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
@@ -153,7 +154,7 @@ async def register_connection(
         raise SourceConfigError("client_id is required")
     login = _normalize_login_url(login_url or _DEFAULT_LOGIN_URL)
     existing = await pool.fetchrow(
-        "SELECT client_secret, secret_ref FROM salesforce_connection "
+        "SELECT login_url, client_id, client_secret, secret_ref FROM salesforce_connection "
         "WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
@@ -161,6 +162,16 @@ async def register_connection(
     try:
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(client_secret, field="client_secret")
+        if existing is not None:
+            destination_changed = (
+                existing["login_url"] != login
+                or existing["client_id"] != client_id
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=client_secret is not None or secret_ref is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if client_secret is None and secret_ref is None and existing is not None:
