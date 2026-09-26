@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
+import os
 import re
 import stat
+import threading
 from typing import Awaitable, Callable, Optional
 
 import asyncpg
@@ -23,6 +26,9 @@ from holon_common.connector_safety import (
     assert_production_requires_secret_ref,
 )
 from holon_common.secrets import resolve_optional
+from holon_common.security_posture import is_production
+
+logger = logging.getLogger(__name__)
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 # Absolute or relative POSIX-ish paths; no `..`, no nulls, no whitespace tricks.
@@ -297,6 +303,63 @@ def _format_suffix(format: str) -> str:
     return f".{format}"
 
 
+def _truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes"}
+
+
+_insecure_auto_add_warned = threading.Lock()
+_insecure_auto_add_warned_flag = False
+
+
+def _warn_insecure_auto_add_once() -> None:
+    global _insecure_auto_add_warned_flag
+    with _insecure_auto_add_warned:
+        if _insecure_auto_add_warned_flag:
+            return
+        _insecure_auto_add_warned_flag = True
+    logger.warning(
+        "HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY is set — trusting unknown SFTP host keys "
+        "on first connect (AutoAddPolicy). This is only safe for local/demo/CI use; "
+        "set HOLON_SFTP_KNOWN_HOSTS to a pinned known_hosts file for real deployments."
+    )
+
+
+def _configure_host_key_policy(client: paramiko.SSHClient) -> None:
+    """Set the SFTP client's host-key verification policy.
+
+    Resolution order:
+      1. `HOLON_SFTP_KNOWN_HOSTS` set: load system host keys plus that file
+         and reject anything not already pinned there (`RejectPolicy`).
+      2. Production (`HOLON_ENV=production`): always fail closed
+         (`RejectPolicy`) — host key trust must be pinned via
+         `HOLON_SFTP_KNOWN_HOSTS`, never auto-accepted, even if the
+         insecure opt-in below is (mis)configured.
+      3. `HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY` truthy: explicit opt-in to
+         `AutoAddPolicy`, for local/demo/CI SFTP fixtures with no pinned
+         host key. Warned once per process.
+      4. Otherwise: fail closed (`RejectPolicy`) — no known_hosts and no
+         explicit insecure opt-in means we refuse to trust an unknown host
+         key rather than silently auto-accepting it.
+    """
+    known_hosts_path = (os.environ.get("HOLON_SFTP_KNOWN_HOSTS") or "").strip()
+    if known_hosts_path:
+        client.load_system_host_keys()
+        client.load_host_keys(known_hosts_path)
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        return
+
+    if is_production():
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        return
+
+    if _truthy("HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY"):
+        _warn_insecure_auto_add_once()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        return
+
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+
 def _fetch_sync(
     *,
     host: str,
@@ -310,7 +373,7 @@ def _fetch_sync(
     last_synced_path: Optional[str],
 ) -> tuple[list[dict], Optional[str]]:
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _configure_host_key_policy(client)
     try:
         client.connect(
             hostname=host,
