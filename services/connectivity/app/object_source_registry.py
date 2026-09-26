@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urlsplit
 
 import asyncpg
@@ -489,7 +489,9 @@ def _fetch_sync(
     return rows, (new_cursor if incremental else None)
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, bucket, object_key, key_prefix, format, incremental, last_synced_key "
         "FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -534,10 +536,15 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     except (OSError, ValueError, ArrowException) as exc:
         raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if new_cursor is not None and new_cursor != row["last_synced_key"]:
-        await pool.execute(
-            "UPDATE object_source SET last_synced_key = $1 WHERE tenant_id = $2 AND name = $3",
-            new_cursor, tenant_id, name,
-        )
 
-    return rows
+        async def _commit_cursor(cursor: str = new_cursor) -> None:
+            await pool.execute(
+                "UPDATE object_source SET last_synced_key = $1 WHERE tenant_id = $2 AND name = $3",
+                cursor, tenant_id, name,
+            )
+
+        commit = _commit_cursor
+
+    return rows, commit
