@@ -87,7 +87,7 @@ export function SalesforceConnectionDialog({
             id="sf-connection-secret-ref"
             value={secretRef}
             onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:SF_CLIENT_SECRET"
+            placeholder="env:HOLON_CONN_<TENANT>__SF_CLIENT_SECRET"
           />
         </FormGroup>
         {error && (

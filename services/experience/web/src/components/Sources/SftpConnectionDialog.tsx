@@ -75,7 +75,7 @@ export function SftpConnectionDialog({ editing, onClose }: { editing: SftpConnec
             id="sftp-connection-secret-ref"
             value={secretRef}
             onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:SFTP_PASSWORD"
+            placeholder="env:HOLON_CONN_<TENANT>__SFTP_PASSWORD"
           />
         </FormGroup>
         {error && (
