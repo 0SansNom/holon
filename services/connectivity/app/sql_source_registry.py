@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 from typing import Any, Awaitable, Callable, Optional
 
@@ -44,6 +45,12 @@ _MYSQL_FORBIDDEN = re.compile(
 _MSSQL_FORBIDDEN = re.compile(
     r"\b(openrowset\s*\(|opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
     re.IGNORECASE,
+)
+
+# ISO-8601 date or datetime cursor. Naive (no Z/offset) values parse as naive
+# datetimes; asyncpg still binds those against timestamp-without-timezone.
+_ISO_CURSOR_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?)?$"
 )
 
 _PUBLIC_CONNECTION_COLUMNS = (
@@ -114,18 +121,60 @@ def _require_select_only(query: str, dialect: str = "postgres") -> None:
         raise SourceConfigError("query must be a read-only SELECT — SQL Server file helpers are not allowed")
 
 
+def _parse_iso_cursor(value: str) -> Optional[datetime.datetime]:
+    """Parse an ISO-8601 date/datetime cursor as stored or as sources emit it.
+
+    Accepts 'T' or ' ' between date and time (``str(datetime)`` uses a
+    space), 'Z', and ``±HH:MM`` or ``±HHMM`` offsets (Salesforce JSON uses
+    ``+0000``). Date-only values parse to midnight. None when not a date.
+    """
+    match = _ISO_CURSOR_RE.match(value)
+    if not match:
+        return None
+    day, clock, offset = match.groups()
+    iso = day
+    if clock:
+        if "." in clock:
+            whole, frac = clock.split(".", 1)
+            clock = f"{whole}.{frac[:6].ljust(6, '0')}"
+        iso = f"{day}T{clock}"
+        if offset:
+            if offset == "Z":
+                offset = "+00:00"
+            elif ":" not in offset:
+                offset = f"{offset[:3]}:{offset[3:]}"
+            iso += offset
+    try:
+        return datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+
+
+def _cursor_to_str(value: Any) -> str:
+    """Persist date/datetime cursors as ISO-8601 so they round-trip on bind."""
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value.isoformat()
+    return str(value)
+
+
 def _bind_cursor_value(value: str) -> Any:
     """Coerce a stored cursor string so drivers can bind typed columns.
 
     Avoids a dialect-specific catalog lookup (pg_attribute) while still
-    comparing integers/floats natively instead of lexicographically.
+    comparing integers/floats/timestamps natively instead of lexicographically.
+    A bare ISO string bound against a `timestamptz` column fails on asyncpg
+    (it does not implicitly cast text -> timestamptz), so date/datetime
+    cursors are parsed into `datetime.datetime` — timezone-aware when the
+    value carries a 'Z' or UTC offset, naive otherwise.
     """
     if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
         return int(value)
     try:
         return float(value)
     except ValueError:
-        return value
+        pass
+    parsed = _parse_iso_cursor(value)
+    return parsed if parsed is not None else value
 
 
 async def register_connection(
@@ -444,7 +493,7 @@ async def fetch_for_dataset(
     if row["cursor_property"]:
         candidates = [r[row["cursor_property"]] for r in rows if r.get(row["cursor_property"]) is not None]
         if candidates:
-            new_cursor = str(max(candidates))
+            new_cursor = _cursor_to_str(max(candidates))
             if new_cursor != row["last_cursor_value"]:
 
                 async def _commit_cursor(cursor: str = new_cursor) -> None:
