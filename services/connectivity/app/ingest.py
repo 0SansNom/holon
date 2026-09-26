@@ -26,6 +26,7 @@ from holon_common import (
     outbox,
 )
 from holon_common.audit import emit_audit
+from holon_common.connector_safety import ConnectorSafetyError
 
 from . import (
     deps,
@@ -433,6 +434,8 @@ async def _run_sync_for_dataset(
     except sftp_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except salesforce_source_registry.SourceFetchError as exc:
+        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+    except ConnectorSafetyError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc

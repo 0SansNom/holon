@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 import asyncpg
 import httpx
 
+from app.pinned_http import pinned_transport
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
@@ -451,7 +452,7 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
         assert_http_url(connection["oauth2_token_url"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         response = await client.post(connection["oauth2_token_url"], data=form)
     if response.status_code >= 400:
         raise SourceFetchError(
@@ -520,7 +521,7 @@ async def fetch_for_dataset(
         url = _add_query_param(url, row["incremental_param"], row["last_cursor_value"])
     pages_fetched = 0
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         while url is not None:
             pages_fetched += 1
             if pages_fetched > _MAX_PAGES:

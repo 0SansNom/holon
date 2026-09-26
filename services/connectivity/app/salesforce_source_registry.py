@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 import asyncpg
 import httpx
 
+from app.pinned_http import pinned_transport
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
@@ -397,7 +398,7 @@ async def _bearer_token(
         "client_id": connection["client_id"],
         "client_secret": client_secret,
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         response = await client.post(token_url, data=form)
     if response.status_code >= 400:
         raise SourceFetchError(
@@ -480,7 +481,7 @@ async def fetch_for_dataset(
     pages_fetched = 0
     next_url: Optional[str] = query_url
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=30.0) as client:
         while next_url:
             pages_fetched += 1
             if pages_fetched > _MAX_PAGES:
