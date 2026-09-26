@@ -160,19 +160,72 @@ def test_secret_ref_vault_requires_tenant_prefix() -> None:
     assert_connector_secret_ref("vault:connectors/acme/db#password", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="connectors/"):
         assert_connector_secret_ref("vault:holon/prod/connector-admin#x", tenant_id="acme")
-    with pytest.raises(ConnectorSafetyError, match="holon-connector-acme"):
-        assert_connector_secret_ref("k8s:acme-platform#PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="connectors/"):
+        assert_connector_secret_ref("vault:connectors/acme/../other/db#password", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="vault:connectors"):
+        assert_connector_secret_ref("vault:connectors/acme/db", tenant_id="acme")  # no #key
 
 
-def test_secret_ref_k8s_tenant_secret_name() -> None:
-    assert_connector_secret_ref("k8s:holon-connector-acme#PASSWORD", tenant_id="acme")
-    assert_connector_secret_ref("k8s:holon-connector-acme.sql#PASSWORD", tenant_id="acme")
+def test_secret_ref_k8s_uses_provider_namespace_name_key_form() -> None:
+    assert_connector_secret_ref("k8s:holon/holon-connector-acme/PASSWORD", tenant_id="acme")
+    assert_connector_secret_ref("k8s:holon/holon-connector-acme.sql/password", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="holon-connector-acme"):
-        assert_connector_secret_ref("k8s:holon-connector-acme-corp#PASSWORD", tenant_id="acme")
+        assert_connector_secret_ref("k8s:holon/holon-connector-acme-corp/PASSWORD", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="holon-connector-acme"):
-        assert_connector_secret_ref("aws:holon-connector-acme-corp#PASSWORD", tenant_id="acme")
+        assert_connector_secret_ref("k8s:holon/acme-platform/PASSWORD", tenant_id="acme")
     with pytest.raises(ConnectorSafetyError, match="platform secret"):
-        assert_connector_secret_ref("k8s:holon-connector-acme#HOLON_JWT_SECRET", tenant_id="acme")
+        assert_connector_secret_ref("k8s:holon/holon-connector-acme/HOLON_JWT_SECRET", tenant_id="acme")
+    # The old guard-only shape never resolved (provider needs namespace/name/key).
+    with pytest.raises(ConnectorSafetyError, match="k8s:<namespace>"):
+        assert_connector_secret_ref("k8s:holon-connector-acme#PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="namespace"):
+        assert_connector_secret_ref("k8s:Bad_NS/holon-connector-acme/PASSWORD", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="plain key"):
+        assert_connector_secret_ref("k8s:holon/holon-connector-acme/..", tenant_id="acme")
+
+
+def test_secret_ref_aws_uses_provider_pipe_json_key_form() -> None:
+    assert_connector_secret_ref("aws:connectors/acme/db", tenant_id="acme")
+    assert_connector_secret_ref("aws:connectors/acme/db|password", tenant_id="acme")
+    assert_connector_secret_ref("aws:holon-connector-acme|password", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="holon-connector-acme"):
+        assert_connector_secret_ref("aws:holon-connector-acme-corp|password", tenant_id="acme")
+    with pytest.raises(ConnectorSafetyError, match="ARN"):
+        assert_connector_secret_ref(
+            "aws:arn:aws:secretsmanager:eu-west-1:111122223333:secret:connectors/acme/db", tenant_id="acme"
+        )
+    with pytest.raises(ConnectorSafetyError, match="platform secret"):
+        assert_connector_secret_ref("aws:connectors/acme/db|HOLON_JWT_SECRET", tenant_id="acme")
+    # The old guard-only '#' form: the provider splits on '|', so this whole
+    # string would be the secret id — not one this tenant owns.
+    with pytest.raises(ConnectorSafetyError, match="connectors/acme/"):
+        assert_connector_secret_ref("aws:holon-connector-acme#PASSWORD", tenant_id="acme")
+
+
+def test_guard_and_provider_parse_refs_the_same_way(monkeypatch) -> None:
+    """A ref the guard accepts must reach the provider with the same parts."""
+    from holon_common import secrets
+
+    seen: dict[str, tuple] = {}
+
+    class FakeK8s:
+        def get(self, ref: str) -> str:
+            namespace, name, key = ref.removeprefix("k8s:").split("/")
+            seen["k8s"] = (namespace, name, key)
+            return "v"
+
+    class FakeAws:
+        def get(self, ref: str) -> str:
+            secret_id, _, json_key = ref.removeprefix("aws:").partition("|")
+            seen["aws"] = (secret_id, json_key)
+            return "v"
+
+    monkeypatch.setattr(secrets, "KubernetesSecretProvider", FakeK8s)
+    monkeypatch.setattr(secrets, "AwsSecretsManagerProvider", FakeAws)
+    assert resolve_connector_secret("k8s:holon/holon-connector-acme/PASSWORD", tenant_id="acme") == "v"
+    assert seen["k8s"] == ("holon", "holon-connector-acme", "PASSWORD")
+    assert resolve_connector_secret("aws:connectors/acme/db|password", tenant_id="acme") == "v"
+    assert seen["aws"] == ("connectors/acme/db", "password")
 
 
 def test_kafka_holon_topics_reserved() -> None:

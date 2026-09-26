@@ -296,6 +296,69 @@ def assert_production_requires_secret_ref(ref: Optional[str], *, is_update: bool
         raise ConnectorSafetyError("secret_ref is required in production")
 
 
+# Parsers below split refs exactly like holon_common.secrets' providers do,
+# so a ref that passes the guard is one the provider will actually resolve.
+_SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# RFC 1123 label (namespace) / subdomain (Secret name).
+_K8S_NAMESPACE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _assert_secret_key(key: str, *, what: str) -> None:
+    if not key or not _SECRET_KEY_RE.match(key) or key in {".", ".."}:
+        raise ConnectorSafetyError(f"{what} must be a plain key name, got {key!r}")
+    _assert_not_platform_secret_name(key)
+
+
+def _assert_vault_ref(body: str, *, tenant_id: str) -> None:
+    """vault:connectors/<tenant>/<path>#key (VaultSecretProvider form)."""
+    path, sep, key = body.partition("#")
+    if not sep:
+        raise ConnectorSafetyError("vault secret_ref must be vault:connectors/<tenant>/<path>#key")
+    prefix = f"connectors/{tenant_id}/"
+    segments = path.split("/")
+    if not path.startswith(prefix) or any(seg in {"", ".", ".."} for seg in segments):
+        raise ConnectorSafetyError(f"vault secret_ref must start with {prefix!r} (no empty or '..' segments)")
+    _assert_secret_key(key, what="vault secret_ref key")
+
+
+def _assert_k8s_ref(body: str, *, tenant_id: str) -> None:
+    """k8s:<namespace>/holon-connector-<tenant>[.<suffix>]/<key> (KubernetesSecretProvider form).
+
+    '.' delimits the suffix: tenant ids are [a-z0-9-], so a '-' suffix would
+    let tenant "acme" claim "holon-connector-acme-corp".
+    """
+    parts = body.split("/")
+    expected = f"holon-connector-{tenant_id}"
+    if len(parts) != 3:
+        raise ConnectorSafetyError(f"k8s secret_ref must be k8s:<namespace>/{expected}[.<suffix>]/<key>")
+    namespace, name, key = parts
+    if not _K8S_NAMESPACE_RE.match(namespace):
+        raise ConnectorSafetyError(f"invalid k8s namespace {namespace!r} in secret_ref")
+    if name != expected and not (name.startswith(f"{expected}.") and _SECRET_KEY_RE.match(name)):
+        raise ConnectorSafetyError(f"k8s secret_ref name must be {expected} or {expected}.<suffix>")
+    _assert_secret_key(key, what="k8s secret_ref key")
+
+
+def _assert_aws_ref(body: str, *, tenant_id: str) -> None:
+    """aws:<secret-id>[|json-key] (AwsSecretsManagerProvider form).
+
+    secret-id must be connectors/<tenant>/... or holon-connector-<tenant>;
+    ARNs are refused since they can name a secret in another account.
+    """
+    secret_id, sep, json_key = body.partition("|")
+    expected = f"holon-connector-{tenant_id}"
+    prefix = f"connectors/{tenant_id}/"
+    if secret_id.startswith("arn:"):
+        raise ConnectorSafetyError(f"aws secret_ref must use a secret name ({prefix}... or {expected}), not an ARN")
+    segments = secret_id.split("/")
+    if not (secret_id == expected or secret_id.startswith(prefix)) or any(
+        seg in {"", ".", ".."} for seg in segments
+    ):
+        raise ConnectorSafetyError(f"aws secret_ref must start with {prefix!r} or be {expected}")
+    if sep:
+        _assert_secret_key(json_key, what="aws secret_ref json key")
+
+
 def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
     """Tenant-supplied secret_ref must not resolve platform credentials."""
     if ref is None or ref == "":
@@ -310,30 +373,12 @@ def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
     if scheme in {"vault", "k8s", "aws"}:
         if not tenant_id:
             raise ConnectorSafetyError("secret_ref requires a tenant_id")
-        path, _, key = rest.partition("#")
-        path = path.strip()
-        key = key.strip()
         if scheme == "vault":
-            prefix = f"connectors/{tenant_id}/"
-            if not path.startswith(prefix):
-                raise ConnectorSafetyError(f"vault secret_ref must start with {prefix!r}")
+            _assert_vault_ref(rest, tenant_id=tenant_id)
         elif scheme == "k8s":
-            # '.' delimits the suffix: tenant ids are [a-z0-9-], so a '-'
-            # suffix would let tenant "acme" claim "holon-connector-acme-corp".
-            expected = f"holon-connector-{tenant_id}"
-            if path != expected and not path.startswith(f"{expected}."):
-                raise ConnectorSafetyError(
-                    f"k8s secret_ref must be {expected} or {expected}.<suffix>"
-                )
+            _assert_k8s_ref(rest, tenant_id=tenant_id)
         else:
-            expected = f"holon-connector-{tenant_id}"
-            prefix = f"connectors/{tenant_id}/"
-            if not (path.startswith(prefix) or path == expected):
-                raise ConnectorSafetyError(
-                    f"aws secret_ref must start with {prefix!r} or be {expected}"
-                )
-        if key:
-            _assert_not_platform_secret_name(key)
+            _assert_aws_ref(rest, tenant_id=tenant_id)
         return
     raise ConnectorSafetyError(f"unsupported secret_ref scheme: {scheme!r}")
 
