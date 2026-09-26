@@ -58,9 +58,10 @@ def test_require_soql_must_be_select() -> None:
 
 
 def test_apply_cursor_appends_where_or_and() -> None:
+    # DateTime cursor: SOQL requires an unquoted literal here.
     assert (
         _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-01T00:00:00Z")
-        == "SELECT Id FROM Account WHERE SystemModstamp > '2024-01-01T00:00:00Z'"
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T00:00:00Z"
     )
     assert (
         _apply_cursor(
@@ -68,7 +69,52 @@ def test_apply_cursor_appends_where_or_and() -> None:
             "SystemModstamp",
             "2024-01-01T00:00:00Z",
         )
-        == "SELECT Id FROM Account WHERE Name != null AND SystemModstamp > '2024-01-01T00:00:00Z' ORDER BY Name"
+        == "SELECT Id FROM Account WHERE Name != null AND SystemModstamp > 2024-01-01T00:00:00Z ORDER BY Name"
+    )
+
+
+def test_apply_cursor_datetime_variants_are_unquoted() -> None:
+    # Bare date stays a Date literal.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "LastModifiedDate", "2024-01-01")
+        == "SELECT Id FROM Account WHERE LastModifiedDate > 2024-01-01"
+    )
+    # Fractional seconds are dropped (cursor moves back < 1s: re-read, never skip).
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-01T12:34:56.789Z")
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T12:34:56Z"
+    )
+    # Offsets are normalized to UTC 'Z'.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-01T12:34:56+02:00")
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-01T10:34:56Z"
+    )
+
+
+def test_apply_cursor_accepts_the_format_salesforce_actually_returns() -> None:
+    # REST query JSON returns DateTime fields as ...000+0000 (no colon in the
+    # offset); that value is what gets stored as last_cursor_value.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "SystemModstamp", "2024-01-15T10:30:00.000+0000")
+        == "SELECT Id FROM Account WHERE SystemModstamp > 2024-01-15T10:30:00Z"
+    )
+
+
+def test_apply_cursor_non_iso_string_stays_quoted_and_escaped() -> None:
+    # Plain string cursor (e.g. a Salesforce record Id) must remain quoted.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "Id", "001A000001abcDE")
+        == "SELECT Id FROM Account WHERE Id > '001A000001abcDE'"
+    )
+    # Quotes/backslashes in a non-ISO string cursor are still escaped.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "Name", "O'Brien")
+        == "SELECT Id FROM Account WHERE Name > 'O\\'Brien'"
+    )
+    # A string that merely starts with digits but isn't a valid ISO date is quoted.
+    assert (
+        _apply_cursor("SELECT Id FROM Account", "Name", "2024-13-99")
+        == "SELECT Id FROM Account WHERE Name > '2024-13-99'"
     )
 
 

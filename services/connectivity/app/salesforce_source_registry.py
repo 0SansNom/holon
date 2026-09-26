@@ -30,6 +30,11 @@ _DEFAULT_LOGIN_URL = "https://login.salesforce.com"
 _DEFAULT_API_VERSION = "v59.0"
 _API_VERSION_RE = re.compile(r"^v\d+(?:\.\d+)?$")
 _CURSOR_PROPERTY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+# ISO-8601 date or datetime, which SOQL requires as an unquoted Date/DateTime
+# literal on Date/DateTime fields.
+_ISO_CURSOR_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?)?$"
+)
 _MAX_PAGES = 100
 _OAUTH2_REFRESH_MARGIN_SECONDS = 60
 _OAUTH2_DEFAULT_TTL_SECONDS = 300
@@ -111,10 +116,63 @@ def _require_cursor_property(cursor_property: Optional[str]) -> Optional[str]:
     return name
 
 
+def _parse_iso_cursor(value: str) -> Optional[datetime.datetime]:
+    """Parse an ISO-8601 date/datetime cursor as stored or as sources emit it.
+
+    Accepts 'T' or ' ' between date and time (``str(datetime)`` uses a
+    space), 'Z', and ``±HH:MM`` or ``±HHMM`` offsets (Salesforce JSON uses
+    ``+0000``). Date-only values parse to midnight. None when not a date.
+    """
+    match = _ISO_CURSOR_RE.match(value)
+    if not match:
+        return None
+    day, clock, offset = match.groups()
+    iso = day
+    if clock:
+        if "." in clock:
+            whole, frac = clock.split(".", 1)
+            clock = f"{whole}.{frac[:6].ljust(6, '0')}"
+        iso = f"{day}T{clock}"
+        if offset:
+            if offset == "Z":
+                offset = "+00:00"
+            elif ":" not in offset:
+                offset = f"{offset[:3]}:{offset[3:]}"
+            iso += offset
+    try:
+        return datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+
+
+def _soql_date_literal(value: str) -> Optional[str]:
+    """Render a date/datetime cursor as an unquoted SOQL literal, else None.
+
+    Datetimes go out as UTC ``YYYY-MM-DDThh:mm:ssZ``: Salesforce emits
+    ``2024-01-15T10:30:00.000+0000`` in JSON, which is not a SOQL literal.
+    Dropping the milliseconds moves the cursor back by < 1s, so the next
+    sync may re-read a few rows but never skips one.
+    """
+    parsed = _parse_iso_cursor(value)
+    if parsed is None:
+        return None
+    if _ISO_CURSOR_RE.match(value).group(2) is None:
+        return parsed.date().isoformat()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> str:
     """Append an incremental filter without rewriting the user's SELECT list."""
-    literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
-    clause = f"{cursor_property} > '{literal}'"
+    date_literal = _soql_date_literal(last_cursor_value)
+    if date_literal is not None:
+        # SOQL Date/DateTime literals must be unquoted — a quoted string
+        # would compare against a Date/DateTime field as a type mismatch.
+        clause = f"{cursor_property} > {date_literal}"
+    else:
+        literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
+        clause = f"{cursor_property} > '{literal}'"
     lowered = soql.lower()
     # Insert before ORDER BY / LIMIT / OFFSET when present.
     for keyword in (" order by ", " limit ", " offset "):
