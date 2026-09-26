@@ -40,7 +40,7 @@ export function nextSyncDescription(lastFinishedAt: string, intervalMinutes: num
 export const CLASSIFICATIONS = ["public", "internal", "confidential", "restricted"] as const;
 
 export const SECRET_REF_HELP =
-  "e.g. env:HOLON_CONN_<TENANT>__ERP_PASSWORD or vault:connectors/<tenant>/db#password — Holon stores the reference, not the secret. In production, env: must use the HOLON_CONN_<TENANT>__* prefix (tenant id uppercased, dashes as underscores).";
+  "e.g. env:HOLON_CONN_<TENANT>__ERP_PASSWORD, vault:connectors/<tenant>/db#password, k8s:<namespace>/holon-connector-<tenant>/<key> or aws:connectors/<tenant>/db|<json-key> — Holon stores the reference, not the secret. In production, env: must use the HOLON_CONN_<TENANT>__* prefix (tenant id uppercased, dashes as underscores).";
 
 export function formFromSource(source: GenericSource) {
   const authMethod: AuthMethod = source.connection_name ? "connection" : source.auth_header_name ? "inline" : "none";
