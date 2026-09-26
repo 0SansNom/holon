@@ -124,6 +124,7 @@ async def register_sql_connection(
             dialect=body.dialect,
             port=body.port,
             database=body.database,
+            warehouse=body.warehouse,
             username=body.username,
             password=body.password,
             secret_ref=body.secret_ref,
