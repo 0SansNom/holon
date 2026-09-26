@@ -335,7 +335,13 @@ async def _run_sync_for_dataset(
     if plugin is not None:
         local_name = plugin.manifest.connector_local_name or f"plugin-{plugin.manifest.name}"
         connector_urn = build_urn(tenant_id, "global", "connector", local_name)
-        read = plugin.fetch
+
+        async def read():
+            # ConnectorPlugin.fetch() returns plain rows (no cursor to
+            # defer) — wrap so the call site below can treat every
+            # source uniformly as (rows, commit_cursor).
+            plugin_rows = await plugin.fetch()
+            return plugin_rows, None
     else:
         source = await generic_source_registry.get_source(deps.pool, tenant_id, dataset_name)
         if source is not None:
@@ -415,8 +421,9 @@ async def _run_sync_for_dataset(
                             write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
+    commit_cursor = None
     try:
-        rows = await read()
+        rows, commit_cursor = await read()
     except generic_source_registry.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except sql_source_registry.SourceFetchError as exc:
@@ -434,6 +441,8 @@ async def _run_sync_for_dataset(
     result = await asyncio.to_thread(
         iceberg_writer.write_snapshot, rows, dataset_name, mode=write_mode, tenant_id=tenant_id, **ICEBERG_CONFIG
     )
+    if commit_cursor is not None:
+        await commit_cursor()
     finished_at = datetime.now(timezone.utc)
 
     return await _finalize_sync(

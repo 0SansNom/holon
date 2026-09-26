@@ -6,7 +6,7 @@ import asyncio
 import io
 import re
 import stat
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import asyncpg
 import paramiko
@@ -386,7 +386,9 @@ def _fetch_sync(
         client.close()
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, remote_path, remote_prefix, format, incremental, last_synced_path "
         "FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -428,10 +430,15 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     except (OSError, ValueError, ArrowException, paramiko.SSHException) as exc:
         raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if new_cursor is not None and new_cursor != row["last_synced_path"]:
-        await pool.execute(
-            "UPDATE sftp_source SET last_synced_path = $1 WHERE tenant_id = $2 AND name = $3",
-            new_cursor, tenant_id, name,
-        )
 
-    return rows
+        async def _commit_cursor(cursor: str = new_cursor) -> None:
+            await pool.execute(
+                "UPDATE sftp_source SET last_synced_path = $1 WHERE tenant_id = $2 AND name = $3",
+                cursor, tenant_id, name,
+            )
+
+        commit = _commit_cursor
+
+    return rows, commit
