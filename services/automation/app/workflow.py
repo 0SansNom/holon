@@ -45,23 +45,6 @@ def _mint(principal: Principal, jwt_secret: str, *, ttl_seconds: int = 60) -> st
 
 WORKFLOW_ENGINE_URN_NAME = "automation-workflow-engine"
 
-DDL = """
-CREATE TABLE IF NOT EXISTS workflow_execution (
-    id BIGSERIAL PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    approval_id BIGINT NOT NULL,
-    action_name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-
-async def ensure_schema(conn: asyncpg.Connection) -> None:
-    await conn.execute(DDL)
-
 
 def _workflow_engine_principal(tenant_id: str) -> Principal:
     return Principal(
