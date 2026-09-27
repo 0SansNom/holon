@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from typing import Awaitable, Callable, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import asyncpg
 import pyarrow.csv as pacsv
@@ -18,7 +18,7 @@ from pyarrow.lib import ArrowException
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
-    pin_connector_host,
+    pin_object_endpoint,
     assert_connector_secret_ref,
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
@@ -535,20 +535,6 @@ def _fetch_sync(
     return rows, (new_cursor if incremental else None)
 
 
-def _endpoint_pinned(endpoint: str, kind: str, hostname: str) -> str:
-    """Pin S3 to the checked IP. Other kinds still fail closed on rebinding."""
-    pinned = pin_connector_host(hostname)
-    if kind != "s3":
-        return endpoint
-    raw = endpoint if "://" in endpoint else f"//{endpoint}"
-    parsed = urlsplit(raw)
-    host = f"[{pinned}]" if ":" in pinned else pinned
-    netloc = f"{host}:{parsed.port}" if parsed.port else host
-    if "://" not in endpoint:
-        return netloc
-    return urlunsplit(parsed._replace(netloc=netloc))
-
-
 async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
 ) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
@@ -568,11 +554,8 @@ async def fetch_for_dataset(
     if connection is None:
         raise SourceFetchError(f"source {name!r} references connection {row['connection_name']!r}, which no longer exists")
 
-    hostname = urlsplit(
-        connection["endpoint"] if "://" in connection["endpoint"] else f"//{connection['endpoint']}"
-    ).hostname
     try:
-        endpoint = _endpoint_pinned(connection["endpoint"], connection["kind"], hostname or "")
+        endpoint = pin_object_endpoint(connection["endpoint"], kind=connection["kind"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
     secret_access_key = _resolve_secret(connection["secret_ref"], tenant_id) or connection["secret_access_key"]
