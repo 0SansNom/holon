@@ -12,6 +12,7 @@ sets from Identity before the process serves traffic.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import socket
@@ -128,3 +129,25 @@ async def hydrate_revocation_snapshot(*, identity_url: Optional[str] = None) -> 
         len(data.get("disabled_principal_urns") or []),
         len(data.get("revoked_jtis") or []),
     )
+
+
+async def refresh_revocation_snapshot_forever(
+    *,
+    interval_seconds: float = 30.0,
+    identity_url: Optional[str] = None,
+) -> None:
+    """Re-read Identity's snapshot on an interval.
+
+    A failed refresh keeps the denylist already in memory. The first
+    sleep happens before the first refresh so boot can hydrate once
+    itself and this loop does not double-fetch immediately.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await hydrate_revocation_snapshot(identity_url=identity_url)
+        except Exception:
+            logger.warning(
+                "revocation snapshot refresh failed; keeping the previous denylist",
+                exc_info=True,
+            )
