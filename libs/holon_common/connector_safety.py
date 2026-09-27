@@ -7,7 +7,7 @@ import os
 import re
 import socket
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 # Platform service DNS names on the compose/cluster network. Connecting a
 # tenant connector here is SSRF into Holon itself. `postgres` is NOT in
@@ -234,6 +234,29 @@ def pin_connector_host(host: str) -> str:
     if _answers_blocked(second, allow_private=allow_private, platform_ips=platform_ips):
         raise ConnectorSafetyError(f"host {host!r} DNS answer changed to a blocked address")
     return str(first[0])
+
+
+def pin_object_endpoint(endpoint: str, *, kind: str) -> str:
+    """Checked endpoint for an object-store client.
+
+    DNS is resolved twice, and a second answer on a blocked address is
+    refused. Only plain HTTP S3 is then dialed at that IP. An https
+    endpoint — and a scheme-less one, which the S3 client opens as https —
+    keeps its hostname: pyarrow signs the request and verifies TLS against
+    that name, and it cannot set SNI separately. Azure and GCS resolve
+    their own service host; the check still runs, then the original
+    endpoint is returned.
+    """
+    raw = endpoint if "://" in endpoint else f"//{endpoint}"
+    parsed = urlsplit(raw)
+    if not parsed.hostname:
+        raise ConnectorSafetyError("endpoint missing host")
+    pinned = pin_connector_host(parsed.hostname)
+    if kind != "s3" or parsed.scheme != "http":
+        return endpoint
+    host = f"[{pinned}]" if ":" in pinned else pinned
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urlunsplit(parsed._replace(netloc=netloc))
 
 
 def assert_http_url(url: str, *, resolve: bool = True) -> None:
