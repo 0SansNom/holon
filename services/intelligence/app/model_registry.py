@@ -17,6 +17,24 @@ logger = logging.getLogger("intelligence.model_registry")
 _VALID_FRAMEWORKS = {"sklearn"}
 
 
+class ModelRegistryError(Exception):
+    """Stable registry failure. ``http_status`` is what the route returns."""
+
+    http_status = 400
+
+
+class ModelDisabled(ModelRegistryError):
+    http_status = 403
+
+
+class ModelArtifactInvalid(ModelRegistryError):
+    http_status = 400
+
+
+class ModelNotActive(ModelRegistryError):
+    http_status = 400
+
+
 def joblib_models_allowed() -> bool:
     """Return whether joblib model deserialization is allowed."""
     from holon_common.security_posture import is_production
@@ -31,7 +49,7 @@ def joblib_models_allowed() -> bool:
 
 def _require_joblib_allowed() -> None:
     if not joblib_models_allowed():
-        raise ValueError(
+        raise ModelDisabled(
             "joblib model register/predict disabled "
             "(set HOLON_ALLOW_JOBLIB_MODELS=true only for local DX — refused in production posture)"
         )
@@ -52,7 +70,7 @@ def _validate_artifact_sync(artifact_bytes: bytes, framework: str) -> None:
     """Validate model artifact deserialization synchronously."""
     model = joblib.load(io.BytesIO(artifact_bytes))
     if not hasattr(model, "predict"):
-        raise ValueError(f"deserialized {framework} artifact has no predict() method")
+        raise ModelArtifactInvalid(f"deserialized {framework} artifact has no predict() method")
 
 
 def _put_artifact_sync(s3_client, bucket: str, key: str, artifact_bytes: bytes) -> None:
@@ -73,11 +91,13 @@ async def register_model(
 ) -> dict:
     _require_joblib_allowed()
     if framework not in _VALID_FRAMEWORKS:
-        raise ValueError(f"unknown framework {framework!r} (must be one of {sorted(_VALID_FRAMEWORKS)})")
+        raise ModelArtifactInvalid(f"unknown framework {framework!r} (must be one of {sorted(_VALID_FRAMEWORKS)})")
     try:
         await asyncio.to_thread(_validate_artifact_sync, artifact_bytes, framework)
+    except ModelRegistryError:
+        raise
     except Exception as exc:
-        raise ValueError(f"artifact does not deserialize as a valid {framework} model: {exc}") from exc
+        raise ModelArtifactInvalid(f"artifact does not deserialize as a valid {framework} model: {exc}") from exc
 
     key = _artifact_key(name, version)
     await asyncio.to_thread(_put_artifact_sync, s3_client, bucket, key, artifact_bytes)
@@ -125,7 +145,7 @@ async def predict(pool: asyncpg.Pool, s3_client, bucket: str, *, name: str, feat
     if registration is None:
         raise ValueError(f"no model registered as {name!r}")
     if registration["status"] != "active":
-        raise ValueError(f"model {name!r} is {registration['status']}, not active")
+        raise ModelNotActive(f"model {name!r} is {registration['status']}, not active")
 
     input_schema = registration["input_schema"]
     properties = list(input_schema.get("properties", {}).keys())
