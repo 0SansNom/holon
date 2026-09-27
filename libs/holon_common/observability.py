@@ -180,7 +180,12 @@ class CircuitBreaker:
         self._state = "closed"
         self._opened_at: Optional[float] = None
 
-    async def call(self, fn: Callable[[], Awaitable[Any]]) -> Any:
+    async def call(
+        self,
+        fn: Callable[[], Awaitable[Any]],
+        *,
+        counts_as_failure: Optional[Callable[[BaseException], bool]] = None,
+    ) -> Any:
         if self._state == "open":
             if time.monotonic() - self._opened_at < self._cooldown_seconds:
                 raise CircuitBreakerOpenError(f"circuit '{self._name}' is open")
@@ -188,7 +193,14 @@ class CircuitBreaker:
 
         try:
             result = await fn()
-        except Exception:
+        except Exception as exc:
+            if counts_as_failure is not None and not counts_as_failure(exc):
+                # The upstream answered. A 4xx is not a streak of outages,
+                # and a half-open probe that gets one can close.
+                self._failures = 0
+                if self._state == "half_open":
+                    self._state = "closed"
+                raise
             self._failures += 1
             if self._state == "half_open" or self._failures >= self._failure_threshold:
                 self._state = "open"
