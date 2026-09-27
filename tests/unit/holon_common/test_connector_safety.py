@@ -20,6 +20,7 @@ from holon_common.connector_safety import (  # noqa: E402
     assert_kafka_topic,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     pin_connector_host,
     resolve_connector_secret,
     same_origin,
@@ -298,6 +299,20 @@ def test_destination_change_requires_secret() -> None:
         assert_destination_change_requires_secret(
             is_update=True, destination_changed=True, secret_provided=False
         )
+
+
+
+def test_stored_plaintext_secret_is_refused_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("HOLON_ENV", "production")
+    with pytest.raises(ConnectorSafetyError, match="secret_ref"):
+        connector_secret(secret_ref=None, plaintext="hunter2", resolved=None)
+    assert connector_secret(secret_ref="env:ERP_PASSWORD", plaintext="hunter2", resolved="from-vault") == "from-vault"
+    assert connector_secret(secret_ref="env:ERP_PASSWORD", plaintext="hunter2", resolved=None) is None
+
+
+def test_stored_plaintext_secret_is_usable_outside_production(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    assert connector_secret(secret_ref=None, plaintext="hunter2", resolved=None) == "hunter2"
 
 
 def test_unwrap_mapped_ip() -> None:
