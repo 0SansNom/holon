@@ -23,6 +23,7 @@ from holon_common.connector_safety import (
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     resolve_connector_secret,
 )
 
@@ -558,7 +559,11 @@ async def fetch_for_dataset(
         endpoint = pin_object_endpoint(connection["endpoint"], kind=connection["kind"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    secret_access_key = _resolve_secret(connection["secret_ref"], tenant_id) or connection["secret_access_key"]
+    secret_access_key = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["secret_access_key"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
 
     try:
         rows, new_cursor = await asyncio.to_thread(

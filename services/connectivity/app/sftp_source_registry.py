@@ -26,6 +26,7 @@ from holon_common.connector_safety import (
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     resolve_connector_secret,
 )
 from holon_common.security_posture import is_production
@@ -493,7 +494,11 @@ async def fetch_for_dataset(
         pinned_host = pin_connector_host(connection["host"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    password = _resolve_secret(connection["secret_ref"], tenant_id) or connection["password"] or ""
+    password = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["password"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    ) or ""
 
     try:
         rows, new_cursor = await asyncio.to_thread(

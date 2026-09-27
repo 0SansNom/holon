@@ -23,6 +23,7 @@ from holon_common.connector_safety import (
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     same_origin,
     resolve_connector_secret,
 )
@@ -451,7 +452,11 @@ async def _bearer_token(
     ):
         return connection["oauth2_cached_token"], connection["instance_url"]
 
-    client_secret = _resolve_secret(connection["secret_ref"], tenant_id) or connection["client_secret"]
+    client_secret = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["client_secret"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
     if not client_secret:
         raise SourceFetchError(
             f"connection {connection_name!r}: client_secret (or secret_ref) is required"

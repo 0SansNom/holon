@@ -20,6 +20,7 @@ from holon_common.connector_safety import (
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     same_origin,
     resolve_connector_secret,
 )
@@ -511,7 +512,11 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
         if (expires_at - now).total_seconds() > _OAUTH2_REFRESH_MARGIN_SECONDS:
             return connection["oauth2_cached_token"]
 
-    client_secret = _resolve_secret(connection["secret_ref"], tenant_id) or connection["oauth2_client_secret"]
+    client_secret = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["oauth2_client_secret"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
     form = {
         "grant_type": "client_credentials",
         "client_id": connection["oauth2_client_id"],
@@ -580,10 +585,18 @@ async def fetch_for_dataset(
             token = await _oauth2_bearer_token(pool, tenant_id, row["connection_name"], connection)
             headers["Authorization"] = f"Bearer {token}"
         else:
-            value = _resolve_secret(connection["secret_ref"], tenant_id) or connection["auth_header_value"]
+            value = connector_secret(
+                secret_ref=connection["secret_ref"],
+                plaintext=connection["auth_header_value"],
+                resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+            )
             headers[connection["auth_header_name"]] = value
     elif row["auth_header_name"]:
-        value = _resolve_secret(row["secret_ref"], tenant_id) or row["auth_header_value"]
+        value = connector_secret(
+            secret_ref=row["secret_ref"],
+            plaintext=row["auth_header_value"],
+            resolved=_resolve_secret(row["secret_ref"], tenant_id),
+        )
         if value:
             headers[row["auth_header_name"]] = value
 

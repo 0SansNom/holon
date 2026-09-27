@@ -259,6 +259,30 @@ def pin_object_endpoint(endpoint: str, *, kind: str) -> str:
     return urlunsplit(parsed._replace(netloc=netloc))
 
 
+
+def connector_secret(
+    *,
+    secret_ref: Optional[str],
+    plaintext: Optional[str],
+    resolved: Optional[str],
+) -> Optional[str]:
+    """Secret used to open a connection.
+
+    A non-empty ``secret_ref`` wins, even when it resolves empty — plaintext
+    is not a fallback. Stored plaintext is refused in production.
+    """
+    if secret_ref is not None and str(secret_ref).strip():
+        return resolved
+    if plaintext is not None and str(plaintext).strip():
+        from .security_posture import is_production
+
+        if is_production():
+            raise ConnectorSafetyError(
+                "stored plaintext connector secret cannot be used in production — set secret_ref"
+            )
+    return plaintext
+
+
 def assert_http_url(url: str, *, resolve: bool = True) -> None:
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
