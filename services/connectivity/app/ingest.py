@@ -113,6 +113,9 @@ class RegisterConnectionRequest(BaseModel):
     oauth2_client_secret: Optional[str] = None
     oauth2_scope: Optional[str] = None
     secret_ref: Optional[str] = None
+    # Origin (scheme://host[:port]) sources using this connection must target.
+    # Required on create; omitted on edit keeps the stored one.
+    allowed_origin: Optional[str] = None
 
 
 class RegisterSourceRequest(BaseModel):
@@ -137,6 +140,8 @@ class RegisterSqlConnectionRequest(BaseModel):
     port: Optional[int] = None
     database: str
     username: str
+    # Snowflake compute warehouse (ignored for other dialects)
+    warehouse: Optional[str] = None
     # Optional; if omitted on edit, existing secret is retained
     password: Optional[str] = None
     secret_ref: Optional[str] = None
