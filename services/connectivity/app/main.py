@@ -31,6 +31,7 @@ from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
     make_principal_status_consumer,
+    refresh_revocation_snapshot_forever,
 )
 from holon_common.readiness import (
     check_iceberg_catalog,
@@ -93,9 +94,11 @@ async def lifespan(app: FastAPI):
     )
     status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
     await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
+    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
 
     yield
 
+    revocation_refresh_task.cancel()
     status_task.cancel()
     scheduler_task.cancel()
     for task in deps.kafka_stream_tasks.values():
