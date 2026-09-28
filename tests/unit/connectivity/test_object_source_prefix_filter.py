@@ -58,9 +58,9 @@ def test_format_suffix_matches_sftp_registry_mapping() -> None:
     assert osr._format_suffix("parquet") == ".parquet"
 
 
-def _file_info(path: str, *, is_dir: bool = False) -> SimpleNamespace:
+def _file_info(path: str, *, is_dir: bool = False, mtime_ns: int = 0) -> SimpleNamespace:
     file_type = osr.pafs.FileType.Directory if is_dir else osr.pafs.FileType.File
-    return SimpleNamespace(path=path, type=file_type)
+    return SimpleNamespace(path=path, type=file_type, mtime_ns=mtime_ns)
 
 
 def test_fetch_sync_key_prefix_skips_spark_success_marker_and_crc() -> None:
@@ -143,8 +143,10 @@ def test_fetch_sync_key_prefix_incremental_still_filters_by_format() -> None:
             last_synced_key="landing/2024-01-01.ndjson",
         )
 
+    from app.file_cursor import encode_file_cursor
+
     assert rows == [{"path": "bucket/landing/2024-01-02.ndjson"}]
-    assert cursor == "landing/2024-01-02.ndjson"
+    assert cursor == encode_file_cursor(0, "landing/2024-01-02.ndjson")
 
 
 def test_matches_format_accepts_compressed_and_uppercase_extensions() -> None:
