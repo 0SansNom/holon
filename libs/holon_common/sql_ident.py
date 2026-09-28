@@ -8,18 +8,21 @@ from __future__ import annotations
 
 import re
 
-# Optionally schema-qualified (`public.orders`). No quotes, whitespace, or
+# One to three dot-separated parts: `orders`, `public.orders`, or
+# `catalog.schema.orders` (BigQuery project.dataset.table, Unity Catalog,
+# Snowflake/Trino/SQL Server database.schema.table). No quotes, whitespace, or
 # punctuation that could break out of a quoted identifier.
-IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 
 _VALID_QUOTE_DIALECTS = frozenset({"postgres", "mysql", "mssql", "snowflake"})
 
 
 def require_identifier(name: str, *, what: str = "identifier") -> str:
-    if not name or not IDENTIFIER_RE.match(name):
+    if not name or not IDENTIFIER_RE.fullmatch(name):
         raise ValueError(
-            f"invalid {what} {name!r} — must be a plain identifier, optionally "
-            "schema-qualified (e.g. 'orders' or 'public.orders')"
+            f"invalid {what} {name!r} — must be a plain identifier with up to "
+            "three dot-separated parts (e.g. 'orders', 'public.orders' or "
+            "'analytics.public.orders')"
         )
     return name
 
