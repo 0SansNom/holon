@@ -46,6 +46,7 @@ from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
     make_principal_status_consumer,
+    refresh_revocation_snapshot_forever,
 )
 
 from . import agent_runtime, deps, evaluation, model_registry, spend_limits, tool_plugin_registry, vector_store
@@ -219,9 +220,11 @@ async def lifespan(app: FastAPI):
     )
     status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
     await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
+    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
 
     yield
 
+    revocation_refresh_task.cancel()
     status_task.cancel()
     sweep_task.cancel()
     relay_task.cancel()
