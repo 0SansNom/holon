@@ -8,10 +8,7 @@ from __future__ import annotations
 
 import re
 
-# One to three dot-separated parts: `orders`, `public.orders`, or
-# `catalog.schema.orders` (BigQuery project.dataset.table, Unity Catalog,
-# Snowflake/Trino/SQL Server database.schema.table). No quotes, whitespace, or
-# punctuation that could break out of a quoted identifier.
+# No quotes, whitespace, or punctuation that could break out of a quoted identifier.
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 
 _VALID_QUOTE_DIALECTS = frozenset({"postgres", "mysql", "mssql", "snowflake"})
