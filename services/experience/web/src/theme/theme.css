@@ -2210,11 +2210,35 @@ body,
 
 .hl-timeline-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: baseline;
   padding: 8px 12px;
   font-size: 13px;
   border-bottom: 1px solid var(--hl-border);
+}
+
+.hl-timeline-changes {
+  flex-basis: 100%;
+  display: grid;
+  gap: 4px;
+  padding-left: 24px;
+}
+
+.hl-timeline-change {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.hl-timeline-before {
+  color: var(--hl-text-muted);
+  text-decoration: line-through;
+}
+
+.hl-timeline-after {
+  color: var(--hl-text);
 }
 
 .hl-timeline-row[data-last="true"] {
@@ -2485,8 +2509,20 @@ body,
   border: 1px solid var(--hl-border);
   border-radius: var(--hl-radius-sm);
   padding: 3px 8px;
-  margin-bottom: var(--hl-space-4);
+  margin-bottom: var(--hl-space-3);
   word-break: break-all;
+}
+
+.hl-lineage-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hl-space-2);
+  align-items: center;
+  margin-bottom: var(--hl-space-4);
+}
+
+.hl-lineage-toolbar .bp5-input-group {
+  min-width: 240px;
 }
 
 .hl-lineage-layout {

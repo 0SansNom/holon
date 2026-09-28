@@ -295,7 +295,7 @@ services:
     volumes:
       - ./tests/fixtures/stream-seed:/seed:ro
     entrypoint: >
-      /bin/sh -c " rpk topic create external-inventory-stream --brokers redpanda:9092 -p 1 -r 1 || true && cat /seed/inventory_events.jsonl | rpk topic produce external-inventory-stream --brokers redpanda:9092 --compression none && echo stream seeded "
+      /bin/sh -c " rpk topic create acme.external-inventory-stream --brokers redpanda:9092 -p 1 -r 1 || true && cat /seed/inventory_events.jsonl | rpk topic produce acme.external-inventory-stream --brokers redpanda:9092 --compression none && echo stream seeded "
 
   opensearch:
     image: opensearchproject/opensearch:2.17.0

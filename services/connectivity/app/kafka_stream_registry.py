@@ -30,7 +30,7 @@ async def register_source(
     created_by_urn: str,
 ) -> dict:
     try:
-        assert_kafka_topic(topic)
+        await assert_topic_available(pool, tenant_id=tenant_id, topic=topic)
     except ConnectorSafetyError as exc:
         raise KafkaStreamConflictError(str(exc)) from exc
     conflicting = await pool.fetchrow(
@@ -58,6 +58,25 @@ async def register_source(
         tenant_id, name, topic, key_field, dataset_name, batch_interval_seconds, created_by_urn,
     )
     return await get_source(pool, tenant_id, name)
+
+
+async def assert_topic_available(pool: asyncpg.Pool, *, tenant_id: str, topic: str) -> None:
+    """Prefix check plus a bind: one active topic, one tenant.
+
+    Called at registration and again before each consume cycle.
+    """
+    assert_kafka_topic(topic, tenant_id=tenant_id)
+    other = await pool.fetchrow(
+        """
+        SELECT tenant_id FROM kafka_stream_source
+        WHERE topic = $1 AND status = 'active' AND tenant_id <> $2
+        LIMIT 1
+        """,
+        topic.strip(),
+        tenant_id,
+    )
+    if other is not None:
+        raise ConnectorSafetyError(f"topic {topic!r} is already bound to another tenant")
 
 
 async def get_source(pool: asyncpg.Pool, tenant_id: str, name: str) -> Optional[dict]:
