@@ -52,6 +52,20 @@ async def get_datasets(
     return await catalog.list_datasets(core.pool, principal.tenant_id)
 
 
+@router.get("/catalog/datasets/{name}/schema")
+async def get_dataset_schema(
+    name: str,
+    principal: Principal = Depends(core.current_principal),
+    workspace_id: str = Depends(core.current_workspace),
+) -> dict:
+    """Declared Iceberg columns (name, type, required). No row scan."""
+    await _authorize_workspace_read(principal, workspace_id)
+    try:
+        return await asyncio.to_thread(resolver.dataset_schema, name, **core.iceberg_kwargs(principal.tenant_id))
+    except (NoSuchTableError, ValueError):
+        raise HolonError.not_found("DatasetNotFound", f"dataset {name!r} has never been synced")
+
+
 @router.get("/catalog/datasets/{name}/preview")
 async def preview_dataset(
     name: str,
