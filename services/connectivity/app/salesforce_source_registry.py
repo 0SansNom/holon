@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 import asyncpg
 import httpx
 
+from app.pinned_http import pinned_transport
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
@@ -22,6 +23,7 @@ from holon_common.connector_safety import (
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     same_origin,
     resolve_connector_secret,
 )
@@ -450,7 +452,11 @@ async def _bearer_token(
     ):
         return connection["oauth2_cached_token"], connection["instance_url"]
 
-    client_secret = _resolve_secret(connection["secret_ref"], tenant_id) or connection["client_secret"]
+    client_secret = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["client_secret"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
     if not client_secret:
         raise SourceFetchError(
             f"connection {connection_name!r}: client_secret (or secret_ref) is required"
@@ -466,7 +472,7 @@ async def _bearer_token(
         "client_id": connection["client_id"],
         "client_secret": client_secret,
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         response = await client.post(token_url, data=form)
     if response.status_code >= 400:
         raise SourceFetchError(
@@ -549,7 +555,7 @@ async def fetch_for_dataset(
     pages_fetched = 0
     next_url: Optional[str] = query_url
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=30.0) as client:
         while next_url:
             pages_fetched += 1
             if pages_fetched > _MAX_PAGES:

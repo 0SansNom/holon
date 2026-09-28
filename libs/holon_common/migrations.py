@@ -2,23 +2,15 @@
 in a `schema_migrations` table, each applied once inside its own
 transaction.
 
-Deliberately not an ORM or Alembic: most services still create tables via
-`ensure_schema()` (`CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD
-COLUMN IF NOT EXISTS`, re-run idempotently on every boot). That pattern
-only ever covers *additive* change and carries no history — this adds
-exactly what it was missing: a real place for a change that isn't purely
-additive (rename, drop, backfill) to live, with a version so it's obvious
-what ran and when.
+Deliberately not an ORM or Alembic. Idempotent `CREATE TABLE IF NOT EXISTS`
+lives in each service's `0000_baseline.sql`. This runner is the place for
+a change that isn't purely additive (rename, drop, backfill), with a
+version so it's obvious what ran and when.
 
-Knowledge, Identity, Experience, and Connectivity are migrations-first.
-Domain `ensure_schema()` helpers were removed there; baselines are
-`services/knowledge/app/migrations/0000_baseline.sql`,
-`services/identity/app/migrations/0000_baseline.sql`,
-`services/experience/app/migrations/0000_baseline.sql`, and
-`services/connectivity/app/migrations/0000_baseline.sql`, then `0001`–.
-Automation and Intelligence still call `ensure_schema()` at boot *before*
-`run_migrations`. This runner governs schema changes from here forward;
-it is not a retroactive rewrite of what's already shipped.
+Every service is migrations-first. Domain `ensure_schema()` helpers are
+gone; each service's `migrations/0000_baseline.sql` is the idempotent
+CREATE TABLE baseline, then `0001`–. This runner governs schema changes
+from here forward; it is not a retroactive rewrite of what's already shipped.
 
 Checksums: each applied file's SHA-256 is recorded. Editing an already-
 applied file fails boot instead of drifting silently.
@@ -49,6 +41,11 @@ class MigrationChecksumError(RuntimeError):
     the checksum recorded at apply time."""
 
 
+class MigrationFilenameError(RuntimeError):
+    """Raised when a `*.sql` file in the migrations directory does not
+    match `NNNN_short_description.sql`."""
+
+
 def _checksum(sql: str) -> str:
     return hashlib.sha256(sql.encode("utf-8")).hexdigest()
 
@@ -64,10 +61,18 @@ async def run_migrations(pool: asyncpg.Pool, migrations_dir: Path) -> list[str]:
     Never two replicas racing the same migration.
 
     A missing `migrations_dir` (a service with no migrations yet) is not
-    an error — returns an empty list.
+    an error — returns an empty list. A `*.sql` file whose name does not
+    match `NNNN_short_description.sql` raises `MigrationFilenameError`
+    before anything is applied.
     """
     if not migrations_dir.is_dir():
         return []
+    invalid = sorted(p.name for p in migrations_dir.glob("*.sql") if not _FILENAME_RE.match(p.name))
+    if invalid:
+        raise MigrationFilenameError(
+            "migration filename must match NNNN_short_description.sql (four digits, "
+            f"lowercase): {', '.join(invalid)}"
+        )
     files = sorted(p for p in migrations_dir.glob("*.sql") if _FILENAME_RE.match(p.name))
     applied: list[str] = []
     async with pool.acquire() as conn:

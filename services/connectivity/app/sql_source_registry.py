@@ -11,10 +11,12 @@ import asyncpg
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
+    pin_connector_host,
     assert_connector_secret_ref,
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     resolve_connector_secret,
 )
 from holon_common.sql_ident import quote_identifier, require_identifier
@@ -491,10 +493,14 @@ async def fetch_for_dataset(
     if connection is None:
         raise SourceFetchError(f"source {name!r} references connection {row['connection_name']!r}, which no longer exists")
     try:
-        assert_connector_host(connection["host"])
+        pinned_host = pin_connector_host(connection["host"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    password = _resolve_secret(connection["secret_ref"], tenant_id) or connection["password"]
+    password = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["password"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
 
     try:
         dialect = sql_drivers.normalize_dialect(connection["dialect"])
@@ -520,7 +526,7 @@ async def fetch_for_dataset(
     try:
         rows = await sql_drivers.fetch_dicts(
             dialect=dialect,
-            host=connection["host"],
+            host=pinned_host,
             port=connection["port"],
             database=connection["database"],
             username=connection["username"],

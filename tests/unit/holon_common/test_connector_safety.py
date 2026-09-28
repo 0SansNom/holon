@@ -20,6 +20,8 @@ from holon_common.connector_safety import (  # noqa: E402
     assert_kafka_topic,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
+    pin_connector_host,
     resolve_connector_secret,
     same_origin,
 )
@@ -299,9 +301,56 @@ def test_destination_change_requires_secret() -> None:
         )
 
 
+
+def test_stored_plaintext_secret_is_refused_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("HOLON_ENV", "production")
+    with pytest.raises(ConnectorSafetyError, match="secret_ref"):
+        connector_secret(secret_ref=None, plaintext="hunter2", resolved=None)
+    assert connector_secret(secret_ref="env:ERP_PASSWORD", plaintext="hunter2", resolved="from-vault") == "from-vault"
+    assert connector_secret(secret_ref="env:ERP_PASSWORD", plaintext="hunter2", resolved=None) is None
+
+
+def test_stored_plaintext_secret_is_usable_outside_production(monkeypatch) -> None:
+    monkeypatch.delenv("HOLON_ENV", raising=False)
+    assert connector_secret(secret_ref=None, plaintext="hunter2", resolved=None) == "hunter2"
+
+
 def test_unwrap_mapped_ip() -> None:
     # is_loopback on the wrapped form itself is Python-version-dependent
     # (differs between 3.9 and 3.11+) — what actually matters is that
     # assert_connector_host blocks it either way, via _unwrap_ip.
     with pytest.raises(ConnectorSafetyError):
         assert_connector_host("::ffff:127.0.0.1")
+
+
+def _alternating_gai(name: str, answers: list[str]):
+    pending = list(answers)
+
+    def fake(host, *a, **k):
+        host_name = (host or "").strip().lower().rstrip(".")
+        if host_name != name:
+            raise socket.gaierror("not found")
+        if not pending:
+            raise socket.gaierror("no more answers")
+        addr = pending.pop(0)
+        sock_addr = (addr, 0, 0, 0) if ":" in addr else (addr, 0)
+        return [(0, 0, 0, "", sock_addr)]
+
+    return fake
+
+
+def test_pin_refuses_public_then_loopback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "holon_common.connector_safety.socket.getaddrinfo",
+        _alternating_gai("evil.example", ["8.8.8.8", "127.0.0.1"]),
+    )
+    with pytest.raises(ConnectorSafetyError, match="DNS answer changed"):
+        pin_connector_host("evil.example")
+
+
+def test_pin_returns_stable_public_address(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "holon_common.connector_safety.socket.getaddrinfo",
+        _gai_named({"ok.example": "8.8.8.8"}, default=socket.gaierror("x")),
+    )
+    assert pin_connector_host("ok.example") == "8.8.8.8"
