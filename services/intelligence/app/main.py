@@ -653,10 +653,10 @@ async def register_model(
             artifact_bytes=artifact_bytes,
             input_schema=body.input_schema,
         )
+    except model_registry.ModelRegistryError as exc:
+        raise HolonError.from_http(exc.http_status, str(exc), error_name="ModelRegistryError") from exc
     except ValueError as exc:
-        detail = str(exc)
-        code = 403 if "joblib model" in detail.lower() or "disabled" in detail.lower() else 400
-        raise HolonError.from_http(code, detail, error_name='ModelRegistryError') from exc
+        raise HolonError.invalid_argument("ModelRegistryError", str(exc)) from exc
 
     if existing is None:
 
@@ -724,8 +724,8 @@ async def predict(name: str, body: PredictRequest, principal: Principal = Depend
         prediction = await model_registry.predict(
             app.state.pool, app.state.s3, MODEL_BUCKET, name=name, features=body.features
         )
+    except model_registry.ModelRegistryError as exc:
+        raise HolonError.from_http(exc.http_status, str(exc), error_name="ModelRegistryError") from exc
     except ValueError as exc:
-        detail = str(exc)
-        code = 403 if "joblib model" in detail.lower() or "disabled" in detail.lower() else 400
-        raise HolonError.from_http(code, detail, error_name='ModelRegistryError') from exc
+        raise HolonError.invalid_argument("ModelRegistryError", str(exc)) from exc
     return {"model": name, "prediction": prediction}
