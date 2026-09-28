@@ -16,9 +16,9 @@ in a new `NNNN_*.sql` file.
 
 - Filename: `NNNN_short_description.sql` — four-digit, zero-padded,
   sequential, lowercase, underscores. `0005_add_widget_kind_column.sql`.
-  A name that doesn't match this pattern is silently skipped by the
-  runner (not an error, not logged) — a typo in the number or an
-  uppercase letter means the file quietly never runs.
+  A name that doesn't match this pattern fails boot
+  (`MigrationFilenameError`) and names the file. A typo in the number or
+  an uppercase letter never ships quietly.
 - One concern per file.
 - Plain SQL, no explicit `BEGIN`/`COMMIT`/`ROLLBACK` — `run_migrations`
   already wraps the whole file in its own `conn.transaction()`. A
