@@ -35,7 +35,8 @@ def _read_cache_counters() -> tuple[int, int]:
     return hits, misses
 
 
-def test_repeated_identical_reads_are_mostly_cache_hits(jdoe_token: str) -> None:
+def test_repeated_allows_are_not_served_from_cache(jdoe_token: str) -> None:
+    """A grant always re-checks SpiceDB. Six identical reads are six misses."""
     hits_before, misses_before = _read_cache_counters()
 
     for _ in range(6):
@@ -43,20 +44,28 @@ def test_repeated_identical_reads_are_mostly_cache_hits(jdoe_token: str) -> None
         assert status == 200
 
     hits_after, misses_after = _read_cache_counters()
-
-    new_hits = hits_after - hits_before
-    new_misses = misses_after - misses_before
-    # At most one of the six identical checks should have been a genuine
-    # SpiceDB/OPA round trip (the first, unless another test's request in
-    # the last 5s already warmed this exact key)
-    # served from the in-process cache.
-    assert new_misses <= 1, (new_hits, new_misses)
-    assert new_hits >= 5, (new_hits, new_misses)
+    assert misses_after - misses_before >= 6, (hits_after - hits_before, misses_after - misses_before)
 
 
-def test_metrics_expose_both_cache_counters(jdoe_token: str) -> None:
+def test_repeated_denials_are_cache_hits(alice_token: str) -> None:
+    hits_before, misses_before = _read_cache_counters()
+
+    for _ in range(4):
+        status, _ = _request("GET", ontology_url("/objects/Order"), token=alice_token)
+        assert status == 403
+
+    hits_after, misses_after = _read_cache_counters()
+    assert misses_after - misses_before <= 1, (hits_after - hits_before, misses_after - misses_before)
+    assert hits_after - hits_before >= 3, (hits_after - hits_before, misses_after - misses_before)
+
+
+def test_metrics_expose_both_cache_counters(jdoe_token: str, alice_token: str) -> None:
     status, _ = _request("GET", ontology_url("/objects/Order"), token=jdoe_token)
     assert status == 200
+    status, _ = _request("GET", ontology_url("/objects/Order"), token=alice_token)
+    assert status == 403
+    status, _ = _request("GET", ontology_url("/objects/Order"), token=alice_token)
+    assert status == 403
     hits, misses = _read_cache_counters()
-    assert hits > 0, "expected at least one cache hit across the whole test session by this point"
-    assert misses > 0, "expected at least one cache miss across the whole test session by this point"
+    assert hits > 0, "expected at least one denial-cache hit"
+    assert misses > 0, "expected at least one cache miss"

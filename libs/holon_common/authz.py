@@ -10,12 +10,13 @@ Delegation: when the acting principal declares `on_behalf_of`,
 grant and its mandant's — an agent can never exceed its mandant. ABAC
 still evaluates the acting principal's own attributes, not the mandant's.
 
-`authorize()` caches its own result for `decision_cache_ttl_seconds`, keyed
+`authorize()` caches **denials** for `decision_cache_ttl_seconds`, keyed
 on everything the decision actually depends on (principal, mandant,
-country, resource, permission, resource attributes). A cache hit is a
-plain in-process dict lookup; a miss pays SpiceDB+OPA's real latency once,
-then serves repeat checks from memory until the TTL lapses or an
-explicit invalidation fires.
+country, resource, permission, resource attributes). Allows are never
+cached: a grant always re-checks SpiceDB, so a revocation is visible on
+the next call and every allow is audited. A denial cache hit is an
+in-process lookup and is still audited. The denial cache is an LRU of
+10 000 entries.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -38,6 +40,15 @@ logger = logging.getLogger("holon_common.authz")
 
 _TIMEOUT_SECONDS = 5.0
 _DEFAULT_DECISION_CACHE_TTL_SECONDS = 5.0
+_DENIAL_CACHE_MAX = 10_000
+
+
+def _upstream_failure(exc: BaseException) -> bool:
+    """Transport errors, HTTP 5xx, and 429 open the breaker. Another 4xx is the caller's bug."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    return True
 
 # Real observability for the decision cache, exposed at whichever
 # service's own `/metrics`.
@@ -70,9 +81,10 @@ class PermissionClient:
         self._rebac_breaker = CircuitBreaker(name="spicedb-check", failure_threshold=5, cooldown_seconds=30.0)
         self._abac_breaker = CircuitBreaker(name="opa-check", failure_threshold=5, cooldown_seconds=30.0)
 
-        # Decision cache.
+        # Denial cache only. Allows always hit SpiceDB.
         self._decision_cache_ttl = decision_cache_ttl_seconds
-        self._decision_cache: dict[tuple, tuple[Decision, float]] = {}
+        self._denial_cache_max = _DENIAL_CACHE_MAX
+        self._decision_cache: OrderedDict[tuple, tuple[Decision, float]] = OrderedDict()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -87,7 +99,7 @@ class PermissionClient:
             resource_type,
             resource_urn,
             permission,
-            tuple(sorted((resource_attributes or {}).items())),
+            json.dumps(resource_attributes or {}, sort_keys=True, default=str),
         )
 
     def invalidate_principal(self, principal_urn: str) -> int:
@@ -233,7 +245,7 @@ class PermissionClient:
             response.raise_for_status()
             return response
 
-        response = await self._rebac_breaker.call(_do)
+        response = await self._rebac_breaker.call(_do, counts_as_failure=_upstream_failure)
         ids: set[str] = set()
         for line in response.text.splitlines():
             line = line.strip()
@@ -271,7 +283,7 @@ class PermissionClient:
             response.raise_for_status()
             return response
 
-        response = await self._rebac_breaker.call(_do)
+        response = await self._rebac_breaker.call(_do, counts_as_failure=_upstream_failure)
         return response.json().get("permissionship") == "PERMISSIONSHIP_HAS_PERMISSION"
 
     async def check_abac(self, principal: Principal, resource: dict) -> bool:
@@ -283,7 +295,7 @@ class PermissionClient:
             response.raise_for_status()
             return response
 
-        response = await self._abac_breaker.call(_do)
+        response = await self._abac_breaker.call(_do, counts_as_failure=_upstream_failure)
         return response.json().get("result", False)
 
     async def get_policy_data(self, path: str) -> Any:
@@ -293,8 +305,9 @@ class PermissionClient:
         which need `holon.authz.allowed_countries` to build per-document
         tokens, not to evaluate a per-request `allow` decision). Exists
         so that mirroring reads the live policy instead of a hand-copied
-        Python literal that can silently drift from `docker/opa/holon.rego`
-        — a real, previously-flagged two-sources-of-truth gap.
+        Python literal that can silently drift from `docker/opa/holon.rego`.
+        Knowledge search no longer snapshots this set: confidential
+        visibility is `check_abac` at query time (`knowledge.app.policy`).
         """
         response = await self._client.get(f"{self._opa_url}/v1/data/{path}")
         response.raise_for_status()
@@ -309,34 +322,25 @@ class PermissionClient:
         permission: str,
         resource_attributes: Optional[dict] = None,
     ) -> Decision:
-        """Cache wrapper around `_authorize_uncached`. A cache hit never
-        touches the network; a miss falls through to the real ReBAC+ABAC
-        evaluation and caches the result.
-        """
+        """Denial cache in front of `_authorize_uncached`. Allows are not stored."""
         cache_key = self._cache_key(principal, resource_type, resource_urn, permission, resource_attributes)
-        cached = self._decision_cache.get(cache_key)
         now = time.monotonic()
+        cached = self._decision_cache.get(cache_key)
         if cached is not None:
             decision, expires_at = cached
             if now < expires_at:
+                self._decision_cache.move_to_end(cache_key)
                 _DECISION_CACHE_HITS.inc()
-                # Denials stay audible even on cache hits (security signal).
-                if not decision.allowed:
-                    emit_audit(
-                        category="authz",
-                        action="authz.decide",
-                        outcome="deny",
-                        tenant_id=principal.tenant_id,
-                        actor_urn=principal.urn,
-                        actor_type=principal.type,
-                        resource_type=resource_type,
-                        resource_urn=resource_urn,
-                        permission=permission,
-                        reason=decision.reason,
-                        extra={"cacheHit": True},
-                    )
+                self._audit_decision(
+                    decision,
+                    principal,
+                    resource_type=resource_type,
+                    resource_urn=resource_urn,
+                    permission=permission,
+                    cache_hit=True,
+                )
                 return decision
-            del self._decision_cache[cache_key]
+            self._decision_cache.pop(cache_key, None)
 
         _DECISION_CACHE_MISSES.inc()
         decision = await self._authorize_uncached(
@@ -346,8 +350,37 @@ class PermissionClient:
             permission=permission,
             resource_attributes=resource_attributes,
         )
-        self._decision_cache[cache_key] = (decision, now + self._decision_cache_ttl)
+        if not decision.allowed:
+            self._decision_cache[cache_key] = (decision, now + self._decision_cache_ttl)
+            self._decision_cache.move_to_end(cache_key)
+            while len(self._decision_cache) > self._denial_cache_max:
+                self._decision_cache.popitem(last=False)
         return decision
+
+    def _audit_decision(
+        self,
+        decision: Decision,
+        principal: Principal,
+        *,
+        resource_type: str,
+        resource_urn: str,
+        permission: str,
+        cache_hit: bool = False,
+    ) -> None:
+        extra = {"cacheHit": True} if cache_hit else None
+        emit_audit(
+            category="authz",
+            action="authz.decide",
+            outcome="deny" if not decision.allowed else "allow",
+            tenant_id=principal.tenant_id,
+            actor_urn=principal.urn,
+            actor_type=principal.type,
+            resource_type=resource_type,
+            resource_urn=resource_urn,
+            permission=permission,
+            reason=decision.reason,
+            extra=extra,
+        )
 
     async def _authorize_uncached(
         self,
