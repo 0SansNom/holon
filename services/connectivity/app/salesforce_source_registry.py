@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 import asyncpg
 import httpx
 
+from app.cursor_window import advance_cursor
 from app.pinned_http import pinned_transport
 from holon_common.connector_safety import (
     ConnectorSafetyError,
@@ -169,12 +170,12 @@ def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> st
     """Append an incremental filter without rewriting the user's SELECT list."""
     date_literal = _soql_date_literal(last_cursor_value)
     if date_literal is not None:
-        # SOQL Date/DateTime literals must be unquoted — a quoted string
-        # would compare against a Date/DateTime field as a type mismatch.
-        clause = f"{cursor_property} > {date_literal}"
+        # Inclusive resume (`>=`) plus boundary de-dupe keeps rows that share
+        # the cursor value. SOQL Date/DateTime literals must be unquoted.
+        clause = f"{cursor_property} >= {date_literal}"
     else:
         literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
-        clause = f"{cursor_property} > '{literal}'"
+        clause = f"{cursor_property} >= '{literal}'"
     lowered = soql.lower()
     # Insert before ORDER BY / LIMIT / OFFSET when present.
     for keyword in (" order by ", " limit ", " offset "):
@@ -189,13 +190,6 @@ def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> st
 
 def _strip_attributes(record: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in record.items() if key != "attributes"}
-
-
-def _coerce_cursor(value: Any) -> Any:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return str(value)
 
 
 async def register_connection(
@@ -524,7 +518,8 @@ async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
 ) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
-        "SELECT connection_name, soql, api_version, cursor_property, last_cursor_value "
+        "SELECT connection_name, soql, api_version, cursor_property, last_cursor_value, "
+        "cursor_boundary_keys "
         "FROM salesforce_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
         tenant_id, name,
     )
@@ -585,22 +580,25 @@ async def fetch_for_dataset(
 
     commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
-        candidates = [
-            r[row["cursor_property"]]
-            for r in records
-            if r.get(row["cursor_property"]) is not None
-        ]
-        if candidates:
-            new_cursor = str(max(candidates, key=_coerce_cursor))
-            if new_cursor != row["last_cursor_value"]:
+        advanced = advance_cursor(
+            records,
+            cursor_property=row["cursor_property"],
+            last_cursor=row["last_cursor_value"],
+            boundary_keys=row["cursor_boundary_keys"],
+        )
+        records = advanced.rows
+        if advanced.changed and advanced.cursor is not None:
 
-                async def _commit_cursor(cursor: str = new_cursor) -> None:
-                    await pool.execute(
-                        "UPDATE salesforce_source SET last_cursor_value = $1 "
-                        "WHERE tenant_id = $2 AND name = $3",
-                        cursor, tenant_id, name,
-                    )
+            async def _commit_cursor(
+                cursor: str = advanced.cursor,
+                boundary: str = advanced.boundary_keys,
+            ) -> None:
+                await pool.execute(
+                    "UPDATE salesforce_source SET last_cursor_value = $1, cursor_boundary_keys = $2 "
+                    "WHERE tenant_id = $3 AND name = $4",
+                    cursor, boundary, tenant_id, name,
+                )
 
-                commit = _commit_cursor
+            commit = _commit_cursor
 
     return records, commit
