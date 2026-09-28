@@ -23,6 +23,10 @@ def _unique_name(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+def _tenant_topic(prefix: str) -> str:
+    return f"acme.{_unique_name(prefix)}"
+
+
 def _publish(topic: str, messages: list[dict]) -> None:
     async def _send() -> None:
         producer = AIOKafkaProducer(
@@ -55,7 +59,7 @@ def _wait_for_sync(jdoe_token: str, dataset_name: str, *, min_row_count: int = 1
 
 
 def test_a_registered_stream_consumes_its_own_topic_key_field_and_dataset(jdoe_token: str) -> None:
-    topic = _unique_name("holon_test_topic")
+    topic = _tenant_topic("widgets")
     dataset_name = _unique_name("stream_widgets")
     name = _unique_name("widget-stream")
 
@@ -85,7 +89,7 @@ def test_a_registered_stream_keeps_only_the_latest_message_per_key(jdoe_token: s
     computed per. Two updates to the same widget must collapse to one
     row, not two.
     """
-    topic = _unique_name("holon_test_topic")
+    topic = _tenant_topic("widgets")
     dataset_name = _unique_name("stream_widgets_dedup")
     name = _unique_name("widget-dedup-stream")
 
@@ -114,14 +118,14 @@ def test_two_streams_cannot_claim_the_same_dataset(jdoe_token: str) -> None:
 
     status, first = _request(
         "POST", f"{CONNECTIVITY}/kafka-streams", token=jdoe_token,
-        body={"name": first_name, "topic": _unique_name("topic"), "key_field": "id", "dataset_name": dataset_name},
+        body={"name": first_name, "topic": _tenant_topic("topic"), "key_field": "id", "dataset_name": dataset_name},
     )
     assert status == 201, first
 
     try:
         status, body = _request(
             "POST", f"{CONNECTIVITY}/kafka-streams", token=jdoe_token,
-            body={"name": second_name, "topic": _unique_name("topic"), "key_field": "id", "dataset_name": dataset_name},
+            body={"name": second_name, "topic": _tenant_topic("topic"), "key_field": "id", "dataset_name": dataset_name},
         )
         assert status == 409, body
         assert first_name in body["detail"], body
@@ -130,7 +134,7 @@ def test_two_streams_cannot_claim_the_same_dataset(jdoe_token: str) -> None:
 
 
 def test_disable_and_enable_flip_status_and_a_re_enabled_stream_consumes_again(jdoe_token: str) -> None:
-    topic = _unique_name("holon_test_topic")
+    topic = _tenant_topic("widgets")
     dataset_name = _unique_name("stream_disable_target")
     name = _unique_name("widget-disable-stream")
 
@@ -158,7 +162,7 @@ def test_kafka_streams_list_and_delete(jdoe_token: str) -> None:
     name = _unique_name("widget-list-stream")
     status, _ = _request(
         "POST", f"{CONNECTIVITY}/kafka-streams", token=jdoe_token,
-        body={"name": name, "topic": _unique_name("topic"), "key_field": "id", "dataset_name": _unique_name("stream_list_target")},
+        body={"name": name, "topic": _tenant_topic("topic"), "key_field": "id", "dataset_name": _unique_name("stream_list_target")},
     )
     assert status == 201
 
