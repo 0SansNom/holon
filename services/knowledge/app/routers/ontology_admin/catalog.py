@@ -137,7 +137,7 @@ async def generate_join_dataset(
     principal: Principal = Depends(core.current_principal),
     workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    """Foundry-style "Generate join table" — empty 2-column Iceberg bridge.
+    """Generate join table — empty 2-column Iceberg bridge.
 
     Publishes a `connectivity.sync.completed` event, same as every other
     dataset sync — cataloguing happens in Knowledge's own bus consumer

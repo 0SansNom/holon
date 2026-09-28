@@ -1,4 +1,4 @@
-/** Foundry Type class helpers — `kind:name` encoding + known catalog keys. */
+/** Type class helpers — `kind:name` encoding + known catalog keys. */
 
 const TYPE_CLASS_RE =
   /^(?:[a-z][a-z0-9_-]{0,63}|[a-z][a-z0-9_-]{0,63}:[A-Za-z0-9_.:-]{1,128})$/;

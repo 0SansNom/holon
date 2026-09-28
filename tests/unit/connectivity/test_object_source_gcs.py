@@ -1,6 +1,6 @@
 """Unit tests for the GCS branch of the object storage connector.
 
-Auth model matches Foundry "JSON credentials" / CData
+Auth model matches "JSON credentials" / CData
 AuthScheme=OAuthJWT + OAuthJWTCertType=GOOGLEJSON: Project Id + service
 account JSON. Live GCS is not in the compose stack — these cover config
 validation and filesystem selection (mocked), same pattern as Azure.

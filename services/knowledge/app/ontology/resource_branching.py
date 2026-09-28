@@ -1,6 +1,6 @@
 """Generic branch/review for the 4 governed registries that aren't
 ObjectType (RelationType, ValueType, SharedPropertyType, ActionType —
-matching Foundry's own branching scope minus Type groups/Rule sets).
+matching branching scope minus Type groups/Rule sets).
 
 Deliberately kept separate from `branching.py`, whose functions are
 tightly coupled to `propose_object_type_version`/`publish_object_type_version`

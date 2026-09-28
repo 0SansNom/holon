@@ -78,7 +78,7 @@ def normalize_deprecation_metadata(
 ) -> dict[str, Any]:
     """Return `{lifecycle_status, deprecation_reason, deprecation_deadline, replacement_urn}`.
 
-    When status is deprecated, reason and deadline are required (Foundry
+    When status is deprecated, reason and deadline are required (
     prompts for both); replacement is optional. Otherwise all three are
     cleared so stale deprecate metadata cannot linger after reactivation.
     """

@@ -83,7 +83,7 @@ export function HealthCheckTab() {
         description={
           <>
             Structural anti-pattern detection plus Value Type data checks — Action Sprawl, God Object,
-            Misnomer, DRY, Time Machine, and sampled Value Type violations (Foundry OT health). God Object
+            Misnomer, DRY, Time Machine, and sampled Value Type violations (OT health). God Object
             and Value Type checks sample real instances, so this isn't instant.
           </>
         }

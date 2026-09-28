@@ -92,7 +92,7 @@ export function ObjectPropertiesTable({
         </Link>
       );
     }
-    if (hasTypeClass(typeRule?.type_classes, "hubble", "media_url") && typeof value === "string" && value) {
+    if (hasTypeClass(typeRule?.type_classes, "display", "media_url") && typeof value === "string" && value) {
       return (
         <a href={value} target="_blank" rel="noreferrer" className="hl-media-url">
           <img src={value} alt={key} className="hl-object-media-thumb" />

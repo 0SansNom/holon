@@ -15,7 +15,7 @@ export type SavedExploration = {
   updatedAt: string;
 };
 
-/** Saved OE list — static instance IDs (Foundry-style list). */
+/** Saved OE list — static instance IDs. */
 export type SavedObjectList = {
   id: string;
   name: string;

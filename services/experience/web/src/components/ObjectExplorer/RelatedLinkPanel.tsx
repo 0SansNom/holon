@@ -5,7 +5,7 @@ import { useDeleteObjectLink, useObjectLinks, usePutObjectLink } from "../../api
 import { getErrorMessage } from "../../api/client";
 import type { RelatedLink } from "./objectExplorerUtils";
 
-/** Foundry-style linked-objects card — counts, expand table, optional link/unlink. */
+/** Linked-objects card — counts, expand table, optional link/unlink. */
 export function RelatedLinkPanel({
   type,
   id,

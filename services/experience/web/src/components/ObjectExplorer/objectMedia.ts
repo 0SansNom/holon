@@ -9,7 +9,7 @@ export type ObjectMediaItem = {
   kind: "media_url" | "icon";
 };
 
-/** Collect hubble:media_url and hubble:icon string properties for the Media gallery. */
+/** Collect display:media_url and display:icon string properties for the Media gallery. */
 export function collectObjectMediaItems(
   object: Record<string, unknown>,
   objectType?: ObjectType | null,
@@ -24,9 +24,9 @@ export function collectObjectMediaItems(
       resolvePropertyTypeRule(key, objectType?.property_types, objectType?.property_mapping),
       sharedPropertyTypes,
     );
-    if (hasTypeClass(typeRule?.type_classes, "hubble", "media_url")) {
+    if (hasTypeClass(typeRule?.type_classes, "display", "media_url")) {
       items.push({ property: key, url: value, kind: "media_url" });
-    } else if (hasTypeClass(typeRule?.type_classes, "hubble", "icon")) {
+    } else if (hasTypeClass(typeRule?.type_classes, "display", "icon")) {
       items.push({ property: key, url: value, kind: "icon" });
     }
   }

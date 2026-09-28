@@ -312,7 +312,7 @@ export interface TransformStep {
   input_dataset: string;
   function_name: string;
   output_dataset: string;
-  /** Column → Value Type name (Foundry logical type cast). */
+  /** Column → Value Type name (logical type cast). */
   value_type_casts?: Record<string, string>;
 }
 

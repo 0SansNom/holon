@@ -570,7 +570,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
           panel={
             <PageSection title="Datasources">
               <p className="hl-text-muted-sm hl-mb-md">
-                Backing dataset and property → column mapping for this ObjectType (Foundry Datasources view).
+                Backing dataset and property → column mapping for this ObjectType (Datasources view).
                 Edit mappings on the Properties tab, then propose a version.
               </p>
               <dl className="hl-ot-overview-meta hl-mb-md">
@@ -680,7 +680,7 @@ function ObjectTypeDraftEditor({ objectType }: { objectType: ObjectType }) {
               </FormGroup>
               <FormGroup
                 label="Search index"
-                helperText="Rebuild OpenSearch from the serving store after changing render hints (Foundry Reindex datasources)."
+                helperText="Rebuild OpenSearch from the serving store after changing render hints (Reindex datasources)."
               >
                 <Button
                   icon="refresh"

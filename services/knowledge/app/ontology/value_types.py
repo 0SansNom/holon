@@ -210,7 +210,7 @@ async def update_value_type(
     every value already validated against this Value Type. `None` means
     "leave unchanged".
 
-    Foundry: changing constraints/format creates a new version; metadata
+    Changing constraints/format creates a new version; metadata
     edits do not. Holon bumps `version` and archives the prior snapshot
     when constraint payload, format_regex, or format_regex_match changes.
     """

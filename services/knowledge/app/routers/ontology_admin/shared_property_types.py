@@ -116,7 +116,7 @@ async def get_shared_property_type(api_name: str, principal: Principal = Depends
 
 @router.get("/shared-property-types/{api_name}/usage")
 async def get_shared_property_type_usage(api_name: str, principal: Principal = Depends(core.current_principal)) -> list[dict]:
-    """Foundry Usage tab — ObjectTypes that reference this SPT."""
+    """Usage tab — ObjectTypes that reference this SPT."""
     shared_property_type = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
     if shared_property_type is None:
         raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
@@ -133,7 +133,7 @@ async def get_shared_property_type_permissions(
     principal: Principal = Depends(core.current_principal),
     workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    """Foundry Permissions tab — effective ReBAC on the SPT URN."""
+    """Permissions tab — effective ReBAC on the SPT URN."""
     shared_property_type = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
     if shared_property_type is None:
         raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")
@@ -214,7 +214,7 @@ async def update_shared_property_type(
 async def delete_shared_property_type(
     api_name: str, principal: Principal = Depends(core.current_principal), workspace_id: str = Depends(core.current_workspace)
 ) -> dict:
-    """Foundry parity: auto-detach then remove. Requires SPT `approve`."""
+    """Auto-detach then remove. Requires SPT `approve`."""
     current = await ontology.get_shared_property_type(core.pool, principal.tenant_id, api_name)
     if current is None:
         raise HolonError.not_found('SharedPropertyTypeNotFound', f"unknown shared property type: {api_name}")

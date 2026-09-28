@@ -79,7 +79,7 @@ function normalizeQuery(q: string): string {
   return q.trim().toLowerCase();
 }
 
-/** Foundry-shaped OM top bar: search resources, create menu, branches launcher. */
+/** OM top bar: search resources, create menu, branches launcher. */
 export function OntologyChrome() {
   const navigate = useNavigate();
   const trigger = usePaletteIntentStore((s) => s.trigger);

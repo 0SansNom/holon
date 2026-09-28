@@ -212,7 +212,7 @@ export function ObjectSetsTab() {
       <OntologyTabHeader
         description={
           <>
-            Filtered collections of object instances (Foundry Object Sets). Predicates run through the same PDP-gated
+            Filtered collections of object instances (Object Sets). Predicates run through the same PDP-gated
             resolve path as Object Explorer — markings and classification always apply.
           </>
         }

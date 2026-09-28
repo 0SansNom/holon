@@ -16,11 +16,11 @@ _TYPE_CLASS_RE = re.compile(
 # Catalog of type classes Holon understands (storage accepts any valid string;
 # this list is documentation + UI suggestions + consumer keys).
 KNOWN_TYPE_CLASSES: dict[str, dict[str, str]] = {
-    "hubble:media_url": {
+    "display:media_url": {
         "applies_to": "property",
         "description": "Render property value as media in Object View",
     },
-    "hubble:icon": {
+    "display:icon": {
         "applies_to": "property",
         "description": "URL property used as the object icon",
     },
@@ -28,7 +28,7 @@ KNOWN_TYPE_CLASSES: dict[str, dict[str, str]] = {
         "applies_to": "relation",
         "description": "Link direction is parent in a hierarchy (Object View breadcrumbs)",
     },
-    "hubble-oe:hide-action": {
+    "explorer:hide-action": {
         "applies_to": "action",
         "description": "Hide Action from Object Explorer / Object View Actions dropdown",
     },
@@ -54,7 +54,7 @@ def normalize_type_class(raw: str) -> str:
     if not _TYPE_CLASS_RE.match(cleaned):
         raise ValueError(
             f"invalid type class {cleaned!r} — expected a bare tag (e.g. 'priority') "
-            f"or Foundry 'kind:name' (e.g. 'hubble:media_url', 'hierarchy:parent')"
+            f"or namespaced 'kind:name' (e.g. 'display:media_url', 'hierarchy:parent')"
         )
     return cleaned
 

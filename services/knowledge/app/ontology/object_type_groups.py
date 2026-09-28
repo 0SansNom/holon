@@ -1,5 +1,5 @@
 """Object Type Group registry — a named, navigational cluster of
-ObjectTypes (Foundry's Ontology Manager concept of the same name). Not a
+ObjectTypes (Ontology Manager concept of the same name). Not a
 new permission or schema layer, just a validated list: every member name
 must resolve to a real ObjectType, the same check `relation_types.py`
 already does for its source/target endpoints, and for the identical

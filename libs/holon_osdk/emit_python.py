@@ -54,7 +54,7 @@ def _python_type_for(
         return _BASE_TYPE_TO_PYTHON[value_types[prop.value_type].base_type]
     if prop.kind == "shared_property_type":
         # A Shared Property Type is a canonical name — either a Value
-        # Type wrap, or a one-level struct field map (Foundry parity).
+        # Type wrap, or a one-level struct field map.
         spt = shared_property_types[prop.shared_property_type]
         if spt.struct_properties:
             return "dict"  # structural TypedDict would be nicer; keep simple
@@ -163,7 +163,7 @@ def _safe_fn_token(name: str) -> str:
 
 
 def _emit_link_accessors(relation: RelationTypeSchema) -> str:
-    """Foundry-style link accessors: get / link / unlink on each side.
+    """Link accessors: get / link / unlink on each side.
 
     `get` works for every storage kind. `link`/`unlink` only for
     foreign_key and only from the source (FK-holding) ObjectType.
