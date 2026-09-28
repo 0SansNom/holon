@@ -7,7 +7,7 @@ import os
 import re
 import socket
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 # Platform service DNS names on the compose/cluster network. Connecting a
 # tenant connector here is SSRF into Holon itself. `postgres` is NOT in
@@ -191,6 +191,98 @@ def assert_connector_host(host: str, *, resolve: bool = True) -> None:
             raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
 
 
+def _answers_blocked(
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    *,
+    allow_private: bool,
+    platform_ips: set[str],
+) -> bool:
+    return any(_is_blocked_ip(ip, allow_private=allow_private) or str(ip) in platform_ips for ip in ips)
+
+
+def pin_connector_host(host: str) -> str:
+    """Return a checked IP to connect to.
+
+    DNS is resolved twice. If the second answer is loopback, link-local,
+    or private (unless the name is explicitly allowed), this is DNS
+    rebinding and the call fails. Otherwise the first checked address is
+    returned so the client can connect without resolving the name again.
+    SNI and the Host header stay on the original name.
+    """
+    name = _hostname(host)
+    if not name:
+        raise ConnectorSafetyError("host is required")
+    if name in _blocked_hosts() or name.endswith(".internal"):
+        raise ConnectorSafetyError(f"host {host!r} is not allowed for connectors")
+
+    allow_private = name in _allowed_hosts()
+    platform_ips = _platform_blocked_ips()
+    bare = name.strip("[]")
+    try:
+        literal = _unwrap_ip(ipaddress.ip_address(bare))
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _is_blocked_ip(literal, allow_private=allow_private) or str(literal) in platform_ips:
+            raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
+        return str(literal)
+
+    first = _resolve_ips(name)
+    if _answers_blocked(first, allow_private=allow_private, platform_ips=platform_ips):
+        raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
+    second = _resolve_ips(name)
+    if _answers_blocked(second, allow_private=allow_private, platform_ips=platform_ips):
+        raise ConnectorSafetyError(f"host {host!r} DNS answer changed to a blocked address")
+    return str(first[0])
+
+
+def pin_object_endpoint(endpoint: str, *, kind: str) -> str:
+    """Checked endpoint for an object-store client.
+
+    DNS is resolved twice, and a second answer on a blocked address is
+    refused. Only plain HTTP S3 is then dialed at that IP. An https
+    endpoint — and a scheme-less one, which the S3 client opens as https —
+    keeps its hostname: pyarrow signs the request and verifies TLS against
+    that name, and it cannot set SNI separately. Azure and GCS resolve
+    their own service host; the check still runs, then the original
+    endpoint is returned.
+    """
+    raw = endpoint if "://" in endpoint else f"//{endpoint}"
+    parsed = urlsplit(raw)
+    if not parsed.hostname:
+        raise ConnectorSafetyError("endpoint missing host")
+    pinned = pin_connector_host(parsed.hostname)
+    if kind != "s3" or parsed.scheme != "http":
+        return endpoint
+    host = f"[{pinned}]" if ":" in pinned else pinned
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urlunsplit(parsed._replace(netloc=netloc))
+
+
+
+def connector_secret(
+    *,
+    secret_ref: Optional[str],
+    plaintext: Optional[str],
+    resolved: Optional[str],
+) -> Optional[str]:
+    """Secret used to open a connection.
+
+    A non-empty ``secret_ref`` wins, even when it resolves empty — plaintext
+    is not a fallback. Stored plaintext is refused in production.
+    """
+    if secret_ref is not None and str(secret_ref).strip():
+        return resolved
+    if plaintext is not None and str(plaintext).strip():
+        from .security_posture import is_production
+
+        if is_production():
+            raise ConnectorSafetyError(
+                "stored plaintext connector secret cannot be used in production — set secret_ref"
+            )
+    return plaintext
+
+
 def assert_http_url(url: str, *, resolve: bool = True) -> None:
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
@@ -280,6 +372,24 @@ def assert_no_inline_connector_secret(value: Optional[str], *, field: str) -> No
         )
 
 
+def assert_destination_change_requires_secret(
+    *,
+    is_update: bool,
+    destination_changed: bool,
+    secret_provided: bool,
+) -> None:
+    """Refuse keeping a stored secret when the remote destination moved.
+
+    Connections/sources are tenant-shared: without this check, an editor can
+    retarget host/URL and have Holon send the existing credential there.
+    """
+    if is_update and destination_changed and not secret_provided:
+        raise ConnectorSafetyError(
+            "destination changed — re-enter the secret or secret_ref "
+            "(stored credentials cannot follow a new host)"
+        )
+
+
 def assert_production_requires_secret_ref(ref: Optional[str], *, is_update: bool) -> None:
     """Brand-new connector credentials in production must be a secret_ref.
 
@@ -296,6 +406,69 @@ def assert_production_requires_secret_ref(ref: Optional[str], *, is_update: bool
         raise ConnectorSafetyError("secret_ref is required in production")
 
 
+# Parsers below split refs exactly like holon_common.secrets' providers do,
+# so a ref that passes the guard is one the provider will actually resolve.
+_SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# RFC 1123 label (namespace) / subdomain (Secret name).
+_K8S_NAMESPACE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _assert_secret_key(key: str, *, what: str) -> None:
+    if not key or not _SECRET_KEY_RE.match(key) or key in {".", ".."}:
+        raise ConnectorSafetyError(f"{what} must be a plain key name, got {key!r}")
+    _assert_not_platform_secret_name(key)
+
+
+def _assert_vault_ref(body: str, *, tenant_id: str) -> None:
+    """vault:connectors/<tenant>/<path>#key (VaultSecretProvider form)."""
+    path, sep, key = body.partition("#")
+    if not sep:
+        raise ConnectorSafetyError("vault secret_ref must be vault:connectors/<tenant>/<path>#key")
+    prefix = f"connectors/{tenant_id}/"
+    segments = path.split("/")
+    if not path.startswith(prefix) or any(seg in {"", ".", ".."} for seg in segments):
+        raise ConnectorSafetyError(f"vault secret_ref must start with {prefix!r} (no empty or '..' segments)")
+    _assert_secret_key(key, what="vault secret_ref key")
+
+
+def _assert_k8s_ref(body: str, *, tenant_id: str) -> None:
+    """k8s:<namespace>/holon-connector-<tenant>[.<suffix>]/<key> (KubernetesSecretProvider form).
+
+    '.' delimits the suffix: tenant ids are [a-z0-9-], so a '-' suffix would
+    let tenant "acme" claim "holon-connector-acme-corp".
+    """
+    parts = body.split("/")
+    expected = f"holon-connector-{tenant_id}"
+    if len(parts) != 3:
+        raise ConnectorSafetyError(f"k8s secret_ref must be k8s:<namespace>/{expected}[.<suffix>]/<key>")
+    namespace, name, key = parts
+    if not _K8S_NAMESPACE_RE.match(namespace):
+        raise ConnectorSafetyError(f"invalid k8s namespace {namespace!r} in secret_ref")
+    if name != expected and not (name.startswith(f"{expected}.") and _SECRET_KEY_RE.match(name)):
+        raise ConnectorSafetyError(f"k8s secret_ref name must be {expected} or {expected}.<suffix>")
+    _assert_secret_key(key, what="k8s secret_ref key")
+
+
+def _assert_aws_ref(body: str, *, tenant_id: str) -> None:
+    """aws:<secret-id>[|json-key] (AwsSecretsManagerProvider form).
+
+    secret-id must be connectors/<tenant>/... or holon-connector-<tenant>;
+    ARNs are refused since they can name a secret in another account.
+    """
+    secret_id, sep, json_key = body.partition("|")
+    expected = f"holon-connector-{tenant_id}"
+    prefix = f"connectors/{tenant_id}/"
+    if secret_id.startswith("arn:"):
+        raise ConnectorSafetyError(f"aws secret_ref must use a secret name ({prefix}... or {expected}), not an ARN")
+    segments = secret_id.split("/")
+    if not (secret_id == expected or secret_id.startswith(prefix)) or any(
+        seg in {"", ".", ".."} for seg in segments
+    ):
+        raise ConnectorSafetyError(f"aws secret_ref must start with {prefix!r} or be {expected}")
+    if sep:
+        _assert_secret_key(json_key, what="aws secret_ref json key")
+
+
 def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
     """Tenant-supplied secret_ref must not resolve platform credentials."""
     if ref is None or ref == "":
@@ -310,30 +483,12 @@ def assert_connector_secret_ref(ref: Optional[str], *, tenant_id: str) -> None:
     if scheme in {"vault", "k8s", "aws"}:
         if not tenant_id:
             raise ConnectorSafetyError("secret_ref requires a tenant_id")
-        path, _, key = rest.partition("#")
-        path = path.strip()
-        key = key.strip()
         if scheme == "vault":
-            prefix = f"connectors/{tenant_id}/"
-            if not path.startswith(prefix):
-                raise ConnectorSafetyError(f"vault secret_ref must start with {prefix!r}")
+            _assert_vault_ref(rest, tenant_id=tenant_id)
         elif scheme == "k8s":
-            # '.' delimits the suffix: tenant ids are [a-z0-9-], so a '-'
-            # suffix would let tenant "acme" claim "holon-connector-acme-corp".
-            expected = f"holon-connector-{tenant_id}"
-            if path != expected and not path.startswith(f"{expected}."):
-                raise ConnectorSafetyError(
-                    f"k8s secret_ref must be {expected} or {expected}.<suffix>"
-                )
+            _assert_k8s_ref(rest, tenant_id=tenant_id)
         else:
-            expected = f"holon-connector-{tenant_id}"
-            prefix = f"connectors/{tenant_id}/"
-            if not (path.startswith(prefix) or path == expected):
-                raise ConnectorSafetyError(
-                    f"aws secret_ref must start with {prefix!r} or be {expected}"
-                )
-        if key:
-            _assert_not_platform_secret_name(key)
+            _assert_aws_ref(rest, tenant_id=tenant_id)
         return
     raise ConnectorSafetyError(f"unsupported secret_ref scheme: {scheme!r}")
 

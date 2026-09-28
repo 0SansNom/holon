@@ -16,13 +16,15 @@ import asyncpg
 import httpx
 
 from app.cursor_window import advance_cursor
-
+from app.pinned_http import pinned_transport
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     same_origin,
     resolve_connector_secret,
 )
@@ -31,6 +33,11 @@ _DEFAULT_LOGIN_URL = "https://login.salesforce.com"
 _DEFAULT_API_VERSION = "v59.0"
 _API_VERSION_RE = re.compile(r"^v\d+(?:\.\d+)?$")
 _CURSOR_PROPERTY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+# ISO-8601 date or datetime, which SOQL requires as an unquoted Date/DateTime
+# literal on Date/DateTime fields.
+_ISO_CURSOR_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?)?$"
+)
 _MAX_PAGES = 100
 _OAUTH2_REFRESH_MARGIN_SECONDS = 60
 _OAUTH2_DEFAULT_TTL_SECONDS = 300
@@ -112,10 +119,63 @@ def _require_cursor_property(cursor_property: Optional[str]) -> Optional[str]:
     return name
 
 
+def _parse_iso_cursor(value: str) -> Optional[datetime.datetime]:
+    """Parse an ISO-8601 date/datetime cursor as stored or as sources emit it.
+
+    Accepts 'T' or ' ' between date and time (``str(datetime)`` uses a
+    space), 'Z', and ``±HH:MM`` or ``±HHMM`` offsets (Salesforce JSON uses
+    ``+0000``). Date-only values parse to midnight. None when not a date.
+    """
+    match = _ISO_CURSOR_RE.match(value)
+    if not match:
+        return None
+    day, clock, offset = match.groups()
+    iso = day
+    if clock:
+        if "." in clock:
+            whole, frac = clock.split(".", 1)
+            clock = f"{whole}.{frac[:6].ljust(6, '0')}"
+        iso = f"{day}T{clock}"
+        if offset:
+            if offset == "Z":
+                offset = "+00:00"
+            elif ":" not in offset:
+                offset = f"{offset[:3]}:{offset[3:]}"
+            iso += offset
+    try:
+        return datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+
+
+def _soql_date_literal(value: str) -> Optional[str]:
+    """Render a date/datetime cursor as an unquoted SOQL literal, else None.
+
+    Datetimes go out as UTC ``YYYY-MM-DDThh:mm:ssZ``: Salesforce emits
+    ``2024-01-15T10:30:00.000+0000`` in JSON, which is not a SOQL literal.
+    Dropping the milliseconds moves the cursor back by < 1s, so the next
+    sync may re-read a few rows but never skips one.
+    """
+    parsed = _parse_iso_cursor(value)
+    if parsed is None:
+        return None
+    if _ISO_CURSOR_RE.match(value).group(2) is None:
+        return parsed.date().isoformat()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> str:
     """Append an incremental filter without rewriting the user's SELECT list."""
-    literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
-    clause = f"{cursor_property} >= '{literal}'"
+    date_literal = _soql_date_literal(last_cursor_value)
+    if date_literal is not None:
+        # Inclusive resume (`>=`) plus boundary de-dupe keeps rows that share
+        # the cursor value. SOQL Date/DateTime literals must be unquoted.
+        clause = f"{cursor_property} >= {date_literal}"
+    else:
+        literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
+        clause = f"{cursor_property} >= '{literal}'"
     lowered = soql.lower()
     # Insert before ORDER BY / LIMIT / OFFSET when present.
     for keyword in (" order by ", " limit ", " offset "):
@@ -148,7 +208,7 @@ async def register_connection(
         raise SourceConfigError("client_id is required")
     login = _normalize_login_url(login_url or _DEFAULT_LOGIN_URL)
     existing = await pool.fetchrow(
-        "SELECT client_secret, secret_ref FROM salesforce_connection "
+        "SELECT login_url, client_id, client_secret, secret_ref FROM salesforce_connection "
         "WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
@@ -156,6 +216,16 @@ async def register_connection(
     try:
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(client_secret, field="client_secret")
+        if existing is not None:
+            destination_changed = (
+                existing["login_url"] != login
+                or existing["client_id"] != client_id
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=client_secret is not None or secret_ref is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if client_secret is None and secret_ref is None and existing is not None:
@@ -376,7 +446,11 @@ async def _bearer_token(
     ):
         return connection["oauth2_cached_token"], connection["instance_url"]
 
-    client_secret = _resolve_secret(connection["secret_ref"], tenant_id) or connection["client_secret"]
+    client_secret = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["client_secret"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
     if not client_secret:
         raise SourceFetchError(
             f"connection {connection_name!r}: client_secret (or secret_ref) is required"
@@ -392,7 +466,7 @@ async def _bearer_token(
         "client_id": connection["client_id"],
         "client_secret": client_secret,
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         response = await client.post(token_url, data=form)
     if response.status_code >= 400:
         raise SourceFetchError(
@@ -476,7 +550,7 @@ async def fetch_for_dataset(
     pages_fetched = 0
     next_url: Optional[str] = query_url
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=30.0) as client:
         while next_url:
             pages_fetched += 1
             if pages_fetched > _MAX_PAGES:
