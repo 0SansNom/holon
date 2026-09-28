@@ -3,7 +3,7 @@ import { Button, Callout, Dialog, DialogBody, DialogFooter, FormGroup, InputGrou
 import { useRegisterConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { GenericConnection } from "../../api/connectivity";
-import { SECRET_REF_HELP } from "./shared";
+import { SecretRefField } from "./ConnectionFields";
 
 export function ConnectionDialog({ editing, onClose }: { editing: GenericConnection | null; onClose: () => void }) {
   const isEditing = editing !== null;
@@ -77,14 +77,12 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
             />
           </FormGroup>
         )}
-        <FormGroup label="Secret reference" labelFor="connection-secret-ref" helperText={SECRET_REF_HELP}>
-          <InputGroup
-            id="connection-secret-ref"
-            value={secretRef}
-            onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:HOLON_CONN_<TENANT>__HUBSPOT_TOKEN"
-          />
-        </FormGroup>
+        <SecretRefField
+          id="connection-secret-ref"
+          value={secretRef}
+          onChange={setSecretRef}
+          placeholder="env:HOLON_CONN_<TENANT>__HUBSPOT_TOKEN"
+        />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}
