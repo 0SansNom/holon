@@ -63,7 +63,7 @@ def test_kenji_finds_public_customer_name_but_not_the_confidential_email(
     is confidential: only a cleared country searches it, and it never
     appears in a denied principal's hit text.
     """
-    visible = _search(jdoe_token, "contact@acme-robotics.example", want_object_type="Customer")
+    visible = _search(jdoe_token, '"contact@acme-robotics.example"', want_object_type="Customer")
     customer = next(r for r in visible["results"] if r["object_type"] == "Customer")
     assert "contact@acme-robotics.example" in customer["text"]
     assert "confidential_text" not in customer
@@ -74,7 +74,7 @@ def test_kenji_finds_public_customer_name_but_not_the_confidential_email(
     assert "184500" not in denied.get("text", "")
     assert "confidential_text" not in denied
 
-    status, hidden = _request("GET", holon_url("/search?q=contact@acme-robotics.example"), token=kenji_token)
+    status, hidden = _request("GET", holon_url('/search?q="contact@acme-robotics.example"'), token=kenji_token)
     assert status == 200, hidden
     assert not any(r["object_type"] == "Customer" for r in hidden["results"]), hidden
 

@@ -155,3 +155,13 @@ def test_marking_filter_allows_unmarked_or_fully_held() -> None:
     terms_set = next(item["terms_set"] for item in should if "terms_set" in item)
     assert terms_set["required_markings"]["minimum_should_match_field"] == "required_marking_count"
     assert terms_set["required_markings"]["terms"] == ["mark:pii"]
+
+def test_denied_query_does_not_search_confidential_fields() -> None:
+    query = build_search_query(
+        principal=_principal("JP"),
+        query_text='"contact@acme-robotics.example"',
+        include_confidential=False,
+    )
+    assert query["query"]["bool"]["must"][0]["simple_query_string"]["fields"] == ["text"]
+    assert query["query"]["bool"]["must"][0]["simple_query_string"]["query"] == '"contact@acme-robotics.example"'
+
