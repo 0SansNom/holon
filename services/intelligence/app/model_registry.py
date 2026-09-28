@@ -144,6 +144,8 @@ async def predict(pool: asyncpg.Pool, s3_client, bucket: str, *, name: str, feat
     registration = await get_model(pool, name)
     if registration is None:
         raise ValueError(f"no model registered as {name!r}")
+    if registration["status"] == "disabled":
+        raise ModelDisabled(f"model {name!r} is disabled, not active")
     if registration["status"] != "active":
         raise ModelNotActive(f"model {name!r} is {registration['status']}, not active")
 
