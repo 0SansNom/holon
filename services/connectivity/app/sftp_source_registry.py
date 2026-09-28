@@ -19,6 +19,15 @@ import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
 from app.file_cursor import mtime_ns_from_stamp, select_files
+from app.source_registry_base import (
+    ConnectionInUseError,
+    SourceConflictError,
+    SourceConfigError,
+    SourceFetchError,
+    assert_dataset_available,
+    make_column_cursor_commit,
+    resolve_source_secret,
+)
 
 from holon_common.connector_safety import (
     ConnectorSafetyError,
@@ -29,7 +38,6 @@ from holon_common.connector_safety import (
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
     connector_secret,
-    resolve_connector_secret,
 )
 from holon_common.security_posture import is_production
 
@@ -49,30 +57,6 @@ _PUBLIC_SOURCE_COLUMNS = (
     "tenant_id, name, workspace_id, connection_name, remote_path, remote_prefix, format, "
     "incremental, last_synced_path, schedule_interval_minutes, status, created_by_urn, created_at"
 )
-
-
-class SourceConflictError(ValueError):
-    pass
-
-
-class SourceConfigError(ValueError):
-    pass
-
-
-class SourceFetchError(ValueError):
-    pass
-
-
-def _resolve_secret(ref, tenant_id: str):
-    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
-    try:
-        return resolve_connector_secret(ref, tenant_id=tenant_id)
-    except ConnectorSafetyError as exc:
-        raise SourceFetchError(str(exc)) from exc
-
-
-class ConnectionInUseError(ValueError):
-    pass
 
 
 def _require_remote_path(path: str, *, what: str) -> None:
@@ -171,39 +155,6 @@ async def delete_connection(pool: asyncpg.Pool, tenant_id: str, name: str) -> No
     await pool.execute("DELETE FROM sftp_connection WHERE tenant_id = $1 AND name = $2", tenant_id, name)
 
 
-async def _assert_dataset_available(
-    pool: asyncpg.Pool, *, tenant_id: str, name: str, reserved_dataset_names: frozenset[str]
-) -> None:
-    if name in reserved_dataset_names:
-        raise SourceConflictError(f"dataset {name!r} is reserved")
-
-    conflicting_plugin = await pool.fetchval(
-        """
-        SELECT name FROM plugin_registration
-        WHERE manifest->>'dataset_name' = $1
-          AND status = 'active'
-          AND (tenant_id IS NULL OR tenant_id = $2)
-        """,
-        name, tenant_id,
-    )
-    if conflicting_plugin is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active plugin {conflicting_plugin!r}")
-
-    # Do not conflict-check sftp_source itself — re-register updates via ON CONFLICT.
-    for table, label in (
-        ("generic_rest_source", "REST source"),
-        ("sql_source", "SQL source"),
-        ("object_source", "object source"),
-        ("salesforce_source", "Salesforce source"),
-    ):
-        conflicting = await pool.fetchval(
-            f"SELECT name FROM {table} WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-            tenant_id, name,
-        )
-        if conflicting is not None:
-            raise SourceConflictError(f"dataset {name!r} is already claimed by active {label} {conflicting!r}")
-
-
 async def register_source(
     pool: asyncpg.Pool,
     *,
@@ -235,8 +186,12 @@ async def register_source(
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
-    await _assert_dataset_available(
-        pool, tenant_id=tenant_id, name=name, reserved_dataset_names=reserved_dataset_names
+    await assert_dataset_available(
+        pool,
+        tenant_id=tenant_id,
+        name=name,
+        reserved_dataset_names=reserved_dataset_names,
+        exclude_table="sftp_source",
     )
 
     await pool.execute(
@@ -499,7 +454,7 @@ async def fetch_for_dataset(
     password = connector_secret(
         secret_ref=connection["secret_ref"],
         plaintext=connection["password"],
-        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+        resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
     ) or ""
 
     try:
@@ -523,12 +478,13 @@ async def fetch_for_dataset(
     commit: Optional[Callable[[], Awaitable[None]]] = None
     if new_cursor is not None and new_cursor != row["last_synced_path"]:
 
-        async def _commit_cursor(cursor: str = new_cursor) -> None:
-            await pool.execute(
-                "UPDATE sftp_source SET last_synced_path = $1 WHERE tenant_id = $2 AND name = $3",
-                cursor, tenant_id, name,
-            )
-
-        commit = _commit_cursor
+        commit = make_column_cursor_commit(
+            pool,
+            table="sftp_source",
+            tenant_id=tenant_id,
+            name=name,
+            column="last_synced_path",
+            value=new_cursor,
+        )
 
     return rows, commit

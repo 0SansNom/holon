@@ -17,6 +17,15 @@ import httpx
 
 from app.cursor_window import advance_cursor
 from app.pinned_http import pinned_transport
+from app.source_registry_base import (
+    ConnectionInUseError,
+    SourceConflictError,
+    SourceConfigError,
+    SourceFetchError,
+    assert_dataset_available,
+    make_property_cursor_commit,
+    resolve_source_secret,
+)
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
@@ -26,7 +35,6 @@ from holon_common.connector_safety import (
     assert_production_requires_secret_ref,
     connector_secret,
     same_origin,
-    resolve_connector_secret,
 )
 
 _DEFAULT_LOGIN_URL = "https://login.salesforce.com"
@@ -53,30 +61,6 @@ _PUBLIC_SOURCE_COLUMNS = (
     "cursor_property, last_cursor_value, schedule_interval_minutes, status, "
     "created_by_urn, created_at"
 )
-
-
-class SourceConflictError(ValueError):
-    pass
-
-
-class SourceConfigError(ValueError):
-    pass
-
-
-class SourceFetchError(ValueError):
-    pass
-
-
-def _resolve_secret(ref, tenant_id: str):
-    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
-    try:
-        return resolve_connector_secret(ref, tenant_id=tenant_id)
-    except ConnectorSafetyError as exc:
-        raise SourceFetchError(str(exc)) from exc
-
-
-class ConnectionInUseError(ValueError):
-    pass
 
 
 def _normalize_login_url(login_url: str) -> str:
@@ -289,43 +273,6 @@ async def delete_connection(pool: asyncpg.Pool, tenant_id: str, name: str) -> No
     )
 
 
-async def _assert_dataset_available(
-    pool: asyncpg.Pool, *, tenant_id: str, name: str, reserved_dataset_names: frozenset[str]
-) -> None:
-    if name in reserved_dataset_names:
-        raise SourceConflictError(f"dataset {name!r} is reserved")
-
-    conflicting_plugin = await pool.fetchval(
-        """
-        SELECT name FROM plugin_registration
-        WHERE manifest->>'dataset_name' = $1
-          AND status = 'active'
-          AND (tenant_id IS NULL OR tenant_id = $2)
-        """,
-        name, tenant_id,
-    )
-    if conflicting_plugin is not None:
-        raise SourceConflictError(
-            f"dataset {name!r} is already claimed by active plugin {conflicting_plugin!r}"
-        )
-
-    # Do not conflict-check salesforce_source itself — re-register updates via ON CONFLICT.
-    for table, label in (
-        ("generic_rest_source", "REST source"),
-        ("sql_source", "SQL source"),
-        ("object_source", "object source"),
-        ("sftp_source", "SFTP source"),
-    ):
-        conflicting = await pool.fetchval(
-            f"SELECT name FROM {table} WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-            tenant_id, name,
-        )
-        if conflicting is not None:
-            raise SourceConflictError(
-                f"dataset {name!r} is already claimed by active {label} {conflicting!r}"
-            )
-
-
 async def register_source(
     pool: asyncpg.Pool,
     *,
@@ -349,8 +296,12 @@ async def register_source(
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
-    await _assert_dataset_available(
-        pool, tenant_id=tenant_id, name=name, reserved_dataset_names=reserved_dataset_names
+    await assert_dataset_available(
+        pool,
+        tenant_id=tenant_id,
+        name=name,
+        reserved_dataset_names=reserved_dataset_names,
+        exclude_table="salesforce_source",
     )
 
     await pool.execute(
@@ -449,7 +400,7 @@ async def _bearer_token(
     client_secret = connector_secret(
         secret_ref=connection["secret_ref"],
         plaintext=connection["client_secret"],
-        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+        resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
     )
     if not client_secret:
         raise SourceFetchError(
@@ -589,16 +540,13 @@ async def fetch_for_dataset(
         records = advanced.rows
         if advanced.changed and advanced.cursor is not None:
 
-            async def _commit_cursor(
-                cursor: str = advanced.cursor,
-                boundary: str = advanced.boundary_keys,
-            ) -> None:
-                await pool.execute(
-                    "UPDATE salesforce_source SET last_cursor_value = $1, cursor_boundary_keys = $2 "
-                    "WHERE tenant_id = $3 AND name = $4",
-                    cursor, boundary, tenant_id, name,
-                )
-
-            commit = _commit_cursor
+            commit = make_property_cursor_commit(
+                pool,
+                table="salesforce_source",
+                tenant_id=tenant_id,
+                name=name,
+                cursor=advanced.cursor,
+                boundary_keys=advanced.boundary_keys,
+            )
 
     return records, commit

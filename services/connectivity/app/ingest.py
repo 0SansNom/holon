@@ -38,6 +38,7 @@ from . import (
     plugin_registry,
     salesforce_source_registry,
     sftp_source_registry,
+    source_registry_base,
     sql_source_registry,
     stream_connector,
 )
@@ -432,15 +433,7 @@ async def _run_sync_for_dataset(
     commit_cursor = None
     try:
         rows, commit_cursor = await read()
-    except generic_source_registry.SourceFetchError as exc:
-        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
-    except sql_source_registry.SourceFetchError as exc:
-        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
-    except object_source_registry.SourceFetchError as exc:
-        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
-    except sftp_source_registry.SourceFetchError as exc:
-        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
-    except salesforce_source_registry.SourceFetchError as exc:
+    except source_registry_base.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except ConnectorSafetyError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc

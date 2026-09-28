@@ -13,6 +13,15 @@ import asyncpg
 import httpx
 
 from app.pinned_http import pinned_transport
+from app.source_registry_base import (
+    ConnectionInUseError,
+    SourceConflictError,
+    SourceConfigError,
+    SourceFetchError,
+    assert_dataset_available,
+    make_property_cursor_commit,
+    resolve_source_secret,
+)
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
@@ -22,7 +31,6 @@ from holon_common.connector_safety import (
     assert_production_requires_secret_ref,
     connector_secret,
     same_origin,
-    resolve_connector_secret,
 )
 
 from app.cursor_window import advance_cursor, lookback_value
@@ -45,31 +53,7 @@ _CONNECTION_PUBLIC_COLUMNS = (
 _MAX_PAGES = 100
 
 
-class SourceConflictError(ValueError):
-    pass
-
-
-class SourceConfigError(ValueError):
-    pass
-
-
-class SourceFetchError(ValueError):
-    pass
-
-
-def _resolve_secret(ref, tenant_id: str):
-    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
-    try:
-        return resolve_connector_secret(ref, tenant_id=tenant_id)
-    except ConnectorSafetyError as exc:
-        raise SourceFetchError(str(exc)) from exc
-
-
 class ConnectionConflictError(ValueError):
-    pass
-
-
-class ConnectionInUseError(ValueError):
     pass
 
 
@@ -288,51 +272,13 @@ async def register_source(
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
-    if name in reserved_dataset_names:
-        raise SourceConflictError(f"dataset {name!r} is reserved")
-
-    conflicting_plugin = await pool.fetchval(
-        """
-        SELECT name FROM plugin_registration
-        WHERE manifest->>'dataset_name' = $1
-          AND status = 'active'
-          AND (tenant_id IS NULL OR tenant_id = $2)
-        """,
-        name,
-        tenant_id,
+    await assert_dataset_available(
+        pool,
+        tenant_id=tenant_id,
+        name=name,
+        reserved_dataset_names=reserved_dataset_names,
+        exclude_table="generic_rest_source",
     )
-    if conflicting_plugin is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active plugin {conflicting_plugin!r}")
-
-    conflicting_sql_source = await pool.fetchval(
-        "SELECT name FROM sql_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_sql_source is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active SQL source {conflicting_sql_source!r}")
-
-    conflicting_object_source = await pool.fetchval(
-        "SELECT name FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_object_source is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active object source {conflicting_object_source!r}")
-
-    conflicting_sftp_source = await pool.fetchval(
-        "SELECT name FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_sftp_source is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active SFTP source {conflicting_sftp_source!r}")
-
-    conflicting_sf_source = await pool.fetchval(
-        "SELECT name FROM salesforce_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_sf_source is not None:
-        raise SourceConflictError(
-            f"dataset {name!r} is already claimed by active Salesforce source {conflicting_sf_source!r}"
-        )
 
     await pool.execute(
         """
@@ -484,7 +430,7 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
     client_secret = connector_secret(
         secret_ref=connection["secret_ref"],
         plaintext=connection["oauth2_client_secret"],
-        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+        resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
     )
     form = {
         "grant_type": "client_credentials",
@@ -557,14 +503,14 @@ async def fetch_for_dataset(
             value = connector_secret(
                 secret_ref=connection["secret_ref"],
                 plaintext=connection["auth_header_value"],
-                resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+                resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
             )
             headers[connection["auth_header_name"]] = value
     elif row["auth_header_name"]:
         value = connector_secret(
             secret_ref=row["secret_ref"],
             plaintext=row["auth_header_value"],
-            resolved=_resolve_secret(row["secret_ref"], tenant_id),
+            resolved=resolve_source_secret(row["secret_ref"], tenant_id=tenant_id),
         )
         if value:
             headers[row["auth_header_name"]] = value
@@ -616,16 +562,13 @@ async def fetch_for_dataset(
         records = advanced.rows
         if advanced.changed and advanced.cursor is not None:
 
-            async def _commit_cursor(
-                cursor: str = advanced.cursor,
-                boundary: str = advanced.boundary_keys,
-            ) -> None:
-                await pool.execute(
-                    "UPDATE generic_rest_source SET last_cursor_value = $1, cursor_boundary_keys = $2 "
-                    "WHERE tenant_id = $3 AND name = $4",
-                    cursor, boundary, tenant_id, name,
-                )
-
-            commit = _commit_cursor
+            commit = make_property_cursor_commit(
+                pool,
+                table="generic_rest_source",
+                tenant_id=tenant_id,
+                name=name,
+                cursor=advanced.cursor,
+                boundary_keys=advanced.boundary_keys,
+            )
 
     return records, commit
