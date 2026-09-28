@@ -45,6 +45,8 @@ def test_mysql_file_helpers_are_rejected() -> None:
         _require_select_only("SELECT LOAD_FILE('/etc/passwd')", "mysql")
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT id FROM orders INTO OUTFILE '/tmp/x'", "mysql")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT SLEEP(5)", "mysql")
 
 
 def test_mssql_file_helpers_are_rejected() -> None:
@@ -52,20 +54,40 @@ def test_mssql_file_helpers_are_rejected() -> None:
         _require_select_only("SELECT * FROM OPENROWSET('x', 'y')", "mssql")
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT xp_cmdshell('dir')", "mssql")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT * FROM OPENQUERY(linked, 'SELECT 1')", "mssql")
+
+
+def test_snowflake_stage_and_system_helpers_are_rejected() -> None:
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT $1 FROM @landing/data.csv.gz", "snowflake")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT * FROM TABLE(DIRECTORY(@landing))", "snowflake")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT SYSTEM$CANCEL_ALL_QUERIES(CURRENT_SESSION())", "snowflake")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT GET_PRESIGNED_URL(@landing, 'a.csv')", "snowflake")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT BUILD_SCOPED_FILE_URL(@landing, 'a.csv')", "snowflake")
+    # Ordinary warehouse reads stay allowed (and email-like @ in literals is fine).
+    _require_select_only("SELECT id FROM analytics.orders WHERE email = 'a@b.com'", "snowflake")
 
 
 def test_default_ports_per_dialect() -> None:
     assert sql_drivers.default_port_for("postgres") == 5432
     assert sql_drivers.default_port_for("mysql") == 3306
     assert sql_drivers.default_port_for("mssql") == 1433
+    assert sql_drivers.default_port_for("snowflake") == 443
 
 
 def test_normalize_dialect_rejects_unknown() -> None:
     with pytest.raises(ValueError):
         sql_drivers.normalize_dialect("oracle")
+    assert sql_drivers.normalize_dialect("snowflake") == "snowflake"
 
 
 def test_cursor_placeholders() -> None:
     assert sql_drivers.cursor_placeholder("postgres") == "$1"
     assert sql_drivers.cursor_placeholder("mysql") == "%s"
     assert sql_drivers.cursor_placeholder("mssql") == "?"
+    assert sql_drivers.cursor_placeholder("snowflake") == "%s"

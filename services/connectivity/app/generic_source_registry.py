@@ -6,21 +6,24 @@ Allows registering REST data sources, authentication headers, record extraction 
 from __future__ import annotations
 
 import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import asyncpg
 import httpx
 
+from app.pinned_http import pinned_transport
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     same_origin,
+    resolve_connector_secret,
 )
-from holon_common.secrets import resolve_optional
 
 # Columns safe to return to caller (excludes raw credential values).
 _PUBLIC_COLUMNS = (
@@ -33,7 +36,7 @@ _CONNECTION_PUBLIC_COLUMNS = (
     "tenant_id, name, auth_type, auth_header_name, (auth_header_value IS NOT NULL) AS has_auth_header_value, "
     "(secret_ref IS NOT NULL) AS has_secret_ref, "
     "oauth2_token_url, oauth2_client_id, (oauth2_client_secret IS NOT NULL) AS has_oauth2_client_secret, oauth2_scope, "
-    "created_by_urn, created_at"
+    "allowed_origin, created_by_urn, created_at"
 )
 
 # Maximum page count safety limit to prevent pagination infinite loops.
@@ -52,6 +55,14 @@ class SourceFetchError(ValueError):
     pass
 
 
+def _resolve_secret(ref, tenant_id: str):
+    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
+    try:
+        return resolve_connector_secret(ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
+
+
 class ConnectionConflictError(ValueError):
     pass
 
@@ -61,6 +72,35 @@ class ConnectionInUseError(ValueError):
 
 
 _VALID_CONNECTION_AUTH_TYPES = frozenset({"header", "oauth2_client_credentials"})
+
+
+def _normalize_origin(value: str) -> str:
+    """`https://api.example.com/v1/x` → `https://api.example.com` (port kept)."""
+    parsed = urlsplit((value or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise SourceConfigError(f"allowed_origin must be an http(s) origin, got {value!r}")
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{host}{port}"
+
+
+def _assert_connection_origin(connection_name: str, allowed_origin: Optional[str], base_url: str) -> None:
+    """A connection's credential only ever goes to the origin it was bound to.
+
+    Sources carry the base_url, connections carry the secret: without this
+    pin, any editor could point a new source at their own host and have
+    Holon send a shared connection's header or bearer token there.
+    """
+    if not allowed_origin:
+        raise SourceConfigError(
+            f"connection {connection_name!r} has no allowed_origin — edit the connection to set it"
+        )
+    if not same_origin(allowed_origin, base_url):
+        raise SourceConfigError(
+            f"base_url origin does not match connection {connection_name!r} allowed_origin {allowed_origin!r}"
+        )
 
 
 async def register_connection(
@@ -77,6 +117,7 @@ async def register_connection(
     oauth2_client_secret: Optional[str] = None,
     oauth2_scope: Optional[str] = None,
     secret_ref: Optional[str] = None,
+    allowed_origin: Optional[str] = None,
 ) -> dict:
     """Register or update a REST connection credential."""
     if auth_type not in _VALID_CONNECTION_AUTH_TYPES:
@@ -89,15 +130,40 @@ async def register_connection(
         )
 
     existing = await pool.fetchrow(
-        "SELECT auth_header_value, oauth2_client_secret, secret_ref FROM generic_rest_connection "
-        "WHERE tenant_id = $1 AND name = $2",
+        "SELECT auth_type, oauth2_token_url, oauth2_client_id, auth_header_value, oauth2_client_secret, secret_ref, "
+        "allowed_origin FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
     is_update = existing is not None
+    if allowed_origin is not None:
+        allowed_origin = _normalize_origin(allowed_origin)
+    elif existing is not None:
+        allowed_origin = existing["allowed_origin"]
+    if not allowed_origin:
+        raise SourceConfigError("allowed_origin is required (e.g. 'https://api.example.com')")
     try:
+        if oauth2_token_url:
+            assert_http_url(oauth2_token_url, resolve=False)
+        assert_http_url(allowed_origin, resolve=False)
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
         assert_no_inline_connector_secret(oauth2_client_secret, field="oauth2_client_secret")
+        if existing is not None:
+            destination_changed = (
+                existing["auth_type"] != auth_type
+                or (existing["allowed_origin"] or None) != allowed_origin
+                or (existing["oauth2_token_url"] or None) != (oauth2_token_url or None)
+                or (existing["oauth2_client_id"] or None) != (oauth2_client_id or None)
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=(
+                    auth_header_value is not None
+                    or oauth2_client_secret is not None
+                    or secret_ref is not None
+                ),
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if auth_header_value is None and existing is not None:
@@ -117,9 +183,10 @@ async def register_connection(
         """
         INSERT INTO generic_rest_connection (
             tenant_id, name, auth_type, auth_header_name, auth_header_value,
-            oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, secret_ref, created_by_urn
+            oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, secret_ref, created_by_urn,
+            allowed_origin
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
             auth_type = EXCLUDED.auth_type,
             auth_header_name = EXCLUDED.auth_header_name,
@@ -129,6 +196,7 @@ async def register_connection(
             oauth2_client_secret = EXCLUDED.oauth2_client_secret,
             oauth2_scope = EXCLUDED.oauth2_scope,
             secret_ref = EXCLUDED.secret_ref,
+            allowed_origin = EXCLUDED.allowed_origin,
             -- A re-registration changes credentials; the cached token
             -- from the old ones must not survive it.
             oauth2_cached_token = NULL,
@@ -136,6 +204,7 @@ async def register_connection(
         """,
         tenant_id, name, auth_type, auth_header_name, auth_header_value,
         oauth2_token_url, oauth2_client_id, oauth2_client_secret, oauth2_scope, secret_ref, created_by_urn,
+        allowed_origin,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -187,8 +256,21 @@ async def register_source(
     reserved_dataset_names: frozenset[str] = frozenset(),
 ) -> dict:
     """Verify dataset name availability and validate REST source parameters."""
+    existing_source = await pool.fetchrow(
+        "SELECT base_url, auth_header_value FROM generic_rest_source WHERE tenant_id = $1 AND name = $2",
+        tenant_id, name,
+    )
     try:
+        assert_http_url(base_url, resolve=False)
         assert_no_inline_connector_secret(auth_header_value, field="auth_header_value")
+        if existing_source is not None and not connection_name:
+            # Inline-auth sources: moving base_url to another origin must re-supply
+            # the header secret (path/query edits on the same origin keep it).
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=not same_origin(existing_source["base_url"], base_url),
+                secret_provided=auth_header_value is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if connection_name and (auth_header_name or auth_header_value):
@@ -196,8 +278,11 @@ async def register_source(
             "a source can use a named connection or its own inline auth header, not both — "
             "clear one before setting the other"
         )
-    if connection_name and await get_connection(pool, tenant_id, connection_name) is None:
-        raise SourceConfigError(f"unknown connection: {connection_name!r}")
+    if connection_name:
+        connection = await get_connection(pool, tenant_id, connection_name)
+        if connection is None:
+            raise SourceConfigError(f"unknown connection: {connection_name!r}")
+        _assert_connection_origin(connection_name, connection["allowed_origin"], base_url)
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
@@ -427,7 +512,11 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
         if (expires_at - now).total_seconds() > _OAUTH2_REFRESH_MARGIN_SECONDS:
             return connection["oauth2_cached_token"]
 
-    client_secret = resolve_optional(connection["secret_ref"]) or connection["oauth2_client_secret"]
+    client_secret = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["oauth2_client_secret"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
     form = {
         "grant_type": "client_credentials",
         "client_id": connection["oauth2_client_id"],
@@ -440,7 +529,7 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
         assert_http_url(connection["oauth2_token_url"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         response = await client.post(connection["oauth2_token_url"], data=form)
     if response.status_code >= 400:
         raise SourceFetchError(
@@ -462,7 +551,9 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
     return token
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT base_url, auth_header_name, auth_header_value, secret_ref, record_path, next_page_path, connection_name, "
         "cursor_property, incremental_param, last_cursor_value "
@@ -476,7 +567,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     if row["connection_name"]:
         connection = await pool.fetchrow(
             "SELECT auth_type, auth_header_name, auth_header_value, secret_ref, oauth2_token_url, oauth2_client_id, "
-            "oauth2_client_secret, oauth2_scope, oauth2_cached_token, oauth2_token_expires_at "
+            "oauth2_client_secret, oauth2_scope, oauth2_cached_token, oauth2_token_expires_at, allowed_origin "
             "FROM generic_rest_connection WHERE tenant_id = $1 AND name = $2",
             tenant_id, row["connection_name"],
         )
@@ -484,14 +575,28 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
             raise SourceFetchError(
                 f"source {name!r} references connection {row['connection_name']!r}, which no longer exists"
             )
+        # Re-checked at fetch: the connection's origin may have been edited
+        # after this source was saved.
+        try:
+            _assert_connection_origin(row["connection_name"], connection["allowed_origin"], row["base_url"])
+        except SourceConfigError as exc:
+            raise SourceFetchError(str(exc)) from exc
         if connection["auth_type"] == "oauth2_client_credentials":
             token = await _oauth2_bearer_token(pool, tenant_id, row["connection_name"], connection)
             headers["Authorization"] = f"Bearer {token}"
         else:
-            value = resolve_optional(connection["secret_ref"]) or connection["auth_header_value"]
+            value = connector_secret(
+                secret_ref=connection["secret_ref"],
+                plaintext=connection["auth_header_value"],
+                resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+            )
             headers[connection["auth_header_name"]] = value
     elif row["auth_header_name"]:
-        value = resolve_optional(row["secret_ref"]) or row["auth_header_value"]
+        value = connector_secret(
+            secret_ref=row["secret_ref"],
+            plaintext=row["auth_header_value"],
+            resolved=_resolve_secret(row["secret_ref"], tenant_id),
+        )
         if value:
             headers[row["auth_header_name"]] = value
 
@@ -507,7 +612,7 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
         url = _add_query_param(url, row["incremental_param"], row["last_cursor_value"])
     pages_fetched = 0
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
         while url is not None:
             pages_fetched += 1
             if pages_fetched > _MAX_PAGES:
@@ -531,12 +636,17 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
                 else None
             )
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if row["cursor_property"]:
         new_cursor = _compute_new_cursor(records, row["cursor_property"], row["last_cursor_value"])
         if new_cursor != row["last_cursor_value"]:
-            await pool.execute(
-                "UPDATE generic_rest_source SET last_cursor_value = $1 WHERE tenant_id = $2 AND name = $3",
-                new_cursor, tenant_id, name,
-            )
 
-    return records
+            async def _commit_cursor(cursor: str = new_cursor) -> None:
+                await pool.execute(
+                    "UPDATE generic_rest_source SET last_cursor_value = $1 WHERE tenant_id = $2 AND name = $3",
+                    cursor, tenant_id, name,
+                )
+
+            commit = _commit_cursor
+
+    return records, commit

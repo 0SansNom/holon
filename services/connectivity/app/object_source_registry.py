@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urlsplit
 
 import asyncpg
@@ -17,14 +18,23 @@ from pyarrow.lib import ArrowException
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
+    pin_object_endpoint,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
+    resolve_connector_secret,
 )
-from holon_common.secrets import resolve_optional
+
+logger = logging.getLogger(__name__)
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+# Object keys / prefixes: any printable segments (Hive partitions like
+# `year=2024/`, spaces, `+` are all common in real buckets), no empty or
+# `..` segments, no control characters; trailing slash OK for prefixes.
+_OBJECT_KEY_RE = re.compile(r"^/?[^/\x00-\x1f\x7f\\]+(/[^/\x00-\x1f\x7f\\]+)*/?$")
 _CONNECTION_KINDS = frozenset({"s3", "azure", "gcs"})
 _DEFAULT_GCS_ENDPOINT = "https://storage.googleapis.com"
 # Soft check that secret looks like a Google service-account JSON key
@@ -55,6 +65,14 @@ class SourceFetchError(ValueError):
     pass
 
 
+def _resolve_secret(ref, tenant_id: str):
+    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
+    try:
+        return resolve_connector_secret(ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
+
+
 class ConnectionConflictError(ValueError):
     pass
 
@@ -67,6 +85,14 @@ def _require_bucket(bucket: str) -> None:
     if not bucket or not _BUCKET_RE.match(bucket):
         raise SourceConfigError(
             f"invalid bucket {bucket!r} — must be 3-63 chars, lowercase letters/digits/dot/hyphen"
+        )
+
+
+def _require_object_key(path: str, *, what: str) -> None:
+    if not path or not _OBJECT_KEY_RE.match(path) or ".." in path.split("/"):
+        raise SourceConfigError(
+            f"invalid {what} {path!r} — use a plain object key or prefix "
+            "(e.g. 'landing/data.csv' or 'landing/'), no '..'"
         )
 
 
@@ -145,7 +171,8 @@ async def register_connection(
         _validate_gcs_service_account_json(secret_access_key)
     hostname = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}").hostname
     existing = await pool.fetchrow(
-        "SELECT secret_access_key, secret_ref FROM object_connection WHERE tenant_id = $1 AND name = $2",
+        "SELECT kind, endpoint, region, access_key_id, path_style, secret_access_key, secret_ref "
+        "FROM object_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
     is_update = existing is not None
@@ -153,6 +180,17 @@ async def register_connection(
         assert_connector_host(hostname or "")
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(secret_access_key, field="secret_access_key")
+        if existing is not None:
+            destination_changed = (
+                existing["kind"] != kind
+                or existing["endpoint"] != endpoint
+                or existing["access_key_id"] != access_key_id
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=secret_access_key is not None or secret_ref is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if secret_access_key is None and secret_ref is None and existing is not None:
@@ -232,6 +270,10 @@ async def register_source(
     if format not in _FORMATS:
         raise SourceConfigError(f"format must be one of {sorted(_FORMATS)}")
     _require_bucket(bucket)
+    if object_key:
+        _require_object_key(object_key, what="object_key")
+    if key_prefix:
+        _require_object_key(key_prefix, what="key_prefix")
     if incremental and object_key:
         raise SourceConfigError("incremental only applies to key_prefix sources, not a single object_key")
     if await get_connection(pool, tenant_id, connection_name) is None:
@@ -416,6 +458,25 @@ def _build_filesystem(
     )
 
 
+# open_input_stream() auto-detects these from the extension, so
+# `landing/2024.csv.gz` is a readable csv file, not a stray sidecar.
+_COMPRESSION_SUFFIXES = ("", ".gz", ".bz2", ".zst", ".lz4")
+
+
+def _matches_format(path: str, format: str) -> bool:
+    lower = path.lower()
+    suffix = _format_suffix(format)
+    return any(lower.endswith(suffix + compression) for compression in _COMPRESSION_SUFFIXES)
+
+
+def _format_suffix(format: str) -> str:
+    """Mirrors `sftp_source_registry._format_suffix` — kept local since the
+    two registries don't share a base module."""
+    if format == "ndjson":
+        return ".ndjson"
+    return f".{format}"
+
+
 def _read_table(fs: pafs.FileSystem, path: str, format: str):
     with fs.open_input_stream(path) as stream:
         if format == "csv":
@@ -455,11 +516,13 @@ def _fetch_sync(
 
     selector = pafs.FileSelector(f"{bucket}/{key_prefix}", recursive=True)
     infos = fs.get_file_info(selector)
-    keys = sorted(
-        info.path[len(bucket) + 1:]
-        for info in infos
-        if info.type == pafs.FileType.File
-    )
+    files = [info.path for info in infos if info.type == pafs.FileType.File]
+    keys = sorted(path[len(bucket) + 1:] for path in files if _matches_format(path, format))
+    skipped = len(files) - len(keys)
+    if skipped:
+        # Spark `_SUCCESS` / `.crc` markers are expected; anything else here
+        # is a file the user may think is being synced.
+        logger.info("object prefix %s/%s: skipped %d file(s) not matching format %r", bucket, key_prefix, skipped, format)
     if incremental and last_synced_key:
         keys = [key for key in keys if key > last_synced_key]
 
@@ -473,7 +536,9 @@ def _fetch_sync(
     return rows, (new_cursor if incremental else None)
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, bucket, object_key, key_prefix, format, incremental, last_synced_key "
         "FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -490,20 +555,21 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     if connection is None:
         raise SourceFetchError(f"source {name!r} references connection {row['connection_name']!r}, which no longer exists")
 
-    hostname = urlsplit(
-        connection["endpoint"] if "://" in connection["endpoint"] else f"//{connection['endpoint']}"
-    ).hostname
     try:
-        assert_connector_host(hostname or "")
+        endpoint = pin_object_endpoint(connection["endpoint"], kind=connection["kind"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    secret_access_key = resolve_optional(connection["secret_ref"]) or connection["secret_access_key"]
+    secret_access_key = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["secret_access_key"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
 
     try:
         rows, new_cursor = await asyncio.to_thread(
             _fetch_sync,
             kind=connection["kind"],
-            endpoint=connection["endpoint"],
+            endpoint=endpoint,
             access_key_id=connection["access_key_id"],
             secret_access_key=secret_access_key,
             region=connection["region"],
@@ -518,10 +584,15 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     except (OSError, ValueError, ArrowException) as exc:
         raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if new_cursor is not None and new_cursor != row["last_synced_key"]:
-        await pool.execute(
-            "UPDATE object_source SET last_synced_key = $1 WHERE tenant_id = $2 AND name = $3",
-            new_cursor, tenant_id, name,
-        )
 
-    return rows
+        async def _commit_cursor(cursor: str = new_cursor) -> None:
+            await pool.execute(
+                "UPDATE object_source SET last_synced_key = $1 WHERE tenant_id = $2 AND name = $3",
+                cursor, tenant_id, name,
+            )
+
+        commit = _commit_cursor
+
+    return rows, commit
