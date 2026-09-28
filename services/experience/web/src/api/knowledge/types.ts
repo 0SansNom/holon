@@ -532,6 +532,60 @@ export interface LineageEdge {
   target_property: string;
 }
 
+export interface LineageColumnMapping {
+  source_column: string;
+  target_property: string;
+}
+
+export interface LineageProducer {
+  kind: "pipeline" | "connector" | string;
+  pipeline_name?: string;
+  step_name?: string;
+  function_name?: string;
+  connector_urn?: string;
+}
+
+export interface LineageVersion {
+  urn: string;
+  created_at: string | null;
+  row_count: number | null;
+  latest: boolean;
+}
+
+export interface LineageNode {
+  urn: string;
+  kind: "dataset" | "object-type" | "dataset-version" | "unknown";
+  display_name: string;
+  focus: boolean;
+  stale: boolean;
+  expandable: boolean;
+  built_at: string | null;
+  row_count: number | null;
+  producer: LineageProducer | null;
+  columns: LineageColumnMapping[];
+  versions: LineageVersion[];
+  opened_version_urn: string | null;
+  opened_is_latest: boolean | null;
+}
+
+export interface LineageGraphEdge {
+  source_urn: string;
+  target_urn: string;
+  relation: string;
+  stale: boolean;
+  column_mappings: LineageColumnMapping[];
+}
+
+export interface LineageGraph {
+  root: string;
+  focus_urn: string;
+  depth: number;
+  direction: "both" | "upstream" | "downstream";
+  truncated: boolean;
+  nodes: LineageNode[];
+  edges: LineageGraphEdge[];
+}
+
 export interface SearchResult {
   total: number;
   results: Array<{
@@ -631,6 +685,7 @@ export interface TimelineEvent {
   at: string;
   id: number | null;
   has_edits: boolean;
+  changes: Array<{ property: string; before: unknown; after: unknown }>;
   revertible: boolean;
   reverted: boolean;
 }
@@ -663,6 +718,16 @@ export interface ObjectTypeGroup {
 export interface DatasetPreviewColumn {
   name: string;
   sample: unknown;
+}
+
+export interface DatasetSchemaColumn {
+  name: string;
+  type: string;
+  required: boolean;
+}
+
+export interface DatasetSchema {
+  columns: DatasetSchemaColumn[];
 }
 
 /** Latest version summary from GET /catalog/datasets. */

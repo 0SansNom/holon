@@ -42,6 +42,10 @@ class ConnectivitySyncCompletedV1(_Payload):
     # lineage on top of the `maps_to` edges every synced dataset already
     # gets to its ObjectType.
     source_dataset_version_urn: Optional[str] = None
+    # Who produced this version. Absent on connector syncs that predate
+    # the field; a pipeline step sends {kind, pipeline_name, step_name,
+    # function_name}. Catalog stores it on dataset_version.producer.
+    producer: Optional[dict[str, Any]] = None
 
 
 @register("knowledge.action.requested", version=1)

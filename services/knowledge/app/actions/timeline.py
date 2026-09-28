@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncpg
 
+from ..action_structural import property_changes
 
 async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_urn: str, limit: int = 100) -> list[dict]:
     invocations = await pool.fetch(
         """
-        SELECT id, action_name, actor_urn, reason, invoked_at AS at, edits IS NOT NULL AS has_edits, reverted_at
+        SELECT id, action_name, actor_urn, reason, invoked_at AS at, edits, prior_values, reverted_at
         FROM action_invocation
         WHERE tenant_id = $1 AND instance_urn = $2
         """,
@@ -18,7 +19,7 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
     from .. import ontology
 
     writeback_action_names: set[str] = set()
-    for action_name in {row["action_name"] for row in invocations if row["has_edits"]}:
+    for action_name in {row["action_name"] for row in invocations if row["edits"] is not None}:
         action_type = await ontology.get_action_type(pool, tenant_id, action_name)
         if action_type and action_type.get("writeback_dataset"):
             writeback_action_names.add(action_name)
@@ -40,8 +41,9 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
             "reason": row["reason"],
             "at": row["at"],
             "id": row["id"],
-            "has_edits": row["has_edits"],
-            "revertible": row["has_edits"] and row["action_name"] not in writeback_action_names,
+            "has_edits": row["edits"] is not None,
+            "changes": property_changes(row["edits"], row["prior_values"]),
+            "revertible": row["edits"] is not None and row["action_name"] not in writeback_action_names,
             "reverted": row["reverted_at"] is not None,
         })
     for row in approvals:
@@ -53,6 +55,7 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
             "at": row["requested_at"],
             "id": None,
             "has_edits": False,
+            "changes": [],
             "revertible": False,
             "reverted": False,
         })
@@ -65,6 +68,7 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
                 "at": row["decided_at"],
                 "id": None,
                 "has_edits": False,
+                "changes": [],
                 "revertible": False,
                 "reverted": False,
             })
@@ -77,6 +81,7 @@ async def list_instance_timeline(pool: asyncpg.Pool, tenant_id: str, instance_ur
                 "at": row["expires_at"],
                 "id": None,
                 "has_edits": False,
+                "changes": [],
                 "revertible": False,
                 "reverted": False,
             })
