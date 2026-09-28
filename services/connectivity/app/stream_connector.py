@@ -11,6 +11,8 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import asyncpg
 from aiokafka import AIOKafkaConsumer
 
+from holon_common.connector_safety import ConnectorSafetyError
+
 from . import iceberg_writer, kafka_stream_registry
 
 logger = logging.getLogger("connectivity.stream")
@@ -48,6 +50,12 @@ async def consume_stream_forever(
     dataset_name = source["dataset_name"]
     batch_interval_seconds = source["batch_interval_seconds"]
 
+    try:
+        await kafka_stream_registry.assert_topic_available(pool, tenant_id=tenant_id, topic=topic)
+    except ConnectorSafetyError:
+        logger.error("stream %r refused topic %r for tenant %r", source_name, topic, tenant_id)
+        return
+
     consumer = AIOKafkaConsumer(
         topic,
         bootstrap_servers=kafka_bootstrap,
@@ -65,6 +73,11 @@ async def consume_stream_forever(
     batch_keys: set[str] = set()
     try:
         while True:
+            try:
+                await kafka_stream_registry.assert_topic_available(pool, tenant_id=tenant_id, topic=topic)
+            except ConnectorSafetyError:
+                logger.error("stream %r refused topic %r for tenant %r", source_name, topic, tenant_id)
+                return
             try:
                 async for msg in _drain(consumer, timeout=batch_interval_seconds):
                     payload = msg.value
