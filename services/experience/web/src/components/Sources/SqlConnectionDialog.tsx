@@ -12,7 +12,7 @@ import {
 import { useRegisterSqlConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { SqlConnection, SqlDialect } from "../../api/connectivity";
-import { SECRET_REF_HELP } from "./shared";
+import { SecretRefField } from "./ConnectionFields";
 
 const DEFAULT_PORTS: Record<SqlDialect, number> = {
   postgres: 5432,
@@ -156,14 +156,12 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
             />
           </FormGroup>
         )}
-        <FormGroup label="Secret reference" labelFor="sql-connection-secret-ref" helperText={SECRET_REF_HELP}>
-          <InputGroup
-            id="sql-connection-secret-ref"
-            value={secretRef}
-            onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:HOLON_CONN_<TENANT>__ERP_PASSWORD"
-          />
-        </FormGroup>
+        <SecretRefField
+          id="sql-connection-secret-ref"
+          value={secretRef}
+          onChange={setSecretRef}
+          placeholder="env:HOLON_CONN_<TENANT>__ERP_PASSWORD"
+        />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}

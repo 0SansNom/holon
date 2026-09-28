@@ -18,10 +18,12 @@ from pyarrow.lib import ArrowException
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
+    pin_object_endpoint,
     assert_connector_secret_ref,
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
     resolve_connector_secret,
 )
 
@@ -553,20 +555,21 @@ async def fetch_for_dataset(
     if connection is None:
         raise SourceFetchError(f"source {name!r} references connection {row['connection_name']!r}, which no longer exists")
 
-    hostname = urlsplit(
-        connection["endpoint"] if "://" in connection["endpoint"] else f"//{connection['endpoint']}"
-    ).hostname
     try:
-        assert_connector_host(hostname or "")
+        endpoint = pin_object_endpoint(connection["endpoint"], kind=connection["kind"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    secret_access_key = _resolve_secret(connection["secret_ref"], tenant_id) or connection["secret_access_key"]
+    secret_access_key = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["secret_access_key"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    )
 
     try:
         rows, new_cursor = await asyncio.to_thread(
             _fetch_sync,
             kind=connection["kind"],
-            endpoint=connection["endpoint"],
+            endpoint=endpoint,
             access_key_id=connection["access_key_id"],
             secret_access_key=secret_access_key,
             region=connection["region"],
