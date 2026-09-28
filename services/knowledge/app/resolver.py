@@ -97,6 +97,19 @@ def fetch_generic(
     return _duck_select(arrow_table, "SELECT * FROM t")
 
 
+def dataset_schema(dataset_name: str, **iceberg_config) -> dict:
+    """Declared Iceberg fields only — no row scan. Lineage opens this
+    on a dataset click; stats stay the heavier opt-in.
+    """
+    table = _load_table(dataset_name, **iceberg_config)
+    return {
+        "columns": [
+            {"name": field.name, "type": str(field.field_type), "required": bool(field.required)}
+            for field in table.schema().fields
+        ]
+    }
+
+
 def dataset_schema_and_stats(dataset_name: str, **iceberg_config) -> dict:
     """The Iceberg table's own declared schema (field name/type/required —
     not inferred from one sample row, the actual committed schema) plus
