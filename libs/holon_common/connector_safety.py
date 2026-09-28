@@ -7,7 +7,7 @@ import os
 import re
 import socket
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 # Platform service DNS names on the compose/cluster network. Connecting a
 # tenant connector here is SSRF into Holon itself. `postgres` is NOT in
@@ -189,6 +189,74 @@ def assert_connector_host(host: str, *, resolve: bool = True) -> None:
     for ip in _resolve_ips(name):
         if _is_blocked_ip(ip, allow_private=allow_private) or str(ip) in platform_ips:
             raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
+
+
+def _answers_blocked(
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    *,
+    allow_private: bool,
+    platform_ips: set[str],
+) -> bool:
+    return any(_is_blocked_ip(ip, allow_private=allow_private) or str(ip) in platform_ips for ip in ips)
+
+
+def pin_connector_host(host: str) -> str:
+    """Return a checked IP to connect to.
+
+    DNS is resolved twice. If the second answer is loopback, link-local,
+    or private (unless the name is explicitly allowed), this is DNS
+    rebinding and the call fails. Otherwise the first checked address is
+    returned so the client can connect without resolving the name again.
+    SNI and the Host header stay on the original name.
+    """
+    name = _hostname(host)
+    if not name:
+        raise ConnectorSafetyError("host is required")
+    if name in _blocked_hosts() or name.endswith(".internal"):
+        raise ConnectorSafetyError(f"host {host!r} is not allowed for connectors")
+
+    allow_private = name in _allowed_hosts()
+    platform_ips = _platform_blocked_ips()
+    bare = name.strip("[]")
+    try:
+        literal = _unwrap_ip(ipaddress.ip_address(bare))
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _is_blocked_ip(literal, allow_private=allow_private) or str(literal) in platform_ips:
+            raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
+        return str(literal)
+
+    first = _resolve_ips(name)
+    if _answers_blocked(first, allow_private=allow_private, platform_ips=platform_ips):
+        raise ConnectorSafetyError(f"host {host!r} resolves to a blocked address")
+    second = _resolve_ips(name)
+    if _answers_blocked(second, allow_private=allow_private, platform_ips=platform_ips):
+        raise ConnectorSafetyError(f"host {host!r} DNS answer changed to a blocked address")
+    return str(first[0])
+
+
+def pin_object_endpoint(endpoint: str, *, kind: str) -> str:
+    """Checked endpoint for an object-store client.
+
+    DNS is resolved twice, and a second answer on a blocked address is
+    refused. Only plain HTTP S3 is then dialed at that IP. An https
+    endpoint — and a scheme-less one, which the S3 client opens as https —
+    keeps its hostname: pyarrow signs the request and verifies TLS against
+    that name, and it cannot set SNI separately. Azure and GCS resolve
+    their own service host; the check still runs, then the original
+    endpoint is returned.
+    """
+    raw = endpoint if "://" in endpoint else f"//{endpoint}"
+    parsed = urlsplit(raw)
+    if not parsed.hostname:
+        raise ConnectorSafetyError("endpoint missing host")
+    pinned = pin_connector_host(parsed.hostname)
+    if kind != "s3" or parsed.scheme != "http":
+        return endpoint
+    host = f"[{pinned}]" if ":" in pinned else pinned
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urlunsplit(parsed._replace(netloc=netloc))
 
 
 def assert_http_url(url: str, *, resolve: bool = True) -> None:
