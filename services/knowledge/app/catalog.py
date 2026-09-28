@@ -568,7 +568,7 @@ async def reindex_object_type_search(
 ) -> dict:
     """Rebuild OpenSearch documents for one ObjectType from the serving store.
 
-    Foundry exposes a similar "Reindex datasources" action when render
+    Holon exposes a "Reindex datasources" action when render
     hints or mappings change — Holon re-reads materialized rows and
     re-applies hint-driven indexing rules.
 

@@ -1,4 +1,4 @@
-"""Object Sets — filtered collections of object instances (Foundry Object Set).
+"""Object Sets — filtered collections of object instances (Object Sets).
 
 Knowledge-owned ontology artefact (not Experience Collections). Evaluation
 always goes through `_resolve_many` + PDP so markings/classification apply.
@@ -111,7 +111,7 @@ def matches_predicates(instance: dict, definition: dict, property_mapping: dict)
     """Evaluate definition.all against a resolved instance (api-name keys preferred).
 
     Predicate properties may be top-level (``status``) or one-level struct
-    paths (``address.city``) — Foundry Object Explorer struct field search.
+    paths (``address.city``) — Object Explorer struct field search.
     """
     for pred in definition.get("all") or []:
         prop = pred["property"]

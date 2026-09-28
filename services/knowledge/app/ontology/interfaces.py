@@ -40,7 +40,7 @@ def resolve_interface_property_path(
     """Resolve where an interface required property is satisfied on an OT.
 
     ``binding_path`` is either absent (same-name top-level property) or a
-    one-level struct path like ``address.city`` (Foundry struct-field →
+    one-level struct path like ``address.city`` (struct-field →
     interface property). Returns ``(top_level_name, leaf_type_rule)``.
     """
     path = binding_path if isinstance(binding_path, str) and binding_path.strip() else interface_prop
@@ -190,7 +190,7 @@ async def validate_link_constraints(
     tenant_id: str,
     link_constraints: list,
 ) -> list[dict]:
-    """Normalize interface link constraints (Foundry interface link types)."""
+    """Normalize interface link constraints (interface link types)."""
     if not isinstance(link_constraints, list):
         raise ValueError("link_constraints must be a list")
 

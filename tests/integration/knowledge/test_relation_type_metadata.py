@@ -1,4 +1,4 @@
-"""RelationType Foundry-side metadata + delete (P0) + project ACL (P1)."""
+"""RelationType link-side metadata + delete (P0) + project ACL (P1)."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def test_type_classes_must_be_strings() -> None:
     assert _normalize_type_classes(["core", "nav"]) == ["core", "nav"]
 
 
-def test_seeded_relation_exposes_foundry_side_metadata(jdoe_token: str) -> None:
+def test_seeded_relation_exposes_link_side_metadata(jdoe_token: str) -> None:
     status, relation = _request("GET", ontology_url("/linkTypes/Order.customer"), token=jdoe_token)
     assert status == 200, relation
     assert relation.get("source_api_name") in ("customer", ""), relation

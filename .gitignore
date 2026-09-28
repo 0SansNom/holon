@@ -10,13 +10,8 @@ node_modules/
 services/experience/web/dist/
 services/experience/app/static/
 
-# internal architecture docs — kept locally, not published
-/nova-foundry-sas-v2.md
-/nova-foundry-architecture.md
-/nova-foundry-phase3.md
 /docs/adr/
 /docs/api/
 /docs/ops/
 
-# Local AI-assistant tooling state, not project content
 .claude/

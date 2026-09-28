@@ -18,7 +18,7 @@ export function ObjectActionsBar({
   variant?: "section" | "header";
   maxHeaderActions?: number;
 }) {
-  const visible = actions.filter((a) => !hasTypeClass(a.type_classes, "hubble-oe", "hide-action"));
+  const visible = actions.filter((a) => !hasTypeClass(a.type_classes, "explorer", "hide-action"));
   if (visible.length === 0) return null;
 
   const shown = variant === "header" ? visible.slice(0, maxHeaderActions) : visible;

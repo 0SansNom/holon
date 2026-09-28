@@ -25,7 +25,7 @@ import {
 } from "../Ontology/propertyEditorUtils";
 import { applyConditionalStyle, camelToSnake } from "../common/propertyFormatUtils";
 
-/** Prominent (or fallback) properties pinned under the Object View title — Foundry Overview chrome. */
+/** Prominent (or fallback) properties pinned under the Object View title — Overview chrome. */
 export function ObjectViewOverview({
   object,
   objectType,

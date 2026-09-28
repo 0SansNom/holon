@@ -1,4 +1,4 @@
-"""Relation Types / Foundry Link Types."""
+"""Relation Types / Link Types."""
 
 from __future__ import annotations
 
@@ -211,7 +211,7 @@ async def get_relation_type_writeback_status(
 ) -> dict:
     """Warn before changing storage/datasource when link overlays exist.
 
-    Foundry surfaces Phonograph/writeback risks on Link Type edits; Holon
+    Surfaces writeback risks on Link Type edits; Holon
     reports overlay count + lifecycle so the OM UI can show a Callout.
     """
     from ... import link_overlays

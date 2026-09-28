@@ -1,4 +1,4 @@
-/** Foundry lifecycle_status values used across Ontology Manager UI. */
+/** Standard lifecycle_status values used across Ontology Manager UI. */
 
 export const REGISTRY_LIFECYCLE_STATUSES = ["experimental", "active", "deprecated", "example"] as const;
 export const OBJECT_TYPE_LIFECYCLE_STATUSES = [...REGISTRY_LIFECYCLE_STATUSES, "promoted"] as const;

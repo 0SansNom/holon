@@ -50,7 +50,7 @@ export interface ConditionalFormatRule {
 // only, the same limit `ontology/publishing.py`'s `_validate_property_types`
 // enforces server-side (a struct's own properties, or an array's
 // element, may only ever be a `value_type`/`shared_property_type` leaf).
-// Optional `description` / `main_field` are Foundry-style field metadata
+// Optional `description` / `main_field` are field metadata
 // (compact Explorer display uses main fields when any are marked).
 type PropertyTypeLeaf =
   | {
@@ -58,7 +58,7 @@ type PropertyTypeLeaf =
       value_type: string;
       description?: string;
       main_field?: boolean;
-      /** Optional dataset column for this field (Foundry Column mapping). */
+      /** Optional dataset column for this field (Column mapping). */
       column?: string;
     }
   | {
@@ -93,9 +93,9 @@ export type PropertyTypeRule = {
   editable?: boolean;
   required?: boolean;
   visibility?: "prominent" | "normal" | "hidden";
-  /** Foundry-style render hints. Absent ⇒ searchable by default at index time. */
+  /** Render hints. Absent ⇒ searchable by default at index time. */
   render_hints?: PropertyRenderHint[];
-  /** Free-form type classes (bare tags or Foundry kind:name). */
+  /** Free-form type classes (bare tags or kind:name). */
   type_classes?: string[];
   lifecycle_status?: PropertyLifecycleStatus;
 } & (
@@ -109,13 +109,13 @@ export type PropertyTypeRule = {
 );
 
 // A derived property is either a Function plugin name (string) or a
-// Foundry-style reducer over a RelationType — `path` (1–3 hops) matches
+// Reducer over a RelationType — `path` (1–3 hops) matches
 // the same forward-local-name-or-target_property convention the `/links`
 // endpoint resolves server-side; `property` names a property on the
 // *final* related ObjectType and is required unless `aggregate` is "count".
 export interface DerivedPropertyLinkAggregate {
   kind: "link_aggregate";
-  /** Link accessor names, 1–3 hops (Foundry multi-hop derived properties). */
+  /** Link accessor names, 1–3 hops (multi-hop derived properties). */
   path: string[];
   aggregate: "sum" | "count" | "avg" | "min" | "max" | "collect_list" | "collect_set";
   property?: string;
@@ -224,7 +224,7 @@ export interface SharedPropertyType {
   /** One-level struct field map when this SPT is struct-typed. */
   struct_properties?: Record<string, PropertyTypeLeaf> | null;
   description: string;
-  /** Foundry aliases — alternate search terms. */
+  /** Aliases — alternate search terms. */
   aliases?: string[];
   /** Optional project scope (additive ReBAC via parent_project). */
   project_urn?: string | null;
@@ -241,7 +241,7 @@ export interface ActionParameterDefault {
   value?: unknown;
   /**
    * object_property only: `"current"` (Action target) or an earlier
-   * object_reference parameter name (Foundry order rule).
+   * object_reference parameter name (order rule).
    */
   object?: string;
   /** object_property only — property key on the source object. */
@@ -259,9 +259,9 @@ export interface ActionParameter {
   object_type?: string;
   /** Optional Object Set name — filters the object_reference Suggest + invoke check. */
   object_set?: string;
-  /** Foundry type classes on the parameter, e.g. `actions:generate_uuid`. */
+  /** Type classes on the parameter, e.g. `actions:generate_uuid`. */
   type_classes?: string[];
-  /** Foundry Form default — prefills the invoke form (OE / Object App / …). */
+  /** Form default — prefills the invoke form (OE / Object App / …). */
   default?: ActionParameterDefault;
 }
 
@@ -309,7 +309,7 @@ export interface SubmissionCriterion {
 }
 
 // Configure/Sections: a purely-display grouping of an Action Type's
-// parameters in the invocation form (Foundry's "Sections") — never
+// parameters in the invocation form ("Sections") — never
 // affects what gets submitted. A parameter not named in any section
 // renders ungrouped, same as before this existed.
 export interface ActionParameterSection {
@@ -338,7 +338,7 @@ export interface ActionType {
   // edits, instead of a fixed declaration.
   edit_function?: string | null;
   sections?: ActionParameterSection[];
-  /** Foundry type classes, e.g. `hubble-oe:hide-action`. */
+  /** Type classes, e.g. `explorer:hide-action`. */
   type_classes?: string[];
   lifecycle_status?: "experimental" | "active" | "deprecated";
   deprecation_reason?: string | null;
@@ -385,7 +385,7 @@ export interface InterfaceType {
   >;
   /** Abstract link constraints fulfilled by RelationTypes on implementers. */
   link_constraints?: InterfaceLinkConstraint[];
-  /** Interfaces this one extends (Foundry inheritance). */
+  /** Interfaces this one extends (inheritance). */
   parent_interfaces?: string[];
   description: string;
   lifecycle_status?: "experimental" | "active" | "deprecated";
@@ -520,7 +520,7 @@ export interface ActionDefinition {
   // edits, instead of a fixed declaration.
   edit_function?: string | null;
   sections?: ActionParameterSection[];
-  /** Foundry type classes, e.g. `hubble-oe:hide-action`. */
+  /** Type classes, e.g. `explorer:hide-action`. */
   type_classes?: string[];
 }
 

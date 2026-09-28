@@ -287,7 +287,7 @@ async def get_object_link(
     principal: Principal = Depends(core.current_principal),
     page: tuple[int, Optional[str]] = Depends(paging_query),
 ) -> dict:
-    """The named single-link accessor — Foundry's real `customer.orders`/
+    """The named single-link accessor — `customer.orders`/
     `order.customer` access pattern, distinct from `get_object_graph`'s
     N-hop visualization: exactly one RelationType's related instance(s),
     addressed by name instead of walked (`core._find_relation_by_link_name`
@@ -422,7 +422,7 @@ async def put_object_link(
     request: LinkWriteRequest,
     principal: Principal = Depends(core.current_principal),
 ) -> dict:
-    """Foundry-style link write — set FK or add join/mid overlay pair."""
+    """Link write — set FK or add join/mid overlay pair."""
     return await _mutate_link(
         object_type=object_type,
         instance_id=instance_id,
@@ -441,7 +441,7 @@ async def delete_object_link(
     principal: Principal = Depends(core.current_principal),
     target_id: Optional[str] = Query(None),
 ) -> dict:
-    """Foundry-style unlink — clear FK overlay, or remove a join/mid pair.
+    """Unlink — clear FK overlay, or remove a join/mid pair.
 
     For join_dataset / object_backed, pass `target_id` (query) identifying
     the other end of the pair to remove.

@@ -40,7 +40,7 @@ _OBJECT_KEY_RE = re.compile(r"^/?[^/\x00-\x1f\x7f\\]+(/[^/\x00-\x1f\x7f\\]+)*/?$
 _CONNECTION_KINDS = frozenset({"s3", "azure", "gcs"})
 _DEFAULT_GCS_ENDPOINT = "https://storage.googleapis.com"
 # Soft check that secret looks like a Google service-account JSON key
-# (CData OAuthJWTCertType=GOOGLEJSON / Foundry "JSON credentials").
+# (CData OAuthJWTCertType=GOOGLEJSON / "JSON credentials").
 _GCS_JSON_MARKERS = ("private_key", "client_email", "type")
 
 _PUBLIC_CONNECTION_COLUMNS = (
@@ -114,7 +114,7 @@ def _validate_gcs_service_account_json(raw: Optional[str]) -> None:
     if not stripped.startswith("{"):
         raise SourceConfigError(
             "GCS secret_access_key must be a Google service account JSON key "
-            "(or use secret_ref pointing at one) — see ProjectId + GOOGLEJSON in CData/Foundry docs"
+            "(or use secret_ref pointing at one) — see ProjectId + GOOGLEJSON in CData docs"
         )
     try:
         import json
@@ -150,7 +150,7 @@ async def register_connection(
 
     For kind='gcs', access_key_id is the GCP Project Id and
     secret_access_key/secret_ref hold the service account JSON key
-    (Foundry "JSON credentials" / CData OAuthJWTCertType=GOOGLEJSON).
+    ("JSON credentials" / CData OAuthJWTCertType=GOOGLEJSON).
     Endpoint defaults to https://storage.googleapis.com; region is the
     default bucket location (e.g. US).
     """
@@ -405,7 +405,7 @@ async def is_registered(pool: asyncpg.Pool, tenant_id: str, name: str) -> bool:
 def _build_gcs_filesystem(*, project_id: str, service_account_json: str, location: str) -> pafs.FileSystem:
     """Native GCS via PyArrow, authenticated with a service-account JSON key.
 
-    Mirrors Foundry "JSON credentials" / CData AuthScheme=OAuthJWT +
+    Mirrors "JSON credentials" / CData AuthScheme=OAuthJWT +
     OAuthJWTCertType=GOOGLEJSON: mint an access token from the key, then
     hand it to GcsFileSystem (avoids process-global ADC / temp files).
     """

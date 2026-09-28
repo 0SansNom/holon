@@ -56,7 +56,7 @@ def normalize_render_hints(
     if needs and "searchable" not in ordered:
         raise ValueError(
             f"render_hints {sorted(needs)} require 'searchable' "
-            f"(Foundry: Searchable must be selected with Sortable/Selectable/Low cardinality)"
+            f"(Searchable must be selected with Sortable/Selectable/Low cardinality)"
         )
     return ordered
 

@@ -590,7 +590,7 @@ async def _compute_link_aggregate(
     *, relation_types: list[dict], authorized_types: set[str], property_mapping_cache: dict[str, dict],
     neighbor_property_mapping_cache: dict[str, dict],
 ) -> Optional[Any]:
-    """A Foundry-style reducer over a 1–3 hop RelationType path:
+    """A reducer over a 1–3 hop RelationType path:
     `count`/`sum`/`avg`/`min`/`max`/`collect_list`/`collect_set`.
     Reuses `_resolve_relation_neighbors` per hop — no separate fetch
     path. Returns `None` (property skipped) if the path, neighbor type,
@@ -700,7 +700,7 @@ def _reduce_array(values: list, reducer: str, by: Optional[str]) -> Optional[Any
 
 
 def _compute_struct_reducer(rule: dict, object_type: dict, row: dict) -> Optional[Any]:
-    """Foundry's other real "derived property" reducer — this one over
+    """Derived property reducer — this one over
     one of *this* ObjectType's own array properties (struct array or
     scalar array), rather than a linked type's. The array value is
     already a parsed Python list by the time this runs: `_mask_and_derive`
@@ -725,7 +725,7 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
     reducer over a RelationType (`_compute_link_aggregate`); a
     `{"kind": "struct_reducer", ...}` dict is a reducer over one of this
     ObjectType's own array properties (`_compute_struct_reducer`) —
-    Foundry's other two real "derived property" mechanisms. All three
+    The other two real "derived property" mechanisms. All three
     translate their inputs to *ontology* property names via `property_mapping`
     (not the raw source-column keys `resolver.py`/`serving_store.py`
     return — an ontology-level concept shouldn't need to know storage

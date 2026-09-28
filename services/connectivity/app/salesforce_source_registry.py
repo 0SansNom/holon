@@ -1,6 +1,6 @@
 """No-code Salesforce source registry — Connected App client credentials + SOQL.
 
-Auth mirrors Foundry/CData service-account style: client_id + client_secret
+Auth mirrors CData service-account style: client_id + client_secret
 (or secret_ref) against {login_url}/services/oauth2/token. The token response
 instance_url is cached on the connection and used for subsequent query calls.
 """

@@ -1,4 +1,4 @@
-"""Foundry-style structural Action rules: create/delete object + link.
+"""Structural Action rules: create/delete object + link.
 
 Property-set edits stay in `declarative._write_instance_edits`. Structural
 ops are applied in the same DB transaction and recorded under the reserved

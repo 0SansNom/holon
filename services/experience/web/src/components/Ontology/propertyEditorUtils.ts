@@ -37,7 +37,7 @@ export interface EditableStructField {
   sharedPropertyType: string;
   description: string;
   mainField: boolean;
-  /** Optional per-field dataset column (Foundry Column mapping). */
+  /** Optional per-field dataset column (Column mapping). */
   column: string;
 }
 
@@ -61,7 +61,7 @@ export interface EditableProperty {
   renderHints: PropertyRenderHint[];
   /** Type classes as comma-separated entry in UI; stored as string[]. */
   typeClasses: string[];
-  /** Foundry property status. */
+  /** Property status. */
   lifecycleStatus: PropertyLifecycleStatus;
   formatKind: "" | PropertyFormatRule["kind"];
   formatCurrency: string;
@@ -467,7 +467,7 @@ export function lookupSharedPropertyForKey(
 }
 
 /**
- * Foundry inheritance: local visibility wins; otherwise fall back to SPT.
+ * Inheritance: local visibility wins; otherwise fall back to SPT.
  */
 export function effectivePropertyVisibility(
   key: string,
@@ -617,7 +617,7 @@ export function emptyStructFieldExport(seed = "field"): EditableStructField {
   return emptyStructField(seed);
 }
 
-/** Merge JSON sample keys into struct fields (Foundry Automap-all lite for Holon's JSON column model). */
+/** Merge JSON sample keys into struct fields (Automap-all lite for Holon's JSON column model). */
 export function automapStructFieldsFromKeys(
   keys: string[],
   existing: EditableStructField[],
@@ -638,7 +638,7 @@ export function automapStructFieldsFromKeys(
   return next.length > 0 ? next : [emptyStructField("field1")];
 }
 
-/** Foundry-style: set each field's backing column to the field API name when empty. */
+/** Default mapping: set each field's backing column to the field API name when empty. */
 export function mapStructFieldColumnsByName(fields: EditableStructField[]): EditableStructField[] {
   return fields.map((f) => {
     const name = f.name.trim();
@@ -715,7 +715,7 @@ export function parseTypeClassesInput(raw: string): string[] {
     .filter(Boolean);
 }
 
-/** Foundry aliases — preserve case; comma/newline separated. */
+/** Aliases — preserve case; comma/newline separated. */
 export function parseAliasesInput(raw: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
