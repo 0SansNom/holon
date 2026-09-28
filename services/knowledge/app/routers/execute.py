@@ -66,7 +66,9 @@ async def _mask_group_by_aggregate(
     if aggregate_function == "count" or not aggregate_property:
         return rows
     source_column = property_mapping.get(aggregate_property)
-    if source_column is None or principal.country in core.allowed_countries:
+    from .. import policy
+
+    if source_column is None or await policy.confidential_visible(principal):
         return rows
     classifications = await ontology.get_property_classifications(core.pool, object_type_urn)
     if classifications.get(source_column) != "confidential":
