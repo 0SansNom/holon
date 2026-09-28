@@ -257,7 +257,6 @@ async def reindex_object_type_search_route(
             tenant_id=principal.tenant_id,
             opensearch_url=opensearch_url,
             opensearch_password=opensearch_password,
-            allowed_countries=core.allowed_countries,
         )
     except ValueError as exc:
         raise HolonError.invalid_argument('ObjectTypeValidationFailed', str(exc)) from exc

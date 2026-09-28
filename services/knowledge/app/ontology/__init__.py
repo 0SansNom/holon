@@ -126,7 +126,7 @@ from .object_sets import (
     object_set_urn,
     update_object_set,
 )
-from .authz_seed import ensure_authz_seeded
+from .authz_seed import ensure_authz_seeded, ensure_authz_seeded_all
 from .resource_branching import (
     ALLOWED_RESOURCE_TYPES,
     create_resource_branch,
@@ -232,6 +232,7 @@ __all__ = [
     "object_set_urn",
     "matches_predicates",
     "ensure_authz_seeded",
+    "ensure_authz_seeded_all",
     "ALLOWED_RESOURCE_TYPES",
     "create_resource_branch",
     "get_resource_branch",

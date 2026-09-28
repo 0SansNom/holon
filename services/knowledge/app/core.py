@@ -58,9 +58,37 @@ async def current_workspace(
     return workspace_id or x_holon_workspace_id or WORKSPACE_ID
 
 
-# Set once by `main.py`'s `lifespan()` at startup — see module docstring.
-pool = None
-authz = None
+class _NotReady:
+    """Stand-in until lifespan assigns the real pool or authz client.
+
+    Attribute access raises a 503 instead of AttributeError on None.
+    """
+
+    def __init__(self, what: str) -> None:
+        self._what = what
+
+    def __getattr__(self, name: str):
+        raise HolonError.unavailable(
+            "KnowledgeNotReady",
+            f"knowledge {self._what} is not ready",
+        )
+
+
+def require_pool():
+    if isinstance(pool, _NotReady):
+        raise HolonError.unavailable("KnowledgeNotReady", "knowledge pool is not ready")
+    return pool
+
+
+def require_authz():
+    if isinstance(authz, _NotReady):
+        raise HolonError.unavailable("KnowledgeNotReady", "knowledge authz is not ready")
+    return authz
+
+
+# Replaced by `main.py`'s lifespan() before the process serves traffic.
+pool = _NotReady("pool")
+authz = _NotReady("authz")
 
 
 async def _object_type_urn_for(object_type: str, tenant_id: str = TENANT_ID, workspace_id: str = WORKSPACE_ID) -> str:
@@ -362,7 +390,6 @@ def _find_relation_by_link_name(relation_types: list[dict], object_type: str, li
     return None
 
 
-allowed_countries: set = set()
 producer = None
 
 
@@ -514,11 +541,8 @@ async def _mask_confidential_properties(
 ) -> list[dict]:
     """Row/column security enforcement point. A confidential
     property is replaced with `None` (and named in `_maskedFields`) rather
-    than the whole object being withheld; a principal whose country
-    passes ABAC gets every field, unmasked. Uses the same OPA-sourced
-    `allowed_countries` set `search.py` mirrors (fetched once at startup
-    via `PermissionClient.get_policy_data`) — consistent single source of
-    truth, not a second hand-copied policy.
+    than the whole object being withheld. Visibility is
+    `policy.confidential_visible` — the same live OPA check search uses.
 
     `key_prefix`: `execute_plan`'s `join` operation returns rows
     with every column prefixed `s_`/`t_` to keep same-named columns from
@@ -527,7 +551,9 @@ async def _mask_confidential_properties(
     called once per side with each side's own classifications, same
     function either way.
     """
-    if principal.country in allowed_countries:
+    from . import policy
+
+    if await policy.confidential_visible(principal):
         return rows
     property_classifications = await ontology.get_property_classifications(pool, object_type_urn)
     confidential_properties = {name for name, classification in property_classifications.items() if classification == "confidential"}

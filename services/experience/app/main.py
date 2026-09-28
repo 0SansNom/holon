@@ -40,6 +40,7 @@ from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
     make_principal_status_consumer,
+    refresh_revocation_snapshot_forever,
 )
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
 from holon_common.audit_store import install_durable_audit, list_events_page
@@ -125,8 +126,10 @@ async def lifespan(app: FastAPI):
     status_consumer = make_principal_status_consumer(KAFKA_BOOTSTRAP, service_name=SERVICE_NAME)
     status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
     await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
+    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
 
     yield
+    revocation_refresh_task.cancel()
     status_task.cancel()
     await status_consumer.stop()
     await app.state.pool.close()

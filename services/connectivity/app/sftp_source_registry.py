@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
+import os
 import re
 import stat
-from typing import Optional
+import threading
+from typing import Awaitable, Callable, Optional
 
 import asyncpg
 import paramiko
@@ -18,11 +21,17 @@ from pyarrow.lib import ArrowException
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
+    pin_connector_host,
     assert_connector_secret_ref,
+    assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
+    connector_secret,
+    resolve_connector_secret,
 )
-from holon_common.secrets import resolve_optional
+from holon_common.security_posture import is_production
+
+logger = logging.getLogger(__name__)
 
 _FORMATS = frozenset({"csv", "ndjson", "parquet"})
 # Absolute or relative POSIX-ish paths; no `..`, no nulls, no whitespace tricks.
@@ -50,6 +59,14 @@ class SourceConfigError(ValueError):
 
 class SourceFetchError(ValueError):
     pass
+
+
+def _resolve_secret(ref, tenant_id: str):
+    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
+    try:
+        return resolve_connector_secret(ref, tenant_id=tenant_id)
+    except ConnectorSafetyError as exc:
+        raise SourceFetchError(str(exc)) from exc
 
 
 class ConnectionInUseError(ValueError):
@@ -80,7 +97,7 @@ async def register_connection(
     if port < 1 or port > 65535:
         raise SourceConfigError("port must be between 1 and 65535")
     existing = await pool.fetchrow(
-        "SELECT password, secret_ref FROM sftp_connection WHERE tenant_id = $1 AND name = $2",
+        "SELECT host, port, username, password, secret_ref FROM sftp_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
     is_update = existing is not None
@@ -88,6 +105,16 @@ async def register_connection(
         assert_connector_host(host)
         assert_connector_secret_ref(secret_ref, tenant_id=tenant_id)
         assert_no_inline_connector_secret(password, field="password")
+        if existing is not None:
+            destination_changed = (
+                existing["host"] != host
+                or int(existing["port"]) != int(port)
+            )
+            assert_destination_change_requires_secret(
+                is_update=True,
+                destination_changed=destination_changed,
+                secret_provided=password is not None or secret_ref is not None,
+            )
     except ConnectorSafetyError as exc:
         raise SourceConfigError(str(exc)) from exc
     if password is None and secret_ref is None and existing is not None:
@@ -297,6 +324,63 @@ def _format_suffix(format: str) -> str:
     return f".{format}"
 
 
+def _truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes"}
+
+
+_insecure_auto_add_warned = threading.Lock()
+_insecure_auto_add_warned_flag = False
+
+
+def _warn_insecure_auto_add_once() -> None:
+    global _insecure_auto_add_warned_flag
+    with _insecure_auto_add_warned:
+        if _insecure_auto_add_warned_flag:
+            return
+        _insecure_auto_add_warned_flag = True
+    logger.warning(
+        "HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY is set — trusting unknown SFTP host keys "
+        "on first connect (AutoAddPolicy). This is only safe for local/demo/CI use; "
+        "set HOLON_SFTP_KNOWN_HOSTS to a pinned known_hosts file for real deployments."
+    )
+
+
+def _configure_host_key_policy(client: paramiko.SSHClient) -> None:
+    """Set the SFTP client's host-key verification policy.
+
+    Resolution order:
+      1. `HOLON_SFTP_KNOWN_HOSTS` set: load system host keys plus that file
+         and reject anything not already pinned there (`RejectPolicy`).
+      2. Production (`HOLON_ENV=production`): always fail closed
+         (`RejectPolicy`) — host key trust must be pinned via
+         `HOLON_SFTP_KNOWN_HOSTS`, never auto-accepted, even if the
+         insecure opt-in below is (mis)configured.
+      3. `HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY` truthy: explicit opt-in to
+         `AutoAddPolicy`, for local/demo/CI SFTP fixtures with no pinned
+         host key. Warned once per process.
+      4. Otherwise: fail closed (`RejectPolicy`) — no known_hosts and no
+         explicit insecure opt-in means we refuse to trust an unknown host
+         key rather than silently auto-accepting it.
+    """
+    known_hosts_path = (os.environ.get("HOLON_SFTP_KNOWN_HOSTS") or "").strip()
+    if known_hosts_path:
+        client.load_system_host_keys()
+        client.load_host_keys(known_hosts_path)
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        return
+
+    if is_production():
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        return
+
+    if _truthy("HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY"):
+        _warn_insecure_auto_add_once()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        return
+
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+
 def _fetch_sync(
     *,
     host: str,
@@ -310,7 +394,7 @@ def _fetch_sync(
     last_synced_path: Optional[str],
 ) -> tuple[list[dict], Optional[str]]:
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _configure_host_key_policy(client)
     try:
         client.connect(
             hostname=host,
@@ -386,7 +470,9 @@ def _fetch_sync(
         client.close()
 
 
-async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> list[dict]:
+async def fetch_for_dataset(
+    pool: asyncpg.Pool, tenant_id: str, name: str
+) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, remote_path, remote_prefix, format, incremental, last_synced_path "
         "FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -405,15 +491,19 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
             f"source {name!r} references connection {row['connection_name']!r}, which no longer exists"
         )
     try:
-        assert_connector_host(connection["host"])
+        pinned_host = pin_connector_host(connection["host"])
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    password = resolve_optional(connection["secret_ref"]) or connection["password"] or ""
+    password = connector_secret(
+        secret_ref=connection["secret_ref"],
+        plaintext=connection["password"],
+        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+    ) or ""
 
     try:
         rows, new_cursor = await asyncio.to_thread(
             _fetch_sync,
-            host=connection["host"],
+            host=pinned_host,
             port=connection["port"],
             username=connection["username"],
             password=password,
@@ -428,10 +518,15 @@ async def fetch_for_dataset(pool: asyncpg.Pool, tenant_id: str, name: str) -> li
     except (OSError, ValueError, ArrowException, paramiko.SSHException) as exc:
         raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
 
+    commit: Optional[Callable[[], Awaitable[None]]] = None
     if new_cursor is not None and new_cursor != row["last_synced_path"]:
-        await pool.execute(
-            "UPDATE sftp_source SET last_synced_path = $1 WHERE tenant_id = $2 AND name = $3",
-            new_cursor, tenant_id, name,
-        )
 
-    return rows
+        async def _commit_cursor(cursor: str = new_cursor) -> None:
+            await pool.execute(
+                "UPDATE sftp_source SET last_synced_path = $1 WHERE tenant_id = $2 AND name = $3",
+                cursor, tenant_id, name,
+            )
+
+        commit = _commit_cursor
+
+    return rows, commit

@@ -67,6 +67,7 @@ def test_oauth2_connection_authenticates_and_syncs_real_principal_rows(msmith_to
         "POST", f"{CONNECTIVITY}/connections", token=msmith_token,
         body={
             "name": connection_name,
+            "allowed_origin": OAUTH2_IDP_INTERNAL,
             "auth_type": "oauth2_client_credentials",
             "oauth2_token_url": f"{OAUTH2_IDP_INTERNAL}/token",
             "oauth2_client_id": OAUTH2_IDP_CLIENT_ID,
@@ -96,6 +97,7 @@ def test_oauth2_wrong_client_secret_fails_sync_cleanly(msmith_token: str) -> Non
         "POST", f"{CONNECTIVITY}/connections", token=msmith_token,
         body={
             "name": connection_name,
+            "allowed_origin": OAUTH2_IDP_INTERNAL,
             "auth_type": "oauth2_client_credentials",
             "oauth2_token_url": f"{OAUTH2_IDP_INTERNAL}/token",
             "oauth2_client_id": OAUTH2_IDP_CLIENT_ID,
@@ -122,6 +124,7 @@ def test_oauth2_token_is_cached_between_syncs(msmith_token: str) -> None:
         "POST", f"{CONNECTIVITY}/connections", token=msmith_token,
         body={
             "name": connection_name,
+            "allowed_origin": OAUTH2_IDP_INTERNAL,
             "auth_type": "oauth2_client_credentials",
             "oauth2_token_url": f"{OAUTH2_IDP_INTERNAL}/token",
             "oauth2_client_id": OAUTH2_IDP_CLIENT_ID,

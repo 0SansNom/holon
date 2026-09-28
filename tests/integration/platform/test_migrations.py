@@ -72,23 +72,23 @@ def test_an_already_applied_migration_is_not_reapplied(tmp_path) -> None:
     asyncio.run(_body())
 
 
-def test_a_filename_not_matching_the_convention_is_silently_skipped(tmp_path) -> None:
+def test_a_filename_not_matching_the_convention_fails_boot(tmp_path) -> None:
     table = f"migration_test_{uuid.uuid4().hex[:12]}"
     _write(tmp_path, "not_a_migration.sql", f"CREATE TABLE {table} (id INT PRIMARY KEY);")
     _write(tmp_path, "1_too_short.sql", f"CREATE TABLE {table} (id INT PRIMARY KEY);")
 
     async def _body() -> None:
+        from holon_common.migrations import MigrationFilenameError
+
         pool = await asyncpg.create_pool(dsn=DB_URL, min_size=1, max_size=5)
         try:
-            applied = await run_migrations(pool, tmp_path)
-            assert applied == []
-
-            async with pool.acquire() as conn:
-                exists = await conn.fetchval("SELECT to_regclass($1)", table)
-                assert exists is None
+            try:
+                await run_migrations(pool, tmp_path)
+                raise AssertionError("expected MigrationFilenameError")
+            except MigrationFilenameError as exc:
+                assert "not_a_migration.sql" in str(exc)
+                assert "1_too_short.sql" in str(exc)
         finally:
-            async with pool.acquire() as conn:
-                await _cleanup(conn, table, [])
             await pool.close()
 
     asyncio.run(_body())

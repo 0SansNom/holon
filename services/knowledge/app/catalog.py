@@ -161,7 +161,6 @@ async def _materialize_sync(
     iceberg_config: dict,
     opensearch_url: str,
     opensearch_password: str,
-    allowed_countries: set[str],
 ) -> None:
     """Materialize dataset rows to serving store and index into OpenSearch."""
     dataset_name = payload["dataset_name"]
@@ -213,6 +212,7 @@ async def _materialize_sync(
         tenant_id=tenant_id,
         instance_ids=[str(row["id"]) for row in index_rows],
     )
+    classifications = await ontology.get_property_classifications(pool, object_type_urn)
     await search.index_rows(
         opensearch_url,
         opensearch_password,
@@ -221,9 +221,9 @@ async def _materialize_sync(
         classification=object_type["classification"],
         property_mapping=property_mapping,
         rows=index_rows,
-        allowed_countries=allowed_countries,
         property_types=property_types,
         shared_property_types=shared_by_name,
+        property_classifications=classifications,
         instance_markings=instance_markings,
     )
 
@@ -477,7 +477,6 @@ async def _process_sync_completed(
     iceberg_config: dict,
     opensearch_url: str,
     opensearch_password: str,
-    allowed_countries: set[str],
 ) -> None:
     async with pool.acquire() as conn, conn.transaction():
         await _catalogue_sync(conn, event.tenant_id, workspace_id, event.payload)
@@ -498,7 +497,6 @@ async def _process_sync_completed(
         iceberg_config,
         opensearch_url,
         opensearch_password,
-        allowed_countries,
     )
     await _materialize_join_links(
         pool,
@@ -516,7 +514,6 @@ async def consume_events(
     iceberg_config: dict,
     opensearch_url: str,
     opensearch_password: str,
-    allowed_countries: set[str],
 ) -> None:
     """Consume sync events. Transient failures retry; poison goes to the DLQ then commit."""
     await consumer.start()
@@ -534,7 +531,6 @@ async def consume_events(
                     iceberg_config,
                     opensearch_url,
                     opensearch_password,
-                    allowed_countries,
                 )
                 await consumer.commit()
                 break
@@ -568,14 +564,21 @@ async def reindex_object_type_search(
     tenant_id: str,
     opensearch_url: str,
     opensearch_password: str,
-    allowed_countries: set[str],
+    purge_missing: bool = True,
 ) -> dict:
     """Rebuild OpenSearch documents for one ObjectType from the serving store.
 
     Foundry exposes a similar "Reindex datasources" action when render
     hints or mappings change — Holon re-reads materialized rows and
     re-applies hint-driven indexing rules.
+
+    Documents are written before any delete, so a crash does not empty
+    the type. ``purge_missing`` then drops rows that were not rewritten
+    and that predate this call. The startup migration passes False: it
+    only overwrites, and leaves removal to an explicit reindex.
     """
+    started = time.time()
+    generation = time.time_ns()
     object_type = await ontology.get_object_type(pool, object_type_urn)
     if object_type is None:
         raise ValueError(f"unknown ObjectType: {object_type_name!r}")
@@ -597,13 +600,6 @@ async def reindex_object_type_search(
         )
         skipped = len(invalid)
 
-    await search.delete_object_type_documents(
-        opensearch_url,
-        opensearch_password,
-        object_type_name=object_type_name,
-        tenant_id=tenant_id,
-    )
-
     shared_rows = await ontology.list_shared_property_types(pool, tenant_id)
     shared_by_name = {row["api_name"]: row for row in shared_rows}
     instance_markings = await ontology.get_instance_markings_bulk(
@@ -613,6 +609,7 @@ async def reindex_object_type_search(
         instance_ids=[str(row["id"]) for row in index_rows],
     )
     if index_rows:
+        classifications = await ontology.get_property_classifications(pool, object_type_urn)
         await search.index_rows(
             opensearch_url,
             opensearch_password,
@@ -621,10 +618,21 @@ async def reindex_object_type_search(
             classification=object_type["classification"],
             property_mapping=property_mapping,
             rows=index_rows,
-            allowed_countries=allowed_countries,
             property_types=property_types,
             shared_property_types=shared_by_name,
+            property_classifications=classifications,
             instance_markings=instance_markings,
+            index_generation=generation,
+            indexed_at=time.time(),
+        )
+    if purge_missing:
+        await search.delete_object_type_documents(
+            opensearch_url,
+            opensearch_password,
+            object_type_name=object_type_name,
+            tenant_id=tenant_id,
+            keep_generation=generation,
+            indexed_before=started,
         )
 
     return {
@@ -633,3 +641,47 @@ async def reindex_object_type_search(
         "skipped_invalid": skipped,
         "materialized_total": len(rows),
     }
+
+
+async def reindex_search_from_serving_store(
+    pool: asyncpg.Pool,
+    opensearch_url: str,
+    opensearch_password: str,
+) -> int:
+    """Rewrite search documents that are still on an older policy version.
+
+    Already-current indexes are left alone. Rewrites overwrite by document
+    id and do not delete first, so a crash cannot empty a type. Failures
+    on one type do not stop the others.
+    """
+    try:
+        pending = await search.count_outside_policy(opensearch_url, opensearch_password)
+    except Exception:
+        logger.exception("search policy version check failed; rewriting in place")
+        pending = None
+    if pending == 0:
+        logger.info("search index already at policy_version %s", search.POLICY_VERSION)
+        return 0
+    rows = await pool.fetch("SELECT urn, name, tenant_id FROM object_type ORDER BY tenant_id, name")
+    done = 0
+    for row in rows:
+        try:
+            await reindex_object_type_search(
+                pool,
+                object_type_name=row["name"],
+                object_type_urn=row["urn"],
+                tenant_id=row["tenant_id"],
+                opensearch_url=opensearch_url,
+                opensearch_password=opensearch_password,
+                purge_missing=False,
+            )
+            done += 1
+        except Exception:
+            logger.exception("search policy reindex failed for %s", row["urn"])
+    logger.info(
+        "reindexed %d/%d object types onto search policy_version %s",
+        done,
+        len(rows),
+        search.POLICY_VERSION,
+    )
+    return done
