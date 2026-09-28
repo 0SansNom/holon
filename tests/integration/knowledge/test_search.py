@@ -56,28 +56,43 @@ def test_jdoe_finds_confidential_customer_document(jdoe_token: str, all_datasets
     assert any(r["object_type"] == "Customer" for r in result["results"]), result
 
 
-def test_kenji_does_not_find_the_confidential_document(jdoe_token: str, kenji_token: str, all_datasets_synced: None) -> None:
-    # First prove it's actually indexed (jdoe can see it) before asserting
-    # kenji can't
-    _search(jdoe_token, "Robotics")
+def test_kenji_finds_public_customer_name_but_not_the_confidential_email(
+    jdoe_token: str, kenji_token: str, all_datasets_synced: None
+) -> None:
+    """Name is internal, so both principals find the customer. The email
+    is confidential: only a cleared country searches it, and it never
+    appears in a denied principal's hit text.
+    """
+    visible = _search(jdoe_token, '"contact@acme-robotics.example"', want_object_type="Customer")
+    customer = next(r for r in visible["results"] if r["object_type"] == "Customer")
+    assert "contact@acme-robotics.example" in customer["text"]
+    assert "confidential_text" not in customer
 
-    status, result = _request("GET", holon_url("/search?q=Robotics"), token=kenji_token)
-    assert status == 200, result
-    assert not any(r["object_type"] == "Customer" for r in result["results"]), result
+    by_name = _search(kenji_token, "Robotics", want_object_type="Customer")
+    denied = next(r for r in by_name["results"] if r["object_type"] == "Customer")
+    assert "contact@acme-robotics.example" not in denied.get("text", "")
+    assert "184500" not in denied.get("text", "")
+    assert "confidential_text" not in denied
+
+    status, hidden = _request("GET", holon_url('/search?q="contact@acme-robotics.example"'), token=kenji_token)
+    assert status == 200, hidden
+    assert not any(r["object_type"] == "Customer" for r in hidden["results"]), hidden
 
 
 def test_no_post_filter_leak_total_matches_permitted_count_only(
     jdoe_token: str, kenji_token: str, all_datasets_synced: None
 ) -> None:
-    """"Acme" matches both the confidential Customer ("Acme Robotics") and."""
-    # Wait specifically for the ProductReview side to converge (as jdoe,
-    # who can see both) before asserting anything about kenji's narrower view.
+    """"Acme" is in the public customer name and in a review. Kenji sees
+    both object types; the customer hit does not carry the email.
+    """
     _search(jdoe_token, "Acme", want_object_type="ProductReview")
 
     status, result = _request("GET", holon_url("/search?q=Acme"), token=kenji_token)
     assert status == 200, result
     assert result["total"] == len(result["results"]), result
-    assert all(r["object_type"] != "Customer" for r in result["results"]), result
+    customers = [r for r in result["results"] if r["object_type"] == "Customer"]
+    assert customers, result
+    assert all("@" not in (r.get("text") or "") for r in customers), customers
     assert any(r["object_type"] == "ProductReview" for r in result["results"]), result
 
 

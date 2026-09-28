@@ -31,6 +31,7 @@ from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
     make_principal_status_consumer,
+    refresh_revocation_snapshot_forever,
 )
 from holon_common.readiness import (
     check_iceberg_catalog,
@@ -47,6 +48,7 @@ from . import (
     catalog,
     core,
     ontology,
+    policy,
     search,
 )
 from .api import ApiPathRewriteMiddleware, ontologies_router
@@ -92,9 +94,10 @@ async def lifespan(app: FastAPI):
 
     app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
     core.authz = app.state.authz
+    policy.bind_authz(app.state.authz)
     await retry_with_backoff(
-        lambda: ontology.ensure_authz_seeded(
-            app.state.authz, TENANT_ID, WORKSPACE_ID, app.state.pool
+        lambda: ontology.ensure_authz_seeded_all(
+            app.state.authz, app.state.pool, TENANT_ID, WORKSPACE_ID
         ),
         what="knowledge authz seed",
     )
@@ -102,14 +105,6 @@ async def lifespan(app: FastAPI):
     await retry_with_backoff(
         lambda: search.ensure_index(OPENSEARCH_URL, OPENSEARCH_PASSWORD), what="knowledge search index setup"
     )
-
-    app.state.allowed_countries = set(
-        await retry_with_backoff(
-            lambda: app.state.authz.get_policy_data("holon/authz/allowed_countries"),
-            what="OPA allowed_countries fetch",
-        )
-    )
-    core.allowed_countries = app.state.allowed_countries
 
     app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
     await app.state.producer.start()
@@ -127,8 +122,10 @@ async def lifespan(app: FastAPI):
             ICEBERG_CONFIG,
             OPENSEARCH_URL,
             OPENSEARCH_PASSWORD,
-            app.state.allowed_countries,
         )
+    )
+    reindex_task = asyncio.create_task(
+        catalog.reindex_search_from_serving_store(app.state.pool, OPENSEARCH_URL, OPENSEARCH_PASSWORD)
     )
 
     authz_cache_consumer = make_principal_status_consumer(
@@ -136,12 +133,15 @@ async def lifespan(app: FastAPI):
     )
     authz_cache_invalidation_task = asyncio.create_task(_consume_identity_events(authz_cache_consumer))
     await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
+    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
 
     expiry_task = asyncio.create_task(actions.sweep_expired_approvals_forever(app.state.pool, WORKSPACE_ID))
     backfill_task = asyncio.create_task(catalog.backfill_join_links(app.state.pool, ICEBERG_CONFIG))
 
     yield
 
+    revocation_refresh_task.cancel()
+    reindex_task.cancel()
     backfill_task.cancel()
     expiry_task.cancel()
     authz_cache_invalidation_task.cancel()
