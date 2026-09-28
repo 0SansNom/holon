@@ -31,11 +31,7 @@ from holon_common import (
     run_migrations,
 )
 from holon_common.audit import clear_durable_audit_hooks
-from holon_common.audit_store import (
-    ensure_schema as ensure_audit_schema,
-    install_durable_audit,
-    list_events_page,
-)
+from holon_common.audit_store import install_durable_audit, list_events_page
 from holon_common.authz import PermissionClient
 from holon_common.principal_status import (
     consume_identity_auth_events,
@@ -68,10 +64,6 @@ OPA_URL = os.environ["HOLON_OPA_URL"]
 async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
     app.state.pool = await create_pool(DB_URL)
-    async with app.state.pool.acquire() as conn:
-        await workflow.ensure_schema(conn)
-        await ensure_audit_schema(conn)
-        await outbox.ensure_schema(conn)
     await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
 
     clear_durable_audit_hooks()
