@@ -329,7 +329,7 @@ export function ActionTypeDetailPage() {
                   )}
                   <Callout className="hl-mt-md" icon="info-sign">
                     Counts come from <code>action_invocation</code> / <code>action_approval</code>. Monitoring rules
-                    (Foundry-style alerts) are not configured in Holon yet.
+                    (Action alerts) are not configured in Holon yet.
                   </Callout>
                 </>
               )}

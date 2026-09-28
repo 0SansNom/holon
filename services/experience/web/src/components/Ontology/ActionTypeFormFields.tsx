@@ -21,7 +21,7 @@ export function ActionTypeFormFields({
 }) {
   const { data: typeClasses } = useTypeClasses();
   const actionTypeClassSuggestions = (typeClasses ?? [])
-    .filter((c) => c.id.startsWith("hubble-oe:") || c.id.startsWith("actions:"))
+    .filter((c) => c.id.startsWith("explorer:") || c.id.startsWith("actions:"))
     .map((c) => c.id);
 
   return (
@@ -99,12 +99,12 @@ export function ActionTypeFormFields({
         label="Type classes"
         helperText={
           actionTypeClassSuggestions.length > 0
-            ? `Comma-separated Foundry kind:name — e.g. ${actionTypeClassSuggestions.join(", ")}`
-            : "Comma-separated Foundry kind:name (e.g. hubble-oe:hide-action)"
+            ? `Comma-separated kind:name — e.g. ${actionTypeClassSuggestions.join(", ")}`
+            : "Comma-separated kind:name (e.g. explorer:hide-action)"
         }
       >
         <InputGroup
-          placeholder="hubble-oe:hide-action"
+          placeholder="explorer:hide-action"
           value={value.typeClasses}
           onChange={(e) => onChange({ typeClasses: e.target.value })}
         />

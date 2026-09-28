@@ -41,7 +41,7 @@ class SharedPropertyType:
     display_name: str
     description: str
     value_type: Optional[str] = None  # VT-wrapped SPT; null when struct-typed
-    struct_properties: Optional[dict] = None  # Foundry-style struct SPT field map
+    struct_properties: Optional[dict] = None  # Struct SPT field map
 
 
 @dataclass
@@ -87,7 +87,7 @@ class ActionTypeSchema:
 
 @dataclass
 class RelationTypeSchema:
-    """Foundry Link Type — bidirectional accessor names + storage kind."""
+    """Link Type — bidirectional accessor names + storage kind."""
 
     name: str
     source_object_type: str

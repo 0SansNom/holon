@@ -32,7 +32,7 @@ _OT_JSONB_KEYS: tuple[str, ...] = (
 # object_type_version has no column_classification column.
 _OTV_JSONB_KEYS: tuple[str, ...] = _OT_JSONB_KEYS[:-1]
 
-# Scalar Foundry-parity+ metadata mirrored on live + version rows.
+# Scalar metadata mirrored on live + version rows.
 _OT_META_KEYS: tuple[str, ...] = (
     "primary_key", "title_key", "plural_display_name", "lifecycle_status", "visibility", "icon",
     "deprecation_reason", "deprecation_deadline", "replacement_urn",
@@ -290,7 +290,7 @@ async def delete_object_type(pool: asyncpg.Pool, urn: str) -> None:
             raise ValueError(f"unknown ObjectType: {urn}")
         if (row["lifecycle_status"] or "experimental") in NON_DELETABLE_OBJECT_TYPE_STATUSES:
             # Brand-new self-serve creates (no versions yet) may still be
-            # rolled back after a failed SpiceDB seed — Foundry's active/
+            # rolled back after a failed SpiceDB seed — active/
             # promoted delete ban applies once the type has entered versioning.
             version_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM object_type_version WHERE object_type_urn = $1", urn

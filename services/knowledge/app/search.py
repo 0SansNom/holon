@@ -82,7 +82,7 @@ def _searchable_columns(
 
 
 def _struct_container_from_row(row: dict, column: str, rule: dict) -> dict | None:
-    """JSON column + optional per-field ``column`` overlays (Foundry field mapping)."""
+    """JSON column + optional per-field ``column`` overlays (field mapping)."""
     assembled = assemble_struct_value(rule, row, column)
     return assembled if isinstance(assembled, dict) else None
 
@@ -93,7 +93,7 @@ def _struct_field_text_fragments(
     property_types: dict | None,
     shared_property_types: dict | None = None,
 ) -> list[str]:
-    """Leaf values from searchable struct properties (Foundry: search by struct values)."""
+    """Leaf values from searchable struct properties (search by struct values)."""
     fragments: list[str] = []
     for prop_name, column in property_mapping.items():
         rule = (property_types or {}).get(prop_name) or {}
@@ -119,7 +119,7 @@ def _ontology_alias_terms(
     property_types: dict | None,
     shared_property_types: dict | None = None,
 ) -> list[str]:
-    """Foundry-style alternate search terms for SPT-backed properties —
+    """Alternate search terms for SPT-backed properties —
     display_name, api_name, and aliases are appended to every indexed row
     so Object Explorer / unified search finds instances by property alias.
     """

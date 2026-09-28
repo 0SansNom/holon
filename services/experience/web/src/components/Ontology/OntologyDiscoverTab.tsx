@@ -87,7 +87,7 @@ function ResourceChip({ item }: { item: OntologyRecentItem }) {
   );
 }
 
-/** Foundry Discover lite — favorites, recently viewed, prominent OTs, groups. */
+/** Discover lite — favorites, recently viewed, prominent OTs, groups. */
 export function OntologyDiscoverTab() {
   const navigate = useNavigate();
   const favorites = useOntologyDiscoverStore((s) => s.favorites);

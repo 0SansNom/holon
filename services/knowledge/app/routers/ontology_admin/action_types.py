@@ -126,7 +126,7 @@ async def get_action_type_observability(
     days: int = Query(default=30, ge=1, le=90),
     principal: Principal = Depends(core.current_principal),
 ) -> dict:
-    """Foundry-shaped Action Observability: invocation + approval counts from Holon tables.
+    """Action Observability: invocation + approval counts from Holon tables.
 
     Prometheus counters (`holon_action_events_total`) stay for ops scrapers; this endpoint
     is what Ontology Manager can chart without a metrics backend.

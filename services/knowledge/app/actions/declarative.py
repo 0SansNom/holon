@@ -353,7 +353,7 @@ async def revert_declarative_action(
     above (that one reverses a *failed saga's* Step 1, triggered by
     Automation, deletes the overlay rows outright). This restores the
     exact prior state `_apply_declarative_edits` captured, and only ever
-    for the single most recent qualifying invocation — Foundry's own
+    for the single most recent qualifying invocation — standard
     stated rule, replicated exactly: "cannot be reverted if any
     subsequent edit has been made to that object, even on a different
     property."

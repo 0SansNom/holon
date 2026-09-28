@@ -85,12 +85,12 @@ CREATE TABLE IF NOT EXISTS relation_type (
 );
 
 -- The reverse-direction accessor name (e.g. `Order.customer`'s
--- `target_property` is `orders`) — Foundry's real Link Type model always
+-- `target_property` is `orders`) — the bidirectional Link Type model always
 -- names both ends; nullable at the column level only so an in-place
 -- upgrade doesn't need a destructive migration for any pre-existing row.
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS target_property TEXT;
 
--- A purely navigational cluster of ObjectTypes (Foundry's Ontology
+-- A purely navigational cluster of ObjectTypes (Ontology
 -- Manager "Object Type Groups") — no new permission or schema concept,
 -- just a named, validated list; `ObjectTypesTab`'s own group filter is
 -- what makes this real rather than a label nobody reads.
@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS ontology_review (
 
 -- Generalizes branching beyond ObjectType to the 4 other governed
 -- registries (RelationType, ValueType, SharedPropertyType, ActionType —
--- matching Foundry's own branching scope minus Type groups/Rule sets).
+-- matching ontology branching scope minus Type groups/Rule sets).
 -- Existing ObjectType branch rows are untouched: `resource_type`
 -- defaults to 'object_type' and `resource_name`/`proposed_definition`
 -- stay NULL for them. The generic branching code
@@ -298,10 +298,10 @@ CREATE TABLE IF NOT EXISTS value_type (
 
 -- Richer constraints (enum/range/rid/uuid) beyond the single format_regex
 -- above — see value_types.py's module docstring for why exactly these
--- four and not Foundry's full eight.
+-- four and not the full eight.
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS constraints JSONB NOT NULL DEFAULT '[]';
 
--- Foundry Value Type metadata + versioning: api/display names, example
+-- Value Type metadata + versioning: api/display names, example
 -- preview, integer version (bumped when constraints/format change), and
 -- lifecycle for deprecate-without-delete.
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS api_name TEXT NOT NULL DEFAULT '';
@@ -312,7 +312,7 @@ ALTER TABLE value_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL D
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
--- Foundry regex may match a substring; default full = re.fullmatch.
+-- Value type regex may match a substring; default full = re.fullmatch.
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS format_regex_match TEXT NOT NULL DEFAULT 'full';
 -- Optional project import (SpiceDB parent_project), same as SPT / RelationType.
 ALTER TABLE value_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
@@ -349,19 +349,19 @@ CREATE TABLE IF NOT EXISTS shared_property_type (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, api_name)
 );
--- Struct-typed Shared Property Types (Foundry parity): either wrap a
+-- Struct-typed Shared Property Types: either wrap a
 -- Value Type (`value_type` set) or carry a one-level struct field map
 -- (`struct_properties` set, `value_type` null). Additive migration —
 -- existing VT-wrapped rows stay valid.
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS struct_properties JSONB;
 ALTER TABLE shared_property_type ALTER COLUMN value_type DROP NOT NULL;
--- Foundry-parity shared property metadata (inherited by local properties
+-- Shared property metadata (inherited by local properties
 -- that reference this SPT when the local entry doesn't override).
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'normal';
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS render_hints JSONB NOT NULL DEFAULT '["searchable"]';
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS type_classes JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS property_format JSONB;
--- Foundry aliases: alternate search terms for the shared property.
+-- Aliases: alternate search terms for the shared property.
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]';
 -- Optional project scope (additive ReBAC path via SpiceDB parent_project).
 ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
@@ -383,7 +383,7 @@ ALTER TABLE shared_property_type ADD COLUMN IF NOT EXISTS project_urn TEXT;
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS property_types JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS property_types JSONB NOT NULL DEFAULT '{}';
 
--- Foundry-parity+ ObjectType presentation / identity metadata (versioned).
+-- ObjectType presentation / identity metadata (versioned).
 -- `lifecycle_status` is experimental|active|deprecated — distinct from
 -- `object_type_version.status` (draft|published).
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS primary_key TEXT NOT NULL DEFAULT 'id';
@@ -405,7 +405,7 @@ ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS deprecation_reason TEXT
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS deprecation_deadline DATE;
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
 
--- Link Type storage kinds beyond FK (Foundry join-table + object-backed).
+-- Link Type storage kinds beyond FK (join-table + object-backed).
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS storage_kind TEXT NOT NULL DEFAULT 'foreign_key';
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS join_dataset_urn TEXT;
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS join_source_column TEXT;
@@ -414,7 +414,7 @@ ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_object_type_urn TEXT;
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_source_property TEXT;
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS mid_target_property TEXT;
 
--- Foundry Link Type metadata: per-side display/API/visibility + type-level status/classes.
+-- Link Type metadata: per-side display/API/visibility + type-level status/classes.
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_display_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_plural_display_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE relation_type ADD COLUMN IF NOT EXISTS source_api_name TEXT NOT NULL DEFAULT '';
@@ -481,7 +481,7 @@ CREATE TABLE IF NOT EXISTS action_type (
 -- additive migration for databases seeded before this column existed
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS writeback_dataset TEXT;
 
--- Foundry Type classes on Action Types (e.g. hubble-oe:hide-action).
+-- Type classes on Action Types (e.g. explorer:hide-action).
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS type_classes JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'experimental';
 ALTER TABLE action_type ADD COLUMN IF NOT EXISTS deprecation_reason TEXT;
@@ -496,7 +496,7 @@ ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS replacement_urn TEXT;
 ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS property_types JSONB NOT NULL DEFAULT '{}'::jsonb;
 -- P1b: abstract link constraints fulfilled by concrete RelationTypes at implement.
 ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS link_constraints JSONB NOT NULL DEFAULT '[]'::jsonb;
--- P1c: Foundry-style interface inheritance (child extends parents).
+-- P1c: Interface inheritance (child extends parents).
 ALTER TABLE interface_type ADD COLUMN IF NOT EXISTS parent_interfaces JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE object_type ADD COLUMN IF NOT EXISTS link_constraint_bindings JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS link_constraint_bindings JSONB NOT NULL DEFAULT '{}'::jsonb;
@@ -507,7 +507,7 @@ ALTER TABLE object_type_version ADD COLUMN IF NOT EXISTS interface_property_bind
 -- Actions on interfaces: an Action Type may target an Interface instead
 -- of one ObjectType, becoming invocable against any instance of any
 -- ObjectType that currently `implements` it — same generalization
--- Foundry's own "interface action rules" apply, restricted the same way
+-- Standard "interface action rules" apply, restricted the same way
 -- (see `declarative.request_generic_action`): only the interface's own
 -- `required_properties` may be edited, never a type-specific one.
 -- Exactly one of `target_object_type`/`target_interface` is set, checked
@@ -524,7 +524,7 @@ ALTER TABLE action_type ADD COLUMN IF NOT EXISTS edit_function TEXT;
 
 -- Configure/Sections: an ordered list of {name, parameter_names} groupings
 -- an Action Type may optionally declare, purely a display concern for the
--- invocation form (Foundry's "Sections") — never affects what gets
+-- invocation form ("Sections") — never affects what gets
 -- submitted, validated, or applied. A parameter not referenced by any
 -- section renders ungrouped, same as before this column existed.
 -- Structural validation (names exist, no parameter in two sections) lives

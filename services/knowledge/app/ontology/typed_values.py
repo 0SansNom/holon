@@ -270,7 +270,7 @@ async def partition_rows_by_property_types(
 ) -> tuple[list[dict], list[dict]]:
     """Split rows into (valid_for_index, invalid) using property_types.
 
-    Foundry parity for "OT fails to index when values fail Value Type
+    Rule for "OT fails to index when values fail Value Type
     validation": callers index only the valid partition; invalid rows stay
     in the serving store for repair, and health check surfaces samples.
     """

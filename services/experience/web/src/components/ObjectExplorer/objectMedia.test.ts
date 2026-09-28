@@ -9,8 +9,8 @@ describe("collectObjectMediaItems", () => {
         name: "Customer",
         property_mapping: { id: "id", photo: "photo", logo: "logo", name: "name" },
         property_types: {
-          photo: { kind: "value_type", value_type: "string", type_classes: ["hubble:media_url"] },
-          logo: { kind: "value_type", value_type: "string", type_classes: ["hubble:icon"] },
+          photo: { kind: "value_type", value_type: "string", type_classes: ["display:media_url"] },
+          logo: { kind: "value_type", value_type: "string", type_classes: ["display:icon"] },
         },
       } as never,
     );
