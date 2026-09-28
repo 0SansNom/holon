@@ -351,7 +351,7 @@ export function ValueTypesTab() {
                 onChange={(e) => setFormatRegex(e.target.value)}
               />
             </FormGroup>
-            <FormGroup label="Regex match" helperText="Foundry: full string or substring">
+            <FormGroup label="Regex match" helperText="Full string or substring">
               <HTMLSelect fill value={formatRegexMatch} onChange={(e) => setFormatRegexMatch(e.target.value)}>
                 <option value="full">full</option>
                 <option value="substring">substring</option>

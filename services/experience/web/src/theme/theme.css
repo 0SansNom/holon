@@ -1523,7 +1523,7 @@ body,
   gap: 8px;
 }
 
-/* Object View — Foundry-shaped standard OV */
+/* Object View — standard OV */
 .hl-oe-ov-tabs {
   margin-top: var(--hl-space-3);
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """holon — a minimal CLI wrapping Holon's REST APIs.
 
-"Foundry's dev-toolchain story at
+"The ontology dev-toolchain story at
 a basic, honest level, not a full SDK ecosystem." This wraps the core
 read/governance surface across services (auth, principal/workspace/
 project management, ontology, objects, Actions, Applications, Pipelines,

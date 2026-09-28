@@ -1,4 +1,4 @@
-/** Client-side Configured Object View definition (Foundry OV config parity, local). */
+/** Client-side Configured Object View definition (OV config parity, local). */
 
 export type ObjectViewWidgetKind =
   | "overview"

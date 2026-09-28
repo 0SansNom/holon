@@ -437,7 +437,7 @@ export function SharedPropertyTypesTab() {
           <>
             A canonical, reusable <em>property</em> — API name, display metadata, aliases, and either a Value
             Type or a one-level struct. Metadata is inherited by ObjectTypes that attach it; permissions
-            cascade from the workspace via the SPT URN (Foundry parity).
+            cascade from the workspace via the SPT URN.
           </>
         }
         createLabel="New shared property type"
@@ -713,7 +713,7 @@ export function SharedPropertyTypesTab() {
       >
         <p>
           Delete shared property <Tag minimal className="hl-mono">{deleting?.api_name}</Tag>? Attached
-          ObjectType properties revert to local value_type/struct rules (Foundry-style auto-detach), then
+          ObjectType properties revert to local value_type/struct rules (auto-detach), then
           the shared definition is removed. Requires SPT <Tag minimal>approve</Tag>.
         </p>
         {deleting?.urn && <p className="hl-text-muted-sm hl-mono hl-mb-sm">{deleting.urn}</p>}

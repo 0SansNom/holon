@@ -65,7 +65,7 @@ async def create_value_type(request: ValueTypeRequest, principal: Principal = De
     """Registering a Value Type is ontology governance, same tier as
     registering an Interface or a Marking — the workspace's own
     `approve` permission. Seeds SpiceDB `parent_workspace` (and optional
-    `parent_project` for Foundry-style project import).
+    `parent_project` for project import).
     """
     await _authorize_ontology_governance(principal, workspace_id)
     if await ontology.get_value_type(core.pool, principal.tenant_id, request.name) is not None:
@@ -117,7 +117,7 @@ async def list_value_types(
 
 @router.get("/type-classes")
 async def list_known_type_classes(principal: Principal = Depends(core.current_principal)) -> list[dict]:
-    """Catalog of Foundry-shaped type classes Holon understands (UI suggestions)."""
+    """Catalog of type classes Holon understands (UI suggestions)."""
     from ...ontology.type_classes import KNOWN_TYPE_CLASSES
 
     return [
@@ -185,7 +185,7 @@ async def get_value_type_permissions(
     principal: Principal = Depends(core.current_principal),
     workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    """Foundry Permissions tab — effective ReBAC on the Value Type URN."""
+    """Permissions tab — effective ReBAC on the Value Type URN."""
     value_type = await ontology.get_value_type(core.pool, principal.tenant_id, name)
     if value_type is None:
         raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")
@@ -283,7 +283,7 @@ async def deprecate_value_type(
     principal: Principal = Depends(core.current_principal),
     workspace_id: str = Depends(core.current_workspace),
 ) -> dict:
-    """Foundry-style deprecate — prefer over delete when consumers exist."""
+    """Deprecate — prefer over delete when consumers exist."""
     current = await ontology.get_value_type(core.pool, principal.tenant_id, name)
     if current is None:
         raise HolonError.not_found('ValueTypeNotFound', f"unknown value type: {name}")

@@ -76,7 +76,7 @@ export function ObjectAppView({ application }: { application: Application }) {
           declaredFullNames.has(a.name) &&
           (a.target_object_type === surfaceObjectType ||
             (a.target_interface && implementedInterfaces.includes(a.target_interface))) &&
-          !hasTypeClass(a.type_classes, "hubble-oe", "hide-action"),
+          !hasTypeClass(a.type_classes, "explorer", "hide-action"),
       )
       .map((a) => a.name.split(".").slice(1).join("."));
     return {

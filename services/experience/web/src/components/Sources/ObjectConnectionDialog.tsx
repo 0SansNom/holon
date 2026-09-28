@@ -86,7 +86,7 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
           </FormGroup>
         ) : isGcs ? (
           <>
-            <FormGroup label="Project ID" helperText="GCP Project Id containing the bucket (Foundry/CData ProjectId)">
+            <FormGroup label="Project ID" helperText="GCP Project Id containing the bucket (CData ProjectId)">
               <InputGroup value={accessKeyId} onChange={(e) => setAccessKeyId(e.target.value)} placeholder="my-gcp-project" />
             </FormGroup>
             <FormGroup label="Default bucket location" helperText="e.g. US, EU, ASIA — used when creating objects">

@@ -239,7 +239,7 @@ export function FormattedValue({
 }) {
   if (value === null || value === undefined) return <>—</>;
 
-  // Foundry `identifier` render hint: treat as opaque key — no locale /
+  // `identifier` render hint: treat as opaque key — no locale /
   // currency / numeric formatting (Object Views won't format as numbers).
   const asIdentifier = typeRule?.render_hints?.includes("identifier");
   if (asIdentifier) {

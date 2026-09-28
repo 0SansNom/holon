@@ -1,4 +1,4 @@
-/** Prefill Action parameters from Form defaults + Foundry type classes. */
+/** Prefill Action parameters from Form defaults + type classes. */
 
 import type { ActionParameter, ActionParameterDefault } from "../../api/knowledge";
 import { hasTypeClass } from "../Ontology/typeClassUtils";
@@ -70,7 +70,7 @@ function resolveDefault(
 /**
  * Prefill map for an Action form. Order: Form `default` first, then type-class
  * generators (`actions:generate_uuid`, `actions:prefill_current_user`) which
- * win when present — same Foundry split (defaults vs type-class prefills).
+ * win when present — same split (defaults vs type-class prefills).
  */
 export function prefillActionParameters(
   parameters: ActionParameter[] | undefined,

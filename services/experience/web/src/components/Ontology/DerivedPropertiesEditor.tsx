@@ -129,7 +129,7 @@ export function DerivedPropertiesEditor({
               <>
                 <FormGroup
                   label="Link path"
-                  helperText="1–3 hops from this ObjectType (Foundry multi-hop derived properties)."
+                  helperText="1–3 hops from this ObjectType (multi-hop derived properties)."
                 >
                   {selected.path.map((hop, index) => {
                     const prefix = selected.path.slice(0, index).filter(Boolean);

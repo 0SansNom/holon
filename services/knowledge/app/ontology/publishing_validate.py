@@ -638,7 +638,7 @@ async def _validate_property_types(
     and — for `value_type`/`shared_property_type` — a real, registered
     reference. Nesting is checked structurally, one hop deep, with a
     single named exception: an array's element may be a `struct` (that
-    struct's own fields are then leaves-only, matching Foundry's own
+    struct's own fields are then leaves-only, matching standard
     "struct array" shape) — every other nested position (a plain
     struct's own field, or that struct-array-element's own field) stays
     restricted to `value_type`/`shared_property_type`. No storage change
@@ -646,7 +646,7 @@ async def _validate_property_types(
     `json.loads`s any array shape generically.
 
     A top-level entry may also carry `editable`/`required`/`visibility`
-    (property control), plus Foundry-style `render_hints` (list of
+    (property control), plus `render_hints` (list of
     searchable/sortable/selectable/identifier) and `type_classes`
     (lowercase identifier strings) — checked structurally here
     (well-formed, and only ever on a top-level entry), enforced against
@@ -715,7 +715,7 @@ async def _validate_property_types(
             nested_properties = rule.get("properties")
             if not isinstance(nested_properties, dict) or not nested_properties:
                 raise ValueError(f"property_types entry for {property_name!r}: 'struct' requires a non-empty 'properties' dict")
-            # Per-field dataset columns only on top-level structs (Foundry Column mapping).
+            # Per-field dataset columns only on top-level structs (Column mapping).
             field_columns_ok = not in_array
             for nested_name, nested_rule in nested_properties.items():
                 await _validate_leaf(

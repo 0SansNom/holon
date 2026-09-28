@@ -130,7 +130,7 @@ export function ObjectDetailPage() {
   const activeAction = relevantActions.find((a) => a.name === activeActionName);
   const maskedFields = (object?._maskedFields as string[] | undefined) ?? [];
 
-  const iconProperty = findPropertyWithTypeClass(objectType?.property_types, "hubble", "icon");
+  const iconProperty = findPropertyWithTypeClass(objectType?.property_types, "display", "icon");
   const iconUrl =
     iconProperty && object
       ? String(

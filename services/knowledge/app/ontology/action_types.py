@@ -33,7 +33,7 @@ _RESERVED_RESPONSE_KEYS = {"status", "action", "riskLevel", "approvalId", "sagaS
 
 
 def validate_submission_criterion(criterion: dict) -> None:
-    """Structural check for Foundry-style submission criteria (P2b).
+    """Structural check for submission criteria (P2b).
 
     Supported shapes (recursive):
     - leaf property: ``{property, operator, value, message?}``
@@ -90,7 +90,7 @@ def validate_parameter_default(
     *,
     earlier_object_reference_names: set[str],
 ) -> None:
-    """Foundry Form defaults — structural check at Action Type registration.
+    """Form defaults — structural check at Action Type registration.
 
     Kinds:
     - ``static``: fixed ``value``
@@ -133,7 +133,7 @@ def validate_parameter_default(
     if source != "current" and source not in earlier_object_reference_names:
         raise ValueError(
             f"parameter {parameter.get('name')!r}: default.object {source!r} must be 'current' or an "
-            f"object_reference parameter declared earlier (Foundry order rule)"
+            f"object_reference parameter declared earlier (order rule)"
         )
 
 
@@ -277,7 +277,7 @@ async def create_action_type(
     for criterion in submission_criteria or []:
         validate_submission_criterion(criterion)
 
-    # form (Foundry's "Sections") — structurally checked against the same
+    # form ("Sections") — structurally checked against the same
     # `parameter_names` set built above, never against live state, since
     # it never affects what gets submitted/applied.
     seen_in_section: set = set()

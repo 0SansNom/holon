@@ -69,7 +69,7 @@ def _normalize_metadata(
 
 
 def _normalize_aliases(aliases: Optional[list[str]]) -> list[str]:
-    """Foundry aliases — alternate search terms; de-dupe case-insensitively."""
+    """Aliases — alternate search terms; de-dupe case-insensitively."""
     if aliases is None:
         return []
     if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):

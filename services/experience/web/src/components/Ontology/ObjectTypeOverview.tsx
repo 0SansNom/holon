@@ -78,7 +78,7 @@ function OverviewSection({
   );
 }
 
-/** Foundry-shaped Object Type Overview (read + jump to edit steps). */
+/** Object Type Overview (read + jump to edit steps). */
 export function ObjectTypeOverview({
   objectType,
   properties,

@@ -13,7 +13,7 @@ import { titleOf } from "./objectExplorerUtils";
 
 const PREVIEW_SELECTION_CAP = 20;
 
-/** Foundry-style selection preview — properties + actions without leaving the table. */
+/** Selection preview — properties + actions without leaving the table. */
 export function SelectionPreviewPanel({
   objectTypeName,
   objectType,

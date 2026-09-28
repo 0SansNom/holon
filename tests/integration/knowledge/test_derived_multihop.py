@@ -1,4 +1,4 @@
-"""Multi-hop link_aggregate derived properties (Foundry ≤3 hops)."""
+"""Multi-hop link_aggregate derived properties (≤3 hops)."""
 
 from __future__ import annotations
 

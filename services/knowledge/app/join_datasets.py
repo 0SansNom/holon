@@ -1,6 +1,6 @@
 """Generate empty Iceberg join-table datasets for M:N RelationTypes.
 
-Foundry's "Generate join table" creates a two-column PK bridge dataset.
+"Generate join table" creates a two-column PK bridge dataset.
 Holon mirrors that in Knowledge (no Connectivity sync required): explicit
 schema → create_table → empty overwrite → catalog registration.
 """

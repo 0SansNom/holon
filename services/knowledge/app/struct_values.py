@@ -9,7 +9,7 @@ from typing import Any
 def project_struct_to_declared_fields(rule: dict, value: dict[str, Any]) -> dict[str, Any]:
     """Keep only fields declared on the struct rule (drop undeclared JSON keys).
 
-    Source datasets often carry extra keys in a JSON blob; Foundry maps the
+    Source datasets often carry extra keys in a JSON blob; mapping rules map the
     declared struct shape. Projection happens on read/assemble so explorers
     and Value Type checks see the ontology contract, not raw payload noise.
     """
@@ -47,7 +47,7 @@ def parse_struct_or_array(rule: dict, raw_value: Any) -> Any:
 def assemble_struct_value(rule: dict, row: dict, source_col: str | None) -> Any:
     """Build a struct dict from an optional JSON backing column plus per-field columns.
 
-    Foundry maps each struct field to a dataset column; Holon keeps the
+    Standard mappings associate each struct field to a dataset column; Holon keeps the
     JSON column as the base (when present) and overlays ``field.column``
     values from the same row. Returns ``None`` when nothing could be assembled.
     Undeclared keys from the JSON blob are dropped (schema projection).

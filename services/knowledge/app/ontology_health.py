@@ -101,7 +101,7 @@ async def _check_god_object(object_types: list[dict], principal: Principal) -> l
 
 
 async def _check_value_type_violations(object_types: list[dict], principal: Principal) -> list[dict]:
-    """Foundry: OT health fails when indexed property values violate Value Types.
+    """OT health fails when indexed property values violate Value Types.
 
     Samples live instances for ObjectTypes that declare `property_types` and
     reports the first few distinct validation failures (not every row).

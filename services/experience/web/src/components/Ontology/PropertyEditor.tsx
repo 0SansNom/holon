@@ -507,12 +507,12 @@ export function ObjectTypePropertyEditor({
                 ))}
               </div>
             </FormGroup>
-            <FormGroup label="Type classes" helperText="Bare tags or Foundry kind:name (e.g. hubble:media_url, hubble:icon)">
+            <FormGroup label="Type classes" helperText="Bare tags or kind:name (e.g. display:media_url, display:icon)">
               <InputGroup
                 className="hl-mono"
                 value={selected.typeClasses.join(", ")}
                 onChange={(e) => updateSelected({ typeClasses: parseTypeClassesInput(e.target.value) })}
-                placeholder="hubble:media_url, priority"
+                placeholder="display:media_url, priority"
               />
             </FormGroup>
 
@@ -567,7 +567,7 @@ export function ObjectTypePropertyEditor({
 
             {selected.typeKind === "shared_property_type" && (
               <>
-                <FormGroup label="Shared property type" helperText="Attach an existing SPT (Foundry-style share)">
+                <FormGroup label="Shared property type" helperText="Attach an existing SPT">
                   <HTMLSelect
                     fill
                     value={selected.sharedPropertyType}

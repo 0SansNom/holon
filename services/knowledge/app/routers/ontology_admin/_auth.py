@@ -107,7 +107,7 @@ async def _authorize_shared_property_type(principal: Principal, urn: str, permis
 
 
 async def _authorize_relation_type(principal: Principal, urn: str, permission: str) -> None:
-    """Per-URN ReBAC for RelationTypes / Foundry Link Types."""
+    """Per-URN ReBAC for RelationTypes / Link Types."""
     decision = await core.authz.authorize(
         principal,
         resource_type="relation_type",
