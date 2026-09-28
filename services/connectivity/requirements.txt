@@ -17,10 +17,9 @@ paramiko==5.0.0
 google-auth==2.38.0
 # 4.x drops the cffi<2 pin that conflicted with cryptography>=50.
 snowflake-connector-python==4.7.1
-# Snowflake pulls boto3; keep botocore inside the window required by
-# aiobotocore (via pyiceberg[s3fs]) so pip does not ResolutionImpossible.
-boto3>=1.43.66,<1.43.76
-botocore>=1.43.66,<1.43.76
+# Owns the botocore window (pulled via pyiceberg[s3fs]); Snowflake's unpinned
+# boto3 follows it. Bump this rather than pinning boto3/botocore by hand.
+aiobotocore==3.9.1
 httpx==0.27.2
 prometheus-client==0.21.0
 opentelemetry-sdk==1.44.0
