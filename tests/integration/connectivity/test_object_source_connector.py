@@ -13,6 +13,7 @@ bucket via the `source-s3-seed` fixture service.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -253,7 +254,9 @@ def test_incremental_prefix_only_fetches_new_objects(jdoe_token: str) -> None:
     status, sources = _request("GET", f"{CONNECTIVITY}/object-sources", token=jdoe_token)
     assert status == 200
     registered = next(s for s in sources if s["name"] == source_name)
-    assert registered["last_synced_key"] == f"{prefix}b-second.csv", registered
+    cursor = json.loads(registered["last_synced_key"])
+    assert cursor["v"] == 2, registered
+    assert cursor["key"] == f"{prefix}b-second.csv", registered
 
 
 def test_disable_then_sync_is_conflict_then_enable_restores_it(jdoe_token: str) -> None:
