@@ -3,7 +3,7 @@ import { Button, Callout, Dialog, DialogBody, DialogFooter, FormGroup, InputGrou
 import { useRegisterSalesforceConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { SalesforceConnection } from "../../api/connectivity";
-import { SECRET_REF_HELP } from "./shared";
+import { SecretRefField } from "./ConnectionFields";
 
 export function SalesforceConnectionDialog({
   editing,
@@ -82,14 +82,12 @@ export function SalesforceConnectionDialog({
             />
           </FormGroup>
         )}
-        <FormGroup label="Secret reference" labelFor="sf-connection-secret-ref" helperText={SECRET_REF_HELP}>
-          <InputGroup
-            id="sf-connection-secret-ref"
-            value={secretRef}
-            onChange={(e) => setSecretRef(e.target.value)}
-            placeholder="env:HOLON_CONN_<TENANT>__SF_CLIENT_SECRET"
-          />
-        </FormGroup>
+        <SecretRefField
+          id="sf-connection-secret-ref"
+          value={secretRef}
+          onChange={setSecretRef}
+          placeholder="env:HOLON_CONN_<TENANT>__SF_CLIENT_SECRET"
+        />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}

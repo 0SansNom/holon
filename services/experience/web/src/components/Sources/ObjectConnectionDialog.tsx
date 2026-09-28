@@ -3,7 +3,7 @@ import { Button, Callout, Checkbox, Dialog, DialogBody, DialogFooter, FormGroup,
 import { useRegisterObjectConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { ObjectConnection, ObjectConnectionKind } from "../../api/connectivity";
-import { SECRET_REF_HELP } from "./shared";
+import { SecretRefField } from "./ConnectionFields";
 
 export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectConnection | null; onClose: () => void }) {
   const isEditing = editing !== null;
@@ -150,20 +150,18 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
             )}
           </FormGroup>
         )}
-        <FormGroup label="Secret reference" labelFor="object-connection-secret-ref" helperText={SECRET_REF_HELP}>
-          <InputGroup
-            id="object-connection-secret-ref"
-            value={secretRef}
-            onChange={(e) => setSecretRef(e.target.value)}
-            placeholder={
-              isAzure
-                ? "env:HOLON_CONN_<TENANT>__AZURE_STORAGE_KEY"
-                : isGcs
-                  ? "env:HOLON_CONN_<TENANT>__GCS_SERVICE_ACCOUNT_JSON"
-                  : "env:HOLON_CONN_<TENANT>__S3_SECRET_KEY"
-            }
-          />
-        </FormGroup>
+        <SecretRefField
+          id="object-connection-secret-ref"
+          value={secretRef}
+          onChange={setSecretRef}
+          placeholder={
+            isAzure
+              ? "env:HOLON_CONN_<TENANT>__AZURE_STORAGE_KEY"
+              : isGcs
+                ? "env:HOLON_CONN_<TENANT>__GCS_SERVICE_ACCOUNT_JSON"
+                : "env:HOLON_CONN_<TENANT>__S3_SECRET_KEY"
+          }
+        />
         {kind === "s3" && (
           <FormGroup>
             <Checkbox
