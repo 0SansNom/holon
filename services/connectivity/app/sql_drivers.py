@@ -156,6 +156,7 @@ async def _fetch_mysql(
     )
     try:
         async with conn.cursor(aiomysql.DictCursor) as cur:
+            # None skips pyformat interpolation, so a literal % in a custom query survives.
             await cur.execute(sql, args or None)
             rows = await cur.fetchall()
             return [dict(row) for row in rows]
@@ -224,6 +225,7 @@ def _fetch_snowflake_sync(
     try:
         cur = conn.cursor(snowflake.connector.DictCursor)
         try:
+            # None skips pyformat interpolation, so a literal % in a custom query survives.
             cur.execute(sql, args or None)
             rows = cur.fetchall()
             return [dict(row) for row in rows]
