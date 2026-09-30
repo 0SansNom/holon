@@ -27,7 +27,7 @@ const DEFAULT_PORTS: Record<SqlDialect, number> = {
   snowflake: 443,
 };
 
-const DIALECT_LABELS: Record<SqlDialect, string> = {
+export const DIALECT_LABELS: Record<SqlDialect, string> = {
   postgres: "PostgreSQL",
   alloydb: "AlloyDB",
   cockroachdb: "CockroachDB",
