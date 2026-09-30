@@ -9,10 +9,7 @@ import {
   useToggleCollectionMember,
 } from "../../api/hooks";
 
-// Resource-kind-agnostic — takes only a URN, so it drops unchanged into
-// any card/row for a resource kind the backend has hardened ReBAC for
-// (see experience/app/main.py's `_RESOURCE_AUTHZ_TYPE`; currently
-// ObjectTypes and Applications, more as their own authz lands).
+// Only URN kinds in experience/app/deps.py `_RESOURCE_AUTHZ_TYPE` (ObjectTypes, Applications).
 export function ResourceActionsMenu({ urn }: { urn: string }) {
   const { data } = useResourceTags();
   const current = data?.find((r) => r.resource_urn === urn);
