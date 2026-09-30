@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button, Callout, Dialog, DialogBody, DialogFooter, FormGroup, InputGroup } from "@blueprintjs/core";
+import { Button, Callout, Dialog, DialogBody, DialogFooter } from "@blueprintjs/core";
 import { useRegisterSftpConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { SftpConnection } from "../../api/connectivity";
-import { SecretRefField } from "./ConnectionFields";
+import { ConnectionFields, type ConnectionField } from "./ConnectionFields";
 
 export function SftpConnectionDialog({ editing, onClose }: { editing: SftpConnection | null; onClose: () => void }) {
   const isEditing = editing !== null;
@@ -36,6 +36,62 @@ export function SftpConnectionDialog({ editing, onClose }: { editing: SftpConnec
   }
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(password));
+  const fields: ConnectionField[] = [
+    {
+      kind: "text",
+      id: "sftp-connection-name",
+      label: "Name",
+      helperText: "e.g. erp_files — referenced by SFTP sources",
+      value: name,
+      onChange: setName,
+      placeholder: "erp_files",
+      disabled: isEditing,
+    },
+    {
+      kind: "text",
+      id: "sftp-connection-host",
+      label: "Host",
+      value: host,
+      onChange: setHost,
+      placeholder: "sftp.example.com",
+    },
+    {
+      kind: "number",
+      id: "sftp-connection-port",
+      label: "Port",
+      value: port,
+      onChange: setPort,
+      placeholder: "22",
+    },
+    {
+      kind: "text",
+      id: "sftp-connection-username",
+      label: "Username",
+      value: username,
+      onChange: setUsername,
+      placeholder: "readonly",
+    },
+    ...(!requireSecretRef
+      ? [
+          {
+            kind: "secret" as const,
+            id: "sftp-connection-password",
+            label: "Password",
+            helperText: isEditing && editing?.has_password ? "A password is already set — leave blank to keep it." : undefined,
+            value: password,
+            onChange: setPassword,
+            placeholder: isEditing && editing?.has_password ? "•••••••• (unchanged)" : "••••••••",
+          },
+        ]
+      : []),
+    {
+      kind: "secretRef",
+      id: "sftp-connection-secret-ref",
+      value: secretRef,
+      onChange: setSecretRef,
+      placeholder: "env:HOLON_CONN_<TENANT>__SFTP_PASSWORD",
+    },
+  ];
 
   return (
     <Dialog isOpen title={isEditing ? "Edit SFTP connection" : "New SFTP connection"} onClose={onClose} style={{ width: 480 }}>
@@ -45,37 +101,7 @@ export function SftpConnectionDialog({ editing, onClose }: { editing: SftpConnec
             ? "Update host or credentials — the name stays fixed since SFTP sources already reference it."
             : "Password-authenticated SFTP. Register once, point several SFTP sources at it."}
         </p>
-        <FormGroup label="Name" helperText="e.g. erp_files — referenced by SFTP sources">
-          <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="erp_files" disabled={isEditing} />
-        </FormGroup>
-        <FormGroup label="Host">
-          <InputGroup value={host} onChange={(e) => setHost(e.target.value)} placeholder="sftp.example.com" />
-        </FormGroup>
-        <FormGroup label="Port">
-          <InputGroup type="number" value={port} onChange={(e) => setPort(e.target.value)} placeholder="22" />
-        </FormGroup>
-        <FormGroup label="Username">
-          <InputGroup value={username} onChange={(e) => setUsername(e.target.value)} placeholder="readonly" />
-        </FormGroup>
-        {!requireSecretRef && (
-          <FormGroup
-            label="Password"
-            helperText={isEditing && editing?.has_password ? "A password is already set — leave blank to keep it." : undefined}
-          >
-            <InputGroup
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={isEditing && editing?.has_password ? "•••••••• (unchanged)" : "••••••••"}
-            />
-          </FormGroup>
-        )}
-        <SecretRefField
-          id="sftp-connection-secret-ref"
-          value={secretRef}
-          onChange={setSecretRef}
-          placeholder="env:HOLON_CONN_<TENANT>__SFTP_PASSWORD"
-        />
+        <ConnectionFields fields={fields} />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}

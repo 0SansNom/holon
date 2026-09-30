@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button, Callout, Dialog, DialogBody, DialogFooter, FormGroup, InputGroup } from "@blueprintjs/core";
+import { Button, Callout, Dialog, DialogBody, DialogFooter } from "@blueprintjs/core";
 import { useRegisterSalesforceConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { SalesforceConnection } from "../../api/connectivity";
-import { SecretRefField } from "./ConnectionFields";
+import { ConnectionFields, type ConnectionField } from "./ConnectionFields";
 
 export function SalesforceConnectionDialog({
   editing,
@@ -40,6 +40,56 @@ export function SalesforceConnectionDialog({
   }
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(clientSecret));
+  const fields: ConnectionField[] = [
+    {
+      kind: "text",
+      id: "sf-connection-name",
+      label: "Name",
+      helperText: "e.g. sf_prod — referenced by Salesforce sources",
+      value: name,
+      onChange: setName,
+      placeholder: "sf_prod",
+      disabled: isEditing,
+    },
+    {
+      kind: "text",
+      id: "sf-connection-login-url",
+      label: "Login URL",
+      helperText: "Production, sandbox (test.salesforce.com), or My Domain",
+      value: loginUrl,
+      onChange: setLoginUrl,
+      placeholder: "https://login.salesforce.com",
+    },
+    {
+      kind: "text",
+      id: "sf-connection-client-id",
+      label: "Consumer Key (Client ID)",
+      value: clientId,
+      onChange: setClientId,
+      placeholder: "3MVG9...",
+    },
+    ...(!requireSecretRef
+      ? [
+          {
+            kind: "secret" as const,
+            id: "sf-connection-client-secret",
+            label: "Consumer Secret",
+            helperText:
+              isEditing && editing?.has_client_secret ? "A secret is already set — leave blank to keep it." : undefined,
+            value: clientSecret,
+            onChange: setClientSecret,
+            placeholder: isEditing && editing?.has_client_secret ? "•••••••• (unchanged)" : "••••••••",
+          },
+        ]
+      : []),
+    {
+      kind: "secretRef",
+      id: "sf-connection-secret-ref",
+      value: secretRef,
+      onChange: setSecretRef,
+      placeholder: "env:HOLON_CONN_<TENANT>__SF_CLIENT_SECRET",
+    },
+  ];
 
   return (
     <Dialog
@@ -54,40 +104,7 @@ export function SalesforceConnectionDialog({
             ? "Update login URL or Connected App credentials — the name stays fixed since sources already reference it."
             : "Connected App client credentials. Register once, point several SOQL sources at it."}
         </p>
-        <FormGroup label="Name" helperText="e.g. sf_prod — referenced by Salesforce sources">
-          <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="sf_prod" disabled={isEditing} />
-        </FormGroup>
-        <FormGroup label="Login URL" helperText="Production, sandbox (test.salesforce.com), or My Domain">
-          <InputGroup
-            value={loginUrl}
-            onChange={(e) => setLoginUrl(e.target.value)}
-            placeholder="https://login.salesforce.com"
-          />
-        </FormGroup>
-        <FormGroup label="Consumer Key (Client ID)">
-          <InputGroup value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="3MVG9..." />
-        </FormGroup>
-        {!requireSecretRef && (
-          <FormGroup
-            label="Consumer Secret"
-            helperText={
-              isEditing && editing?.has_client_secret ? "A secret is already set — leave blank to keep it." : undefined
-            }
-          >
-            <InputGroup
-              type="password"
-              value={clientSecret}
-              onChange={(e) => setClientSecret(e.target.value)}
-              placeholder={isEditing && editing?.has_client_secret ? "•••••••• (unchanged)" : "••••••••"}
-            />
-          </FormGroup>
-        )}
-        <SecretRefField
-          id="sf-connection-secret-ref"
-          value={secretRef}
-          onChange={setSecretRef}
-          placeholder="env:HOLON_CONN_<TENANT>__SF_CLIENT_SECRET"
-        />
+        <ConnectionFields fields={fields} />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}
