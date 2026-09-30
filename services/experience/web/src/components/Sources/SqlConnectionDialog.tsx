@@ -16,15 +16,27 @@ import { SecretRefField } from "./ConnectionFields";
 
 const DEFAULT_PORTS: Record<SqlDialect, number> = {
   postgres: 5432,
+  alloydb: 5432,
+  cockroachdb: 26257,
+  enterprisedb: 5444,
+  greenplum: 5432,
   mysql: 3306,
+  singlestore: 3306,
   mssql: 1433,
+  azure_synapse: 1433,
   snowflake: 443,
 };
 
 const DIALECT_LABELS: Record<SqlDialect, string> = {
   postgres: "PostgreSQL",
+  alloydb: "AlloyDB",
+  cockroachdb: "CockroachDB",
+  enterprisedb: "EnterpriseDB",
+  greenplum: "Greenplum",
   mysql: "MySQL / MariaDB",
+  singlestore: "SingleStore",
   mssql: "SQL Server",
+  azure_synapse: "Azure Synapse (dedicated)",
   snowflake: "Snowflake",
 };
 
@@ -84,7 +96,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "PostgreSQL, MySQL/MariaDB, SQL Server, or Snowflake. Register once, point several SQL sources at it."}
+            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
         </p>
         <FormGroup label="Name" helperText="e.g. erp_prod — referenced by SQL sources, not a dataset name">
           <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_db" disabled={isEditing} />
