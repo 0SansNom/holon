@@ -28,13 +28,18 @@ def quote_identifier(name: str, *, dialect: str = "postgres") -> str:
     """Render each dot-separated part for the dialect. Safe only after `require_identifier`.
 
     Dialect quoting: postgres → "x", mysql → `x`, mssql → [x].
+    Only those wire protocols are accepted; product aliases such as
+    `singlestore` must be mapped before calling.
     Snowflake leaves identifiers unquoted so the server folds them to
     UPPERCASE (quoted names would be case-sensitive and miss default objects).
     """
     require_identifier(name)
     d = (dialect or "postgres").lower()
     if d not in _VALID_QUOTE_DIALECTS:
-        d = "postgres"
+        raise ValueError(
+            f"unsupported quote dialect {dialect!r} — must be a wire protocol, "
+            f"one of {sorted(_VALID_QUOTE_DIALECTS)}"
+        )
     if d == "snowflake":
         return name
     if d == "mysql":

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import ssl
 from typing import Any, Optional
 
 import asyncpg
@@ -23,9 +24,11 @@ DIALECT_WIRE: dict[str, str] = {
     "enterprisedb": "postgres",
     "greenplum": "postgres",
     "mysql": "mysql",
+    "mariadb": "mysql",
     "singlestore": "mysql",
     "mssql": "mssql",
     "azure_synapse": "mssql",
+    "azure_synapse_serverless": "mssql",
     "snowflake": "snowflake",
 }
 VALID_DIALECTS = frozenset(DIALECT_WIRE)
@@ -38,11 +41,22 @@ DEFAULT_PORTS: dict[str, int] = {
     "enterprisedb": 5444,
     "greenplum": 5432,
     "mysql": 3306,
+    "mariadb": 3306,
     "singlestore": 3306,
     "mssql": 1433,
     "azure_synapse": 1433,
+    "azure_synapse_serverless": 1433,
     "snowflake": 443,
 }
+
+# Products that refuse cleartext. Omitted `use_tls` on register uses this set.
+# Snowflake is already HTTPS and is not listed — the flag is ignored for it.
+TLS_BY_DEFAULT = frozenset({
+    "alloydb",
+    "cockroachdb",
+    "azure_synapse",
+    "azure_synapse_serverless",
+})
 
 _SNOWFLAKE_HOST_SUFFIX = ".snowflakecomputing.com"
 _SNOWFLAKE_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -65,6 +79,22 @@ def wire_dialect(dialect: str) -> str:
 
 def default_port_for(dialect: str) -> int:
     return DEFAULT_PORTS[normalize_dialect(dialect)]
+
+
+def default_tls_for(dialect: str) -> bool:
+    """Whether a new connection should encrypt when the client omits `use_tls`."""
+    return normalize_dialect(dialect) in TLS_BY_DEFAULT
+
+
+def resolve_use_tls(dialect: str, use_tls: Optional[bool]) -> bool:
+    """Stored TLS flag. Explicit false stays false (local proxy). Snowflake is always false."""
+    stored = normalize_dialect(dialect)
+    if wire_dialect(stored) == "snowflake":
+        return False
+    if use_tls is None:
+        return stored in TLS_BY_DEFAULT
+    return bool(use_tls)
+
 
 def normalize_snowflake_host(host: str) -> str:
     """Expand an account locator to the public Snowflake HTTPS hostname.
@@ -118,15 +148,22 @@ async def fetch_dicts(
     sql: str,
     args: list[Any],
     warehouse: Optional[str] = None,
+    use_tls: bool = False,
 ) -> list[dict]:
     """Connect, run one read query, return rows as plain dicts."""
     d = wire_dialect(dialect)
     if d == "postgres":
-        return await _fetch_postgres(host, port, database, username, password, sql, args)
+        return await _fetch_postgres(
+            host, port, database, username, password, sql, args, use_tls=use_tls
+        )
     if d == "mysql":
-        return await _fetch_mysql(host, port, database, username, password, sql, args)
+        return await _fetch_mysql(
+            host, port, database, username, password, sql, args, use_tls=use_tls
+        )
     if d == "mssql":
-        return await _fetch_mssql(host, port, database, username, password, sql, args)
+        return await _fetch_mssql(
+            host, port, database, username, password, sql, args, use_tls=use_tls
+        )
     return await asyncio.to_thread(
         _fetch_snowflake_sync,
         host=host,
@@ -147,6 +184,7 @@ async def _fetch_postgres(
     password: Optional[str],
     sql: str,
     args: list[Any],
+    use_tls: bool = False,
 ) -> list[dict]:
     conn = await asyncpg.connect(
         host=host,
@@ -155,6 +193,8 @@ async def _fetch_postgres(
         user=username,
         password=password,
         timeout=15.0,
+        # True uses the default trust store. No private CA in this connector.
+        ssl=True if use_tls else None,
     )
     try:
         records = await conn.fetch(sql, *args)
@@ -171,6 +211,7 @@ async def _fetch_mysql(
     password: Optional[str],
     sql: str,
     args: list[Any],
+    use_tls: bool = False,
 ) -> list[dict]:
     import aiomysql
 
@@ -182,6 +223,7 @@ async def _fetch_mysql(
         password=password or "",
         connect_timeout=15,
         autocommit=True,
+        ssl=ssl.create_default_context() if use_tls else None,
     )
     try:
         async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -201,10 +243,12 @@ async def _fetch_mssql(
     password: Optional[str],
     sql: str,
     args: list[Any],
+    use_tls: bool = False,
 ) -> list[dict]:
     import aioodbc
 
     # FreeTDS is registered in the Connectivity image (see Dockerfile).
+    encryption = "Encryption=require;" if use_tls else ""
     dsn = (
         f"DRIVER={{FreeTDS}};"
         f"SERVER={host};"
@@ -213,6 +257,7 @@ async def _fetch_mssql(
         f"UID={username};"
         f"PWD={password or ''};"
         "TDS_Version=7.4;"
+        f"{encryption}"
     )
     conn = await aioodbc.connect(dsn=dsn, timeout=15)
     try:
