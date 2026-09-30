@@ -112,7 +112,7 @@ def _require_select_only(query: str, dialect: str = "postgres") -> None:
     ):
         raise SourceConfigError("query must be a read-only SELECT — writes, locks, and file helpers are not allowed")
     try:
-        d = sql_drivers.normalize_dialect(dialect)
+        d = sql_drivers.wire_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
     if d == "mysql" and _MYSQL_FORBIDDEN.search(stripped):
@@ -217,7 +217,7 @@ async def register_connection(
         dialect = sql_drivers.normalize_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
-    if dialect == "snowflake":
+    if sql_drivers.wire_dialect(dialect) == "snowflake":
         try:
             host = sql_drivers.normalize_snowflake_host(host)
         except ValueError as exc:
@@ -456,13 +456,14 @@ async def fetch_for_dataset(
         dialect = sql_drivers.normalize_dialect(connection["dialect"])
     except ValueError as exc:
         raise SourceFetchError(str(exc)) from exc
+    wire = sql_drivers.wire_dialect(dialect)
 
     if row["table_name"]:
-        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=dialect)}"
+        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=wire)}"
         args: list[Any] = []
         if row["cursor_property"] and row["last_cursor_value"] is not None:
             # Uniform bind across dialects (no pg_attribute type cast).
-            col = quote_identifier(row["cursor_property"], dialect=dialect)
+            col = quote_identifier(row["cursor_property"], dialect=wire)
             sql += f" WHERE {col} >= {sql_drivers.cursor_placeholder(dialect)}"
             args.append(_bind_cursor_value(row["last_cursor_value"]))
     else:
@@ -513,7 +514,7 @@ async def fetch_for_dataset(
         candidates = [
             value
             for r in rows
-            if (value := _row_get(r, cursor_key, dialect=dialect)) is not None
+            if (value := _row_get(r, cursor_key, dialect=wire)) is not None
         ]
         if candidates:
             new_cursor = _cursor_to_str(max(candidates))

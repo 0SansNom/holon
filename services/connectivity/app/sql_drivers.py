@@ -1,7 +1,10 @@
 """Async SQL drivers for the no-code SQL source connector.
 
-postgres → asyncpg, mysql → aiomysql, mssql → aioodbc (FreeTDS),
-snowflake → snowflake-connector-python (sync, run in a worker thread).
+Wire protocols: postgres → asyncpg, mysql → aiomysql, mssql → aioodbc
+(FreeTDS), snowflake → snowflake-connector-python (sync, worker thread).
+
+Compatible products (AlloyDB, CockroachDB, …) are named dialects that map
+onto those four wire drivers — same guard, quoting, and bind style.
 """
 
 from __future__ import annotations
@@ -12,11 +15,32 @@ from typing import Any, Optional
 
 import asyncpg
 
-VALID_DIALECTS = frozenset({"postgres", "mysql", "mssql", "snowflake"})
+# Stored dialect name → wire driver / quoting / bind style.
+DIALECT_WIRE: dict[str, str] = {
+    "postgres": "postgres",
+    "alloydb": "postgres",
+    "cockroachdb": "postgres",
+    "enterprisedb": "postgres",
+    "greenplum": "postgres",
+    "mysql": "mysql",
+    "singlestore": "mysql",
+    "mssql": "mssql",
+    "azure_synapse": "mssql",
+    "snowflake": "snowflake",
+}
+VALID_DIALECTS = frozenset(DIALECT_WIRE)
+WIRE_DIALECTS = frozenset(DIALECT_WIRE.values())
+
 DEFAULT_PORTS: dict[str, int] = {
     "postgres": 5432,
+    "alloydb": 5432,
+    "cockroachdb": 26257,
+    "enterprisedb": 5444,
+    "greenplum": 5432,
     "mysql": 3306,
+    "singlestore": 3306,
     "mssql": 1433,
+    "azure_synapse": 1433,
     "snowflake": 443,
 }
 
@@ -25,7 +49,8 @@ _SNOWFLAKE_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def normalize_dialect(dialect: Optional[str]) -> str:
-    d = (dialect or "postgres").strip().lower()
+    """Canonical stored dialect name (product alias or wire name)."""
+    d = (dialect or "postgres").strip().lower().replace("-", "_").replace(" ", "_")
     if d not in VALID_DIALECTS:
         raise ValueError(
             f"unsupported dialect {dialect!r} — must be one of {sorted(VALID_DIALECTS)}"
@@ -33,9 +58,13 @@ def normalize_dialect(dialect: Optional[str]) -> str:
     return d
 
 
+def wire_dialect(dialect: str) -> str:
+    """Wire protocol used for drivers, quoting, and cursor binds."""
+    return DIALECT_WIRE[normalize_dialect(dialect)]
+
+
 def default_port_for(dialect: str) -> int:
     return DEFAULT_PORTS[normalize_dialect(dialect)]
-
 
 def normalize_snowflake_host(host: str) -> str:
     """Expand an account locator to the public Snowflake HTTPS hostname.
@@ -70,7 +99,7 @@ def snowflake_account_from_host(host: str) -> str:
 
 def cursor_placeholder(dialect: str, index: int = 1) -> str:
     """Bound-parameter marker for a single incremental-cursor compare."""
-    d = normalize_dialect(dialect)
+    d = wire_dialect(dialect)
     if d in {"mysql", "snowflake"}:
         return "%s"
     if d == "mssql":
@@ -91,7 +120,7 @@ async def fetch_dicts(
     warehouse: Optional[str] = None,
 ) -> list[dict]:
     """Connect, run one read query, return rows as plain dicts."""
-    d = normalize_dialect(dialect)
+    d = wire_dialect(dialect)
     if d == "postgres":
         return await _fetch_postgres(host, port, database, username, password, sql, args)
     if d == "mysql":
