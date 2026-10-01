@@ -105,9 +105,11 @@ export type SqlDialect =
   | "enterprisedb"
   | "greenplum"
   | "mysql"
+  | "mariadb"
   | "singlestore"
   | "mssql"
   | "azure_synapse"
+  | "azure_synapse_serverless"
   | "snowflake";
 
 export interface SqlConnection {
@@ -119,6 +121,7 @@ export interface SqlConnection {
   database: string;
   warehouse?: string | null;
   username: string;
+  use_tls: boolean;
   has_password: boolean;
   created_by_urn: string;
   created_at: string;
@@ -134,6 +137,7 @@ export interface RegisterSqlConnectionRequest {
   username: string;
   password?: string;
   secret_ref?: string;
+  use_tls?: boolean;
 }
 
 export interface SqlSource {

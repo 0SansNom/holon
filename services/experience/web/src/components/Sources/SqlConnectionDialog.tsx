@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Button,
   Callout,
+  Checkbox,
   Dialog,
   DialogBody,
   DialogFooter,
@@ -21,9 +22,11 @@ const DEFAULT_PORTS: Record<SqlDialect, number> = {
   enterprisedb: 5444,
   greenplum: 5432,
   mysql: 3306,
+  mariadb: 3306,
   singlestore: 3306,
   mssql: 1433,
   azure_synapse: 1433,
+  azure_synapse_serverless: 1433,
   snowflake: 443,
 };
 
@@ -33,12 +36,29 @@ const DIALECT_LABELS: Record<SqlDialect, string> = {
   cockroachdb: "CockroachDB",
   enterprisedb: "EnterpriseDB",
   greenplum: "Greenplum",
-  mysql: "MySQL / MariaDB",
+  mysql: "MySQL",
+  mariadb: "MariaDB",
   singlestore: "SingleStore",
   mssql: "SQL Server",
-  azure_synapse: "Azure Synapse (dedicated)",
+  azure_synapse: "Azure Synapse",
+  azure_synapse_serverless: "Azure Synapse (serverless)",
   snowflake: "Snowflake",
 };
+
+const TLS_BY_DEFAULT = new Set<SqlDialect>([
+  "alloydb",
+  "cockroachdb",
+  "azure_synapse",
+  "azure_synapse_serverless",
+]);
+
+const DIALECT_OPTIONS = (Object.keys(DIALECT_LABELS) as SqlDialect[]).filter(
+  (dialect) => dialect !== "azure_synapse_serverless",
+);
+
+function isSynapse(dialect: SqlDialect): boolean {
+  return dialect === "azure_synapse" || dialect === "azure_synapse_serverless";
+}
 
 function isDefaultPort(port: string, dialect: SqlDialect): boolean {
   return !port || port === String(DEFAULT_PORTS[dialect]);
@@ -57,6 +77,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState("");
   const [secretRef, setSecretRef] = useState("");
+  const [useTls, setUseTls] = useState(editing != null ? editing.use_tls === true : TLS_BY_DEFAULT.has("postgres"));
   const [error, setError] = useState<string | null>(null);
   const register = useRegisterSqlConnection();
 
@@ -64,6 +85,9 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
     setDialect(next);
     if (isDefaultPort(port, dialect)) {
       setPort(String(DEFAULT_PORTS[next]));
+    }
+    if (!isEditing) {
+      setUseTls(TLS_BY_DEFAULT.has(next));
     }
   }
 
@@ -80,6 +104,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         username,
         password: requireSecretRef ? undefined : password || undefined,
         secret_ref: secretRef || undefined,
+        use_tls: dialect === "snowflake" ? undefined : useTls,
       });
       onClose();
     } catch (err) {
@@ -89,6 +114,8 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(password));
   const isSnowflake = dialect === "snowflake";
+  const synapse = isSynapse(dialect);
+  const dialectSelectValue: SqlDialect = dialect === "azure_synapse_serverless" ? "azure_synapse" : dialect;
 
   return (
     <Dialog isOpen title={isEditing ? "Edit SQL connection" : "New SQL connection"} onClose={onClose} style={{ width: 480 }}>
@@ -96,25 +123,56 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
+            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/MariaDB/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
         </p>
         <FormGroup label="Name" helperText="e.g. erp_prod — referenced by SQL sources, not a dataset name">
           <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_db" disabled={isEditing} />
         </FormGroup>
-        <FormGroup label="Dialect">
+        <FormGroup
+          label="Dialect"
+          helperText={
+            dialect === "singlestore"
+              ? "MySQL protocol, port 3306. SingleStore has no Postgres listener."
+              : undefined
+          }
+        >
           <HTMLSelect
             fill
-            value={dialect}
+            value={dialectSelectValue}
             onChange={(e) => onDialectChange(e.target.value as SqlDialect)}
             disabled={isEditing}
           >
-            {(Object.keys(DIALECT_LABELS) as SqlDialect[]).map((d) => (
+            {DIALECT_OPTIONS.map((d) => (
               <option key={d} value={d}>
                 {DIALECT_LABELS[d]}
               </option>
             ))}
           </HTMLSelect>
         </FormGroup>
+        {synapse && (
+          <FormGroup
+            label="Pool"
+            helperText={
+              dialect === "azure_synapse_serverless"
+                ? "Serverless allows OPENROWSET for files. Host looks like workspace-ondemand.sql.azuresynapse.net."
+                : "Dedicated pools reject OPENROWSET. Host looks like workspace.sql.azuresynapse.net."
+            }
+          >
+            <HTMLSelect
+              fill
+              value={dialect === "azure_synapse_serverless" ? "serverless" : "dedicated"}
+              disabled={isEditing}
+              onChange={(e) =>
+                onDialectChange(
+                  e.target.value === "serverless" ? "azure_synapse_serverless" : "azure_synapse",
+                )
+              }
+            >
+              <option value="dedicated">Dedicated</option>
+              <option value="serverless">Serverless</option>
+            </HTMLSelect>
+          </FormGroup>
+        )}
         <FormGroup
           label={isSnowflake ? "Account / host" : "Host"}
           helperText={
@@ -149,6 +207,17 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
               value={warehouse}
               onChange={(e) => setWarehouse(e.target.value)}
               placeholder="COMPUTE_WH"
+            />
+          </FormGroup>
+        )}
+        {!isSnowflake && (
+          <FormGroup
+            helperText="Verified TLS with the system trust store. Uncheck for a local proxy. Changing this on an existing connection requires the secret again."
+          >
+            <Checkbox
+              checked={useTls}
+              label="Require TLS"
+              onChange={(e) => setUseTls((e.target as HTMLInputElement).checked)}
             />
           </FormGroup>
         )}
