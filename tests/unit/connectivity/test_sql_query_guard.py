@@ -83,8 +83,23 @@ def test_default_ports_per_dialect() -> None:
     assert sql_drivers.default_port_for("enterprisedb") == 5444
     assert sql_drivers.default_port_for("greenplum") == 5432
     assert sql_drivers.default_port_for("singlestore") == 3306
+    assert sql_drivers.default_port_for("mariadb") == 3306
     assert sql_drivers.default_port_for("azure_synapse") == 1433
+    assert sql_drivers.default_port_for("azure_synapse_serverless") == 1433
     assert sql_drivers.default_port_for("Azure-Synapse") == 1433
+
+
+def test_default_tls_per_dialect() -> None:
+    assert sql_drivers.default_tls_for("alloydb") is True
+    assert sql_drivers.default_tls_for("cockroachdb") is True
+    assert sql_drivers.default_tls_for("azure_synapse") is True
+    assert sql_drivers.default_tls_for("azure_synapse_serverless") is True
+    assert sql_drivers.default_tls_for("postgres") is False
+    assert sql_drivers.default_tls_for("singlestore") is False
+    assert sql_drivers.default_tls_for("mariadb") is False
+    assert sql_drivers.resolve_use_tls("alloydb", None) is True
+    assert sql_drivers.resolve_use_tls("alloydb", False) is False
+    assert sql_drivers.resolve_use_tls("snowflake", True) is False
 
 
 def test_normalize_dialect_rejects_unknown() -> None:
@@ -100,7 +115,9 @@ def test_compatible_dialects_map_to_wire_drivers() -> None:
         "enterprisedb": ("enterprisedb", "postgres"),
         "greenplum": ("greenplum", "postgres"),
         "singlestore": ("singlestore", "mysql"),
+        "mariadb": ("mariadb", "mysql"),
         "azure_synapse": ("azure_synapse", "mssql"),
+        "azure_synapse_serverless": ("azure_synapse_serverless", "mssql"),
         "Azure Synapse": ("azure_synapse", "mssql"),
         " Azure-Synapse ": ("azure_synapse", "mssql"),
     }
@@ -109,16 +126,28 @@ def test_compatible_dialects_map_to_wire_drivers() -> None:
         assert sql_drivers.wire_dialect(name) == wire
     assert sql_drivers.cursor_placeholder("cockroachdb") == "$1"
     assert sql_drivers.cursor_placeholder("singlestore") == "%s"
+    assert sql_drivers.cursor_placeholder("mariadb") == "%s"
     assert sql_drivers.cursor_placeholder("azure_synapse") == "?"
+    assert sql_drivers.cursor_placeholder("azure_synapse_serverless") == "?"
 
 
 def test_compatible_dialect_query_guards_follow_wire() -> None:
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT LOAD_FILE('/etc/passwd')", "singlestore")
     with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT LOAD_FILE('/etc/passwd')", "mariadb")
+    with pytest.raises(SourceConfigError):
         _require_select_only("SELECT * FROM OPENROWSET('x', 'y')", "azure_synapse")
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT crdb_internal.reset_sql_stats()", "cockroachdb")
+    _require_select_only(
+        "SELECT * FROM OPENROWSET(BULK 'https://acct.blob.core.windows.net/c/f.parquet')",
+        "azure_synapse_serverless",
+    )
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT xp_cmdshell('dir')", "azure_synapse_serverless")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT * FROM OPENQUERY(linked, 'SELECT 1')", "azure_synapse_serverless")
     _require_select_only("SELECT id FROM orders", "cockroachdb")
     _require_select_only("SELECT * FROM crdb_internal.cluster_settings", "cockroachdb")
 
