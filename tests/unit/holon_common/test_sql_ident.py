@@ -41,3 +41,8 @@ def test_quote_identifier_dialects() -> None:
     # Unquoted so Snowflake folds to UPPERCASE (quoted names are case-sensitive).
     assert quote_identifier("public.orders", dialect="snowflake") == "public.orders"
     assert quote_identifier("ANALYTICS.ORDERS", dialect="snowflake") == "ANALYTICS.ORDERS"
+
+
+def test_quote_identifier_rejects_product_alias() -> None:
+    with pytest.raises(ValueError):
+        quote_identifier("orders", dialect="singlestore")
