@@ -26,6 +26,19 @@ def _gai(mapping: dict[str, str]):
     return fake
 
 
+def test_ibm_cos_https_endpoint_keeps_the_hostname(monkeypatch) -> None:
+    """IBM COS is plain S3-compatible HTTPS — pin must not rewrite the host."""
+    host = "s3.us-south.cloud-object-storage.appdomain.cloud"
+    monkeypatch.setattr(
+        "holon_common.connector_safety.socket.getaddrinfo",
+        _gai({host: "8.8.8.8"}),
+    )
+    assert (
+        pin_object_endpoint(f"https://{host}", kind="s3")
+        == f"https://{host}"
+    )
+
+
 def test_s3_https_and_bare_endpoints_keep_the_hostname(monkeypatch) -> None:
     monkeypatch.setattr(
         "holon_common.connector_safety.socket.getaddrinfo",
