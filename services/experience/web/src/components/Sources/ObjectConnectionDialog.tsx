@@ -63,7 +63,7 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update credentials — the name and kind stay fixed since object sources already reference this connection."
-            : "S3-compatible (MinIO, AWS S3), Azure Blob, or Google Cloud Storage. Register once, point several sources at it."}
+            : "S3-compatible (MinIO, AWS S3, IBM COS), Azure Blob, or Google Cloud Storage. Register once, point several sources at it."}
         </p>
         <FormGroup label="Name" helperText="e.g. gcs_prod — referenced by object sources, not a dataset name">
           <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_bucket_store" disabled={isEditing} />
@@ -105,13 +105,23 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
           </>
         ) : (
           <>
-            <FormGroup label="Endpoint" helperText='e.g. http://localhost:9000 or https://s3.amazonaws.com'>
-              <InputGroup value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="http://localhost:9000" />
+            <FormGroup
+              label="Endpoint"
+              helperText="e.g. http://localhost:9000, https://s3.amazonaws.com, or https://s3.us-south.cloud-object-storage.appdomain.cloud (IBM COS)"
+            >
+              <InputGroup
+                value={endpoint}
+                onChange={(e) => setEndpoint(e.target.value)}
+                placeholder="https://s3.us-south.cloud-object-storage.appdomain.cloud"
+              />
             </FormGroup>
-            <FormGroup label="Region">
-              <InputGroup value={region} onChange={(e) => setRegion(e.target.value)} placeholder="us-east-1" />
+            <FormGroup
+              label="Region"
+              helperText="Match the endpoint region for IBM COS (e.g. us-south, eu-de)."
+            >
+              <InputGroup value={region} onChange={(e) => setRegion(e.target.value)} placeholder="us-south" />
             </FormGroup>
-            <FormGroup label="Access key ID">
+            <FormGroup label="Access key ID" helperText="HMAC access key for AWS / MinIO / IBM COS">
               <InputGroup value={accessKeyId} onChange={(e) => setAccessKeyId(e.target.value)} placeholder="minioadmin" />
             </FormGroup>
           </>
@@ -169,7 +179,9 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
               label="Path-style addressing"
               onChange={(e) => setPathStyle((e.target as HTMLInputElement).checked)}
             />
-            <p className="hl-text-muted-sm hl-mt-xs">Enable for MinIO and most self-hosted S3 — disable for AWS virtual-hosted buckets.</p>
+            <p className="hl-text-muted-sm hl-mt-xs">
+              Enable for MinIO and most self-hosted S3 — disable for AWS and IBM COS virtual-hosted buckets.
+            </p>
           </FormGroup>
         )}
         {error && (

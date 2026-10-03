@@ -1,4 +1,9 @@
-"""No-code object storage source registry for S3-compatible, Azure Blob, and GCS."""
+"""No-code object storage source registry for S3-compatible (AWS, MinIO, IBM COS), Azure Blob, and GCS.
+
+IBM Cloud Object Storage uses kind=s3 with an HMAC key pair and a regional
+endpoint such as ``https://s3.us-south.cloud-object-storage.appdomain.cloud``
+(path-style usually off — virtual-hosted addressing).
+"""
 
 from __future__ import annotations
 
