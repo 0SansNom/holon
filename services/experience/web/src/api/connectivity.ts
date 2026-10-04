@@ -98,7 +98,17 @@ export interface RegisterConnectionRequest {
   allowed_origin?: string;
 }
 
-export type SqlDialect = "postgres" | "mysql" | "mssql" | "snowflake";
+export type SqlDialect =
+  | "postgres"
+  | "alloydb"
+  | "cockroachdb"
+  | "enterprisedb"
+  | "greenplum"
+  | "mysql"
+  | "singlestore"
+  | "mssql"
+  | "azure_synapse"
+  | "snowflake";
 
 export interface SqlConnection {
   tenant_id: string;

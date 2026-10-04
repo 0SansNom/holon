@@ -78,12 +78,45 @@ def test_default_ports_per_dialect() -> None:
     assert sql_drivers.default_port_for("mysql") == 3306
     assert sql_drivers.default_port_for("mssql") == 1433
     assert sql_drivers.default_port_for("snowflake") == 443
+    assert sql_drivers.default_port_for("alloydb") == 5432
+    assert sql_drivers.default_port_for("cockroachdb") == 26257
+    assert sql_drivers.default_port_for("enterprisedb") == 5444
+    assert sql_drivers.default_port_for("greenplum") == 5432
+    assert sql_drivers.default_port_for("singlestore") == 3306
+    assert sql_drivers.default_port_for("azure_synapse") == 1433
+    assert sql_drivers.default_port_for("Azure-Synapse") == 1433
 
 
 def test_normalize_dialect_rejects_unknown() -> None:
     with pytest.raises(ValueError):
         sql_drivers.normalize_dialect("oracle")
     assert sql_drivers.normalize_dialect("snowflake") == "snowflake"
+
+
+def test_compatible_dialects_map_to_wire_drivers() -> None:
+    cases = {
+        "alloydb": "postgres",
+        "cockroachdb": "postgres",
+        "enterprisedb": "postgres",
+        "greenplum": "postgres",
+        "singlestore": "mysql",
+        "azure_synapse": "mssql",
+        "Azure Synapse": "mssql",
+    }
+    for name, wire in cases.items():
+        assert sql_drivers.normalize_dialect(name) == name.strip().lower().replace("-", "_").replace(" ", "_")
+        assert sql_drivers.wire_dialect(name) == wire
+    assert sql_drivers.cursor_placeholder("cockroachdb") == "$1"
+    assert sql_drivers.cursor_placeholder("singlestore") == "%s"
+    assert sql_drivers.cursor_placeholder("azure_synapse") == "?"
+
+
+def test_compatible_dialect_query_guards_follow_wire() -> None:
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT LOAD_FILE('/etc/passwd')", "singlestore")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT * FROM OPENROWSET('x', 'y')", "azure_synapse")
+    _require_select_only("SELECT id FROM orders", "cockroachdb")
 
 
 def test_cursor_placeholders() -> None:

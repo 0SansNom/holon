@@ -17,12 +17,21 @@ from holon_common.connector_safety import (
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
     connector_secret,
-    resolve_connector_secret,
 )
 from holon_common.sql_ident import quote_identifier, require_identifier
 
 from app import sql_drivers
 from app.cursor_window import advance_cursor
+from app.source_registry_base import (
+    ConnectionInUseError,
+    SourceConflictError,
+    SourceConfigError,
+    SourceFetchError,
+    assert_dataset_available,
+    make_column_cursor_commit,
+    make_property_cursor_commit,
+    resolve_source_secret,
+)
 
 _FORBIDDEN_STMT = re.compile(
     r"\b(insert|update|delete|truncate|alter|drop|create|grant|revoke|call|execute)\b",
@@ -80,31 +89,7 @@ _PUBLIC_SOURCE_COLUMNS = (
 )
 
 
-class SourceConflictError(ValueError):
-    pass
-
-
-class SourceConfigError(ValueError):
-    pass
-
-
-class SourceFetchError(ValueError):
-    pass
-
-
-def _resolve_secret(ref, tenant_id: str):
-    """Resolve a stored secret_ref, re-checking tenant scope at fetch time."""
-    try:
-        return resolve_connector_secret(ref, tenant_id=tenant_id)
-    except ConnectorSafetyError as exc:
-        raise SourceFetchError(str(exc)) from exc
-
-
 class ConnectionConflictError(ValueError):
-    pass
-
-
-class ConnectionInUseError(ValueError):
     pass
 
 
@@ -127,7 +112,7 @@ def _require_select_only(query: str, dialect: str = "postgres") -> None:
     ):
         raise SourceConfigError("query must be a read-only SELECT — writes, locks, and file helpers are not allowed")
     try:
-        d = sql_drivers.normalize_dialect(dialect)
+        d = sql_drivers.wire_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
     if d == "mysql" and _MYSQL_FORBIDDEN.search(stripped):
@@ -232,7 +217,7 @@ async def register_connection(
         dialect = sql_drivers.normalize_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
-    if dialect == "snowflake":
+    if sql_drivers.wire_dialect(dialect) == "snowflake":
         try:
             host = sql_drivers.normalize_snowflake_host(host)
         except ValueError as exc:
@@ -358,50 +343,13 @@ async def register_source(
     if schedule_interval_minutes is not None and schedule_interval_minutes <= 0:
         raise SourceConfigError("schedule_interval_minutes must be a positive number of minutes")
 
-    if name in reserved_dataset_names:
-        raise SourceConflictError(f"dataset {name!r} is reserved")
-
-    conflicting_plugin = await pool.fetchval(
-        """
-        SELECT name FROM plugin_registration
-        WHERE manifest->>'dataset_name' = $1
-          AND status = 'active'
-          AND (tenant_id IS NULL OR tenant_id = $2)
-        """,
-        name, tenant_id,
+    await assert_dataset_available(
+        pool,
+        tenant_id=tenant_id,
+        name=name,
+        reserved_dataset_names=reserved_dataset_names,
+        exclude_table="sql_source",
     )
-    if conflicting_plugin is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active plugin {conflicting_plugin!r}")
-
-    conflicting_rest_source = await pool.fetchval(
-        "SELECT name FROM generic_rest_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_rest_source is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active REST source {conflicting_rest_source!r}")
-
-    conflicting_object_source = await pool.fetchval(
-        "SELECT name FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_object_source is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active object source {conflicting_object_source!r}")
-
-    conflicting_sftp_source = await pool.fetchval(
-        "SELECT name FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_sftp_source is not None:
-        raise SourceConflictError(f"dataset {name!r} is already claimed by active SFTP source {conflicting_sftp_source!r}")
-
-    conflicting_sf_source = await pool.fetchval(
-        "SELECT name FROM salesforce_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if conflicting_sf_source is not None:
-        raise SourceConflictError(
-            f"dataset {name!r} is already claimed by active Salesforce source {conflicting_sf_source!r}"
-        )
 
     await pool.execute(
         """
@@ -501,20 +449,21 @@ async def fetch_for_dataset(
     password = connector_secret(
         secret_ref=connection["secret_ref"],
         plaintext=connection["password"],
-        resolved=_resolve_secret(connection["secret_ref"], tenant_id),
+        resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
     )
 
     try:
         dialect = sql_drivers.normalize_dialect(connection["dialect"])
     except ValueError as exc:
         raise SourceFetchError(str(exc)) from exc
+    wire = sql_drivers.wire_dialect(dialect)
 
     if row["table_name"]:
-        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=dialect)}"
+        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=wire)}"
         args: list[Any] = []
         if row["cursor_property"] and row["last_cursor_value"] is not None:
             # Uniform bind across dialects (no pg_attribute type cast).
-            col = quote_identifier(row["cursor_property"], dialect=dialect)
+            col = quote_identifier(row["cursor_property"], dialect=wire)
             sql += f" WHERE {col} >= {sql_drivers.cursor_placeholder(dialect)}"
             args.append(_bind_cursor_value(row["last_cursor_value"]))
     else:
@@ -552,34 +501,32 @@ async def fetch_for_dataset(
         rows = advanced.rows
         if advanced.changed and advanced.cursor is not None:
 
-            async def _commit_cursor(
-                cursor: str = advanced.cursor,
-                boundary: str = advanced.boundary_keys,
-            ) -> None:
-                await pool.execute(
-                    "UPDATE sql_source SET last_cursor_value = $1, cursor_boundary_keys = $2 "
-                    "WHERE tenant_id = $3 AND name = $4",
-                    cursor, boundary, tenant_id, name,
-                )
-
-            commit = _commit_cursor
+            commit = make_property_cursor_commit(
+                pool,
+                table="sql_source",
+                tenant_id=tenant_id,
+                name=name,
+                cursor=advanced.cursor,
+                boundary_keys=advanced.boundary_keys,
+            )
     elif row["cursor_property"]:
         cursor_key = row["cursor_property"]
         candidates = [
             value
             for r in rows
-            if (value := _row_get(r, cursor_key, dialect=dialect)) is not None
+            if (value := _row_get(r, cursor_key, dialect=wire)) is not None
         ]
         if candidates:
             new_cursor = _cursor_to_str(max(candidates))
             if new_cursor != row["last_cursor_value"]:
 
-                async def _commit_cursor(cursor: str = new_cursor) -> None:
-                    await pool.execute(
-                        "UPDATE sql_source SET last_cursor_value = $1 WHERE tenant_id = $2 AND name = $3",
-                        cursor, tenant_id, name,
-                    )
-
-                commit = _commit_cursor
+                commit = make_column_cursor_commit(
+                    pool,
+                    table="sql_source",
+                    tenant_id=tenant_id,
+                    name=name,
+                    column="last_cursor_value",
+                    value=new_cursor,
+                )
 
     return rows, commit
