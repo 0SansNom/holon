@@ -149,7 +149,7 @@ export function SqlSourceDialog({ editing, onClose }: { editing: SqlSource | nul
         {form.mode === "table" ? (
           <FormGroup
             label="Table name"
-            helperText="Schema-qualified if needed, e.g. public.orders (Snowflake folds unquoted names to UPPERCASE)"
+            helperText="Qualify if needed, e.g. public.orders or analytics.public.orders (Snowflake folds unquoted names to UPPERCASE)"
           >
             <InputGroup
               value={form.tableName}
