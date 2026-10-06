@@ -21,6 +21,8 @@ class TransientCatalogError(Exception):
 
 
 join_link_backfill_status = "idle"
+search_reindex_status: dict = {"state": "idle"}
+_SEARCH_REINDEX_RETRY_SECONDS = (30.0, 60.0, 120.0, 300.0)
 _ENSURE_MISS_TTL_SECONDS = 30.0
 _ensure_locks: dict[str, asyncio.Lock] = {}
 _ensure_miss_until: dict[str, float] = {}
@@ -647,37 +649,74 @@ async def reindex_search_from_serving_store(
     pool: asyncpg.Pool,
     opensearch_url: str,
     opensearch_password: str,
+    *,
+    retry_seconds: tuple[float, ...] = _SEARCH_REINDEX_RETRY_SECONDS,
 ) -> int:
     """Rewrite search documents that are still on an older policy version.
 
     Already-current indexes are left alone. Rewrites overwrite by document
     id and do not delete first, so a crash cannot empty a type. Failures
-    on one type do not stop the others.
+    on one type do not stop the others; failed types are retried with
+    backoff until they succeed. Progress is published in
+    ``search_reindex_status`` for ``/ready``.
     """
+    global search_reindex_status
     try:
-        pending = await search.count_outside_policy(opensearch_url, opensearch_password)
+        pending = await _count_outside_policy_or_none(opensearch_url, opensearch_password)
+        if pending == 0:
+            search_reindex_status = {"state": "ok", "pending_outside_policy": 0, "failed": [], "skipped_invalid": {}}
+            logger.info("search index already at policy_version %s", search.POLICY_VERSION)
+            return 0
+        rows = await pool.fetch("SELECT urn, name, tenant_id FROM object_type ORDER BY tenant_id, name")
+        remaining = list(rows)
+        skipped_invalid: dict[str, int] = {}
+        done = 0
+        attempt = 0
+        search_reindex_status = {
+            "state": "running", "pending_outside_policy": pending, "total": len(rows), "failed": [],
+            "skipped_invalid": skipped_invalid,
+        }
+        while True:
+            failed = []
+            for row in remaining:
+                try:
+                    result = await reindex_object_type_search(
+                        pool,
+                        object_type_name=row["name"],
+                        object_type_urn=row["urn"],
+                        tenant_id=row["tenant_id"],
+                        opensearch_url=opensearch_url,
+                        opensearch_password=opensearch_password,
+                        purge_missing=False,
+                    )
+                    done += 1
+                    if result.get("skipped_invalid"):
+                        skipped_invalid[row["urn"]] = result["skipped_invalid"]
+                except ValueError:
+                    logger.info("search policy reindex: %s no longer exists, skipping", row["urn"])
+                except Exception:
+                    logger.exception("search policy reindex failed for %s", row["urn"])
+                    failed.append(row)
+            if not failed:
+                break
+            delay = retry_seconds[min(attempt, len(retry_seconds) - 1)]
+            attempt += 1
+            search_reindex_status = {
+                "state": "degraded", "pending_outside_policy": pending, "total": len(rows),
+                "failed": [row["urn"] for row in failed], "attempts": attempt, "skipped_invalid": skipped_invalid,
+            }
+            logger.warning("search policy reindex: %d object types failed, retrying in %ss", len(failed), delay)
+            await asyncio.sleep(delay)
+            remaining = failed
+        search_reindex_status = {
+            "state": "ok",
+            "pending_outside_policy": await _count_outside_policy_or_none(opensearch_url, opensearch_password),
+            "total": len(rows), "failed": [], "attempts": attempt, "skipped_invalid": skipped_invalid,
+        }
     except Exception:
-        logger.exception("search policy version check failed; rewriting in place")
-        pending = None
-    if pending == 0:
-        logger.info("search index already at policy_version %s", search.POLICY_VERSION)
+        search_reindex_status = {"state": "error"}
+        logger.exception("search policy reindex aborted")
         return 0
-    rows = await pool.fetch("SELECT urn, name, tenant_id FROM object_type ORDER BY tenant_id, name")
-    done = 0
-    for row in rows:
-        try:
-            await reindex_object_type_search(
-                pool,
-                object_type_name=row["name"],
-                object_type_urn=row["urn"],
-                tenant_id=row["tenant_id"],
-                opensearch_url=opensearch_url,
-                opensearch_password=opensearch_password,
-                purge_missing=False,
-            )
-            done += 1
-        except Exception:
-            logger.exception("search policy reindex failed for %s", row["urn"])
     logger.info(
         "reindexed %d/%d object types onto search policy_version %s",
         done,
@@ -685,3 +724,11 @@ async def reindex_search_from_serving_store(
         search.POLICY_VERSION,
     )
     return done
+
+
+async def _count_outside_policy_or_none(opensearch_url: str, opensearch_password: str) -> int | None:
+    try:
+        return await search.count_outside_policy(opensearch_url, opensearch_password)
+    except Exception:
+        logger.exception("search policy version check failed")
+        return None
