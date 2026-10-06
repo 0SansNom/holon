@@ -207,64 +207,14 @@ async def _link_resource_to_project(
 ) -> None:
     """Reconcile SpiceDB `parent_project` for a single-valued Postgres
     `project_urn` (ObjectType publish path and Shared Property Type CRUD).
-
-    SpiceDB relationships are additive (`OPERATION_TOUCH`), so changing
-    or clearing project scope would leave stale edges unless we delete
-    the previous subjects. Order is write-new-then-delete-old.
     """
-    existing = await core.authz.read_relationships(
-        resource_type=resource_type, resource_urn=resource_urn, relation="parent_project"
+    await core.authz.set_single_subject(
+        resource_type=resource_type,
+        resource_urn=resource_urn,
+        relation="parent_project",
+        subject_type="project",
+        subject_urn=project_urn,
     )
-    existing_urns = [relationship["subject"]["object"]["objectId"] for relationship in existing]
-
-    async def _write(subject_urn: str) -> None:
-        await core.authz.write_relationship(
-            resource_type=resource_type,
-            resource_urn=resource_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=subject_urn,
-        )
-
-    async def _delete(subject_urn: str) -> None:
-        await core.authz.delete_relationship(
-            resource_type=resource_type,
-            resource_urn=resource_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=subject_urn,
-        )
-
-    async def _restore_snapshot() -> None:
-        try:
-            current = await core.authz.read_relationships(
-                resource_type=resource_type, resource_urn=resource_urn, relation="parent_project"
-            )
-            current_urns = {relationship["subject"]["object"]["objectId"] for relationship in current}
-            for urn in existing_urns:
-                if urn not in current_urns:
-                    await _write(urn)
-            if project_urn is not None and project_urn not in existing_urns and project_urn in current_urns:
-                await _delete(project_urn)
-        except Exception:
-            logger.exception(
-                "failed to restore parent_project snapshot for %s after link error", resource_urn
-            )
-
-    try:
-        if project_urn is not None:
-            if project_urn not in existing_urns:
-                await _write(project_urn)
-            for old_urn in existing_urns:
-                if old_urn != project_urn:
-                    await _delete(old_urn)
-        else:
-            for old_urn in existing_urns:
-                await _delete(old_urn)
-    except Exception:
-        logger.exception("SpiceDB parent_project reconcile failed for %s — attempting restore", resource_urn)
-        await _restore_snapshot()
-        raise
 
 
 async def _link_object_type_to_project(object_type_urn: str, project_urn: Optional[str]) -> None:
