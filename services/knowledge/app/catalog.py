@@ -12,6 +12,11 @@ import asyncpg
 from holon_common import Classification, EventConsumer, most_restrictive
 
 from . import lineage, link_overlays, ontology, relation_links, resolver, search, serving_store
+from .search_metrics import (
+    SEARCH_DOCUMENTS_OUTSIDE_POLICY,
+    SEARCH_REINDEX_FAILED_OBJECT_TYPES,
+    SEARCH_ROWS_SKIPPED_INVALID,
+)
 
 logger = logging.getLogger("knowledge.catalog")
 
@@ -22,6 +27,7 @@ class TransientCatalogError(Exception):
 
 join_link_backfill_status = "idle"
 search_reindex_status: dict = {"state": "idle"}
+search_skipped_invalid: dict[str, int] = {}
 _SEARCH_REINDEX_RETRY_SECONDS = (30.0, 60.0, 120.0, 300.0)
 _ENSURE_MISS_TTL_SECONDS = 30.0
 _ensure_locks: dict[str, asyncio.Lock] = {}
@@ -205,6 +211,7 @@ async def _materialize_sync(
                 len(_invalid),
                 len(rows),
             )
+    _record_skipped_invalid(tenant_id, object_type_urn, object_type_name, len(rows) - len(index_rows))
 
     shared_rows = await ontology.list_shared_property_types(pool, tenant_id)
     shared_by_name = {row["api_name"]: row for row in shared_rows}
@@ -601,6 +608,7 @@ async def reindex_object_type_search(
             rows=rows,
         )
         skipped = len(invalid)
+    _record_skipped_invalid(tenant_id, object_type_urn, object_type_name, skipped)
 
     shared_rows = await ontology.list_shared_property_types(pool, tenant_id)
     shared_by_name = {row["api_name"]: row for row in shared_rows}
@@ -664,23 +672,19 @@ async def reindex_search_from_serving_store(
     try:
         pending = await _count_outside_policy_or_none(opensearch_url, opensearch_password)
         if pending == 0:
-            search_reindex_status = {"state": "ok", "pending_outside_policy": 0, "failed": [], "skipped_invalid": {}}
+            search_reindex_status = {"state": "ok", "pending_outside_policy": 0, "failed": []}
             logger.info("search index already at policy_version %s", search.POLICY_VERSION)
             return 0
         rows = await pool.fetch("SELECT urn, name, tenant_id FROM object_type ORDER BY tenant_id, name")
         remaining = list(rows)
-        skipped_invalid: dict[str, int] = {}
         done = 0
         attempt = 0
-        search_reindex_status = {
-            "state": "running", "pending_outside_policy": pending, "total": len(rows), "failed": [],
-            "skipped_invalid": skipped_invalid,
-        }
+        search_reindex_status = {"state": "running", "pending_outside_policy": pending, "total": len(rows), "failed": []}
         while True:
             failed = []
             for row in remaining:
                 try:
-                    result = await reindex_object_type_search(
+                    await reindex_object_type_search(
                         pool,
                         object_type_name=row["name"],
                         object_type_urn=row["urn"],
@@ -690,8 +694,6 @@ async def reindex_search_from_serving_store(
                         purge_missing=False,
                     )
                     done += 1
-                    if result.get("skipped_invalid"):
-                        skipped_invalid[row["urn"]] = result["skipped_invalid"]
                 except ValueError:
                     logger.info("search policy reindex: %s no longer exists, skipping", row["urn"])
                 except Exception:
@@ -703,15 +705,17 @@ async def reindex_search_from_serving_store(
             attempt += 1
             search_reindex_status = {
                 "state": "degraded", "pending_outside_policy": pending, "total": len(rows),
-                "failed": [row["urn"] for row in failed], "attempts": attempt, "skipped_invalid": skipped_invalid,
+                "failed": [row["urn"] for row in failed], "attempts": attempt,
             }
+            SEARCH_REINDEX_FAILED_OBJECT_TYPES.set(len(failed))
             logger.warning("search policy reindex: %d object types failed, retrying in %ss", len(failed), delay)
             await asyncio.sleep(delay)
             remaining = failed
+        SEARCH_REINDEX_FAILED_OBJECT_TYPES.set(0)
         search_reindex_status = {
             "state": "ok",
             "pending_outside_policy": await _count_outside_policy_or_none(opensearch_url, opensearch_password),
-            "total": len(rows), "failed": [], "attempts": attempt, "skipped_invalid": skipped_invalid,
+            "total": len(rows), "failed": [], "attempts": attempt,
         }
     except Exception:
         search_reindex_status = {"state": "error"}
@@ -728,7 +732,19 @@ async def reindex_search_from_serving_store(
 
 async def _count_outside_policy_or_none(opensearch_url: str, opensearch_password: str) -> int | None:
     try:
-        return await search.count_outside_policy(opensearch_url, opensearch_password)
+        count = await search.count_outside_policy(opensearch_url, opensearch_password)
     except Exception:
         logger.exception("search policy version check failed")
+        SEARCH_DOCUMENTS_OUTSIDE_POLICY.set(-1)
         return None
+    SEARCH_DOCUMENTS_OUTSIDE_POLICY.set(count)
+    return count
+
+
+def _record_skipped_invalid(tenant_id: str, object_type_urn: str, object_type_name: str, count: int) -> None:
+    """Latest snapshot wins: each ingest or reindex replaces the type's count."""
+    if count:
+        search_skipped_invalid[object_type_urn] = count
+    else:
+        search_skipped_invalid.pop(object_type_urn, None)
+    SEARCH_ROWS_SKIPPED_INVALID.labels(tenant=tenant_id, object_type=object_type_name).set(count)

@@ -193,5 +193,6 @@ async def ready() -> dict:
         extra={
             "join_link_backfill": catalog.join_link_backfill_status,
             "search_reindex": catalog.search_reindex_status,
+            "search_skipped_invalid": catalog.search_skipped_invalid,
         },
     )
