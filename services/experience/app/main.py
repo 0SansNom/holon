@@ -437,32 +437,14 @@ async def _authorize_application(principal: Principal, urn: str, permission: str
 
 
 async def _link_application_to_project(application_urn: str, project_urn: Optional[str]) -> None:
-    """Same reconciliation `knowledge`'s `_link_object_type_to_project`
-    already does: SpiceDB relationships are additive (`OPERATION_TOUCH`),
-    so re-scoping — or clearing back to `None` — must delete any existing
-    `parent_project` edge first, since Postgres's `application.project_urn`
-    is single-valued but SpiceDB wouldn't otherwise know the old edge is
-    stale.
-    """
-    existing = await app.state.authz.read_relationships(
-        resource_type="application", resource_urn=application_urn, relation="parent_project",
+    """Postgres's `application.project_urn` is single-valued; mirror it in SpiceDB."""
+    await app.state.authz.set_single_subject(
+        resource_type="application",
+        resource_urn=application_urn,
+        relation="parent_project",
+        subject_type="project",
+        subject_urn=project_urn,
     )
-    for relationship in existing:
-        await app.state.authz.delete_relationship(
-            resource_type="application",
-            resource_urn=application_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=relationship["subject"]["object"]["objectId"],
-        )
-    if project_urn is not None:
-        await app.state.authz.write_relationship(
-            resource_type="application",
-            resource_urn=application_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=project_urn,
-        )
 
 
 # Resource tags/featured (`/api/resources/*` below): which SpiceDB
