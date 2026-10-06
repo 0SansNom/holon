@@ -27,6 +27,7 @@ from holon_common import (
 from holon_common.audit import clear_durable_audit_hooks
 from holon_common.audit_store import install_durable_audit
 from holon_common.authz import PermissionClient
+from holon_common.correlation import instrument_correlation
 from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
@@ -160,6 +161,7 @@ app.add_middleware(PublicApiOnlyMiddleware)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+instrument_correlation(app)
 install_error_handlers(app, service_name=SERVICE_NAME)
 app.include_router(ontologies_router)
 app.include_router(plugins_router.router)
@@ -190,5 +192,9 @@ async def ready() -> dict:
             check_opensearch(OPENSEARCH_URL, OPENSEARCH_PASSWORD),
             check_iceberg_catalog(ICEBERG_CONFIG["catalog_uri"], ICEBERG_CONFIG["warehouse"]),
         ],
-        extra={"join_link_backfill": catalog.join_link_backfill_status},
+        extra={
+            "join_link_backfill": catalog.join_link_backfill_status,
+            "search_reindex": catalog.search_reindex_status,
+            "search_skipped_invalid": catalog.search_skipped_invalid,
+        },
     )

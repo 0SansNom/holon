@@ -36,6 +36,7 @@ from holon_common import (
     run_migrations,
     is_production,
 )
+from holon_common.correlation import instrument_correlation
 from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
@@ -43,7 +44,7 @@ from holon_common.principal_status import (
     refresh_revocation_snapshot_forever,
 )
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
-from holon_common.audit_store import install_durable_audit, list_events_page
+from holon_common.audit_store import install_durable_audit, list_events, list_events_page
 from holon_common.auth import COOKIE_NAME
 from holon_common.authz import PermissionClient
 from holon_common.readiness import check_kafka_bootstrap, check_opa, check_postgres, check_spicedb, report_ready
@@ -58,6 +59,7 @@ IDENTITY_URL = os.environ["HOLON_IDENTITY_URL"]
 CONNECTIVITY_URL = os.environ["HOLON_CONNECTIVITY_URL"]
 KNOWLEDGE_URL = os.environ["HOLON_KNOWLEDGE_URL"]
 INTELLIGENCE_URL = os.environ["HOLON_INTELLIGENCE_URL"]
+AUTOMATION_URL = os.environ.get("HOLON_AUTOMATION_URL", "")
 TENANT_ID = os.environ["HOLON_TENANT_ID"]
 WORKSPACE_ID = os.environ["HOLON_WORKSPACE_ID"]
 JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
@@ -140,6 +142,7 @@ app = FastAPI(title="Holon — Experience Platform", lifespan=lifespan)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+instrument_correlation(app)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
@@ -224,7 +227,10 @@ async def _post_json(url: str, *, authorization: Optional[str] = None, json: Opt
         return upstream.status_code, {"detail": upstream.text}
 
 
-_HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "date", "server"}
+# x-correlation-id: the validated id is re-added by holon_common.correlation, not copied from either side.
+_HOP_BY_HOP = {
+    "connection", "keep-alive", "transfer-encoding", "host", "content-length", "date", "server", "x-correlation-id",
+}
 
 
 async def _relay(base_url: str, path: str, request: Request) -> Response:
@@ -323,6 +329,7 @@ async def list_experience_audit_events(
     action: Optional[str] = None,
     actor: Optional[str] = None,
     outcome: Optional[str] = None,
+    traceId: Optional[str] = None,
     pageSize: Optional[int] = None,
     pageToken: Optional[str] = None,
 ) -> dict:
@@ -335,9 +342,63 @@ async def list_experience_audit_events(
         action=action,
         actor_urn=actor,
         outcome=outcome,
+        trace_id=traceId,
         page_size=50 if pageSize is None else pageSize,
         page_token=pageToken,
     )
+
+
+_AUDIT_TRACE_PAGE_SIZE = 100
+
+
+def _audit_sources() -> list[tuple[str, str]]:
+    sources = [
+        ("identity", f"{IDENTITY_URL}/audit-events"),
+        ("connectivity", f"{CONNECTIVITY_URL}/audit-events"),
+        ("knowledge", f"{KNOWLEDGE_URL}/api/holon/audit-events"),
+        ("intelligence", f"{INTELLIGENCE_URL}/audit-events"),
+    ]
+    if AUTOMATION_URL:
+        sources.append(("automation", f"{AUTOMATION_URL}/audit-events"))
+    return sources
+
+
+@app.get("/api/audit-events/trace/{trace_id}")
+async def get_audit_trace(
+    trace_id: str, request: Request, principal: Principal = Depends(current_principal)
+) -> dict:
+    """Every service's audit records for one action (one correlation id), oldest first.
+
+    Each service still enforces its own audit permission. A service that
+    cannot answer is listed in `unavailable` instead of failing the view;
+    one with more than a page of records is listed in `truncated`.
+    """
+    await _authorize_workspace(principal, "approve")
+    authorization = _upstream_authorization(request)
+    query = httpx.QueryParams({"traceId": trace_id, "pageSize": _AUDIT_TRACE_PAGE_SIZE})
+
+    async def fetch(service: str, url: str) -> tuple[str, int, Any]:
+        try:
+            status, body = await _get_json(f"{url}?{query}", authorization=authorization)
+        except httpx.HTTPError as exc:
+            return service, 503, {"detail": str(exc)}
+        return service, status, body
+
+    local = await list_events(
+        app.state.pool, principal.tenant_id, trace_id=trace_id, page_size=_AUDIT_TRACE_PAGE_SIZE + 1
+    )
+    events = [{**event, "service": "experience"} for event in local[:_AUDIT_TRACE_PAGE_SIZE]]
+    truncated = ["experience"] if len(local) > _AUDIT_TRACE_PAGE_SIZE else []
+    unavailable: list[dict] = []
+    for service, status, body in await asyncio.gather(*(fetch(name, url) for name, url in _audit_sources())):
+        if status != 200 or not isinstance(body, dict):
+            unavailable.append({"service": service, "status": status})
+            continue
+        events.extend({**event, "service": service} for event in body.get("data") or [])
+        if body.get("nextPageToken"):
+            truncated.append(service)
+    events.sort(key=lambda event: event.get("occurredAt") or "")
+    return {"traceId": trace_id, "data": events, "unavailable": unavailable, "truncated": truncated}
 
 
 @app.get("/api/lineage/{urn:path}")
@@ -376,32 +437,14 @@ async def _authorize_application(principal: Principal, urn: str, permission: str
 
 
 async def _link_application_to_project(application_urn: str, project_urn: Optional[str]) -> None:
-    """Same reconciliation `knowledge`'s `_link_object_type_to_project`
-    already does: SpiceDB relationships are additive (`OPERATION_TOUCH`),
-    so re-scoping — or clearing back to `None` — must delete any existing
-    `parent_project` edge first, since Postgres's `application.project_urn`
-    is single-valued but SpiceDB wouldn't otherwise know the old edge is
-    stale.
-    """
-    existing = await app.state.authz.read_relationships(
-        resource_type="application", resource_urn=application_urn, relation="parent_project",
+    """Postgres's `application.project_urn` is single-valued; mirror it in SpiceDB."""
+    await app.state.authz.set_single_subject(
+        resource_type="application",
+        resource_urn=application_urn,
+        relation="parent_project",
+        subject_type="project",
+        subject_urn=project_urn,
     )
-    for relationship in existing:
-        await app.state.authz.delete_relationship(
-            resource_type="application",
-            resource_urn=application_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=relationship["subject"]["object"]["objectId"],
-        )
-    if project_urn is not None:
-        await app.state.authz.write_relationship(
-            resource_type="application",
-            resource_urn=application_urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=project_urn,
-        )
 
 
 # Resource tags/featured (`/api/resources/*` below): which SpiceDB

@@ -735,6 +735,9 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
     `_mask_confidential_properties`, that derived property is skipped
     entirely rather than computed from a missing value — never a
     misleading default silently leaking a shape of the masked data.
+    A derived property that fails to compute (plugin error, missing or
+    inactive Function) is left absent and named in `_failedDerivedFields`,
+    so callers can tell a failure from an empty value.
     Plugin lookups happen once per declared derived property, not once
     per row; a `link_aggregate`'s RelationType registry is likewise
     fetched at most once per call, not once per row.
@@ -757,10 +760,17 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
     }
 
     resolved: dict[str, tuple[dict, Any]] = {}
+    unresolved: list[str] = []
     for property_name, function_name in function_entries.items():
         registration = await function_registry.find_active_function_by_name(pool, function_name)
         if registration is not None:
             resolved[property_name] = (registration, function_registry.load_function_plugin(registration["manifest"]))
+        else:
+            logger.warning(
+                "derived property %r: no active function %r for %s, skipping it",
+                property_name, function_name, object_type_urn,
+            )
+            unresolved.append(property_name)
 
     relation_types = await ontology.list_relation_types(pool, principal.tenant_id) if link_aggregate_entries else []
     authorized_types = {object_type_name}
@@ -770,6 +780,7 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
     result_rows = []
     for row in rows:
         row = dict(row)
+        failed = list(unresolved)
         translated = {camel: row.get(source_col) for camel, source_col in property_mapping.items()}
         for property_name, (registration, plugin) in resolved.items():
             required = (registration["manifest"].get("input_schema") or {}).get("required", [])
@@ -786,6 +797,7 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
                     "derived property %r (function %r) failed for %s, skipping it for this row",
                     property_name, registration["manifest"].get("function_name"), object_type_urn,
                 )
+                failed.append(property_name)
                 continue
             if isinstance(output, dict) and property_name in output:
                 row[property_name] = output[property_name]
@@ -802,6 +814,7 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
                     "derived property %r (link_aggregate over %r) failed for %s, skipping it for this row",
                     property_name, rule.get("path"), object_type_urn,
                 )
+                failed.append(property_name)
                 continue
             if value is not None:
                 row[property_name] = value
@@ -813,9 +826,12 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
                     "derived property %r (struct_reducer over %r) failed for %s, skipping it for this row",
                     property_name, rule.get("property"), object_type_urn,
                 )
+                failed.append(property_name)
                 continue
             if value is not None:
                 row[property_name] = value
+        if failed:
+            row["_failedDerivedFields"] = failed
         result_rows.append(row)
     return result_rows
 

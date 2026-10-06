@@ -33,6 +33,9 @@ class _Client:
     async def write_relationship(self, **kwargs) -> None:
         self.writes.append(kwargs)
 
+    async def set_single_subject(self, **kwargs) -> None:
+        self.writes.append(kwargs)
+
 
 def _patch_lists(monkeypatch) -> None:
     async def object_types(_pool, tenant_id: str):
@@ -80,6 +83,10 @@ def test_two_tenants_are_seeded_from_their_urn_workspace(monkeypatch) -> None:
     assert ("hl:beta:east:relation-type:Invoice.customer", "hl:beta:global:workspace:east") in parents
     assert ("hl:gamma:global:shared-property-type:email", "hl:gamma:global:workspace:main") in parents
     assert not any(subject.endswith(":workspace:main") and resource.startswith("hl:beta:") for resource, subject in parents)
+    projects = {
+        write["resource_urn"]: write["subject_urn"] for write in client.writes if write["relation"] == "parent_project"
+    }
+    assert projects["hl:acme:main:object-type:Customer"] is None
 
 
 def test_global_parent_prefers_the_designated_workspace() -> None:

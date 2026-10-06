@@ -33,6 +33,7 @@ from holon_common import (
 from holon_common.audit import clear_durable_audit_hooks
 from holon_common.audit_store import install_durable_audit, list_events_page
 from holon_common.authz import PermissionClient
+from holon_common.correlation import instrument_correlation
 from holon_common.principal_status import (
     consume_identity_auth_events,
     hydrate_revocation_snapshot,
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Holon — Automation Platform", lifespan=lifespan)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+instrument_correlation(app)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
@@ -168,6 +170,7 @@ async def list_automation_audit_events(
     action: str | None = None,
     actor: str | None = None,
     outcome: str | None = None,
+    traceId: str | None = None,
     pageSize: int | None = None,
     pageToken: str | None = None,
 ) -> dict:
@@ -180,6 +183,7 @@ async def list_automation_audit_events(
         action=action,
         actor_urn=actor,
         outcome=outcome,
+        trace_id=traceId,
         page_size=50 if pageSize is None else pageSize,
         page_token=pageToken,
     )
