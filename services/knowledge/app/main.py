@@ -190,5 +190,9 @@ async def ready() -> dict:
             check_opensearch(OPENSEARCH_URL, OPENSEARCH_PASSWORD),
             check_iceberg_catalog(ICEBERG_CONFIG["catalog_uri"], ICEBERG_CONFIG["warehouse"]),
         ],
-        extra={"join_link_backfill": catalog.join_link_backfill_status},
+        extra={
+            "join_link_backfill": catalog.join_link_backfill_status,
+            "search_reindex": catalog.search_reindex_status,
+            "search_skipped_invalid": catalog.search_skipped_invalid,
+        },
     )

@@ -121,3 +121,29 @@ groups:
           description: >-
             Prometheus cannot scrape Holon /metrics (job=holon). Check NetworkPolicy,
             HOLON_METRICS_TOKEN, and Service endpoints.
+
+      # Search index drift: rows the serving store returns by key but search never finds.
+      - alert: HolonSearchRowsSkippedInvalid
+        expr: max by (tenant, object_type) (holon_search_rows_skipped_invalid) > 0
+        for: 30m
+        labels:
+          severity: warning
+          platform: holon
+        annotations:
+          summary: "Holon {{ $labels.object_type }} has {{ $value }} rows missing from search"
+          description: >-
+            Rows of the latest {{ $labels.object_type }} snapshot (tenant {{ $labels.tenant }})
+            fail Value Type validation and are left out of the search index. They are still
+            readable by key. Fix the source data or the property types, then re-sync.
+
+      - alert: HolonSearchReindexFailing
+        expr: max(holon_search_reindex_failed_object_types) > 0
+        for: 15m
+        labels:
+          severity: warning
+          platform: holon
+        annotations:
+          summary: "Holon startup search reindex failing for {{ $value }} object types"
+          description: >-
+            Knowledge keeps retrying, but these types stay invisible to search until it succeeds.
+            See search_reindex.failed in Knowledge /ready.
