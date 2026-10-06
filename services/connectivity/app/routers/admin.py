@@ -24,6 +24,7 @@ async def list_connectivity_audit_events(
     action: Optional[str] = None,
     actor: Optional[str] = None,
     outcome: Optional[str] = None,
+    traceId: Optional[str] = None,
     pageSize: Optional[int] = None,
     pageToken: Optional[str] = None,
     workspace_id: Optional[str] = None,
@@ -37,6 +38,7 @@ async def list_connectivity_audit_events(
         action=action,
         actor_urn=actor,
         outcome=outcome,
+        trace_id=traceId,
         page_size=50 if pageSize is None else pageSize,
         page_token=pageToken,
     )

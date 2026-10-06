@@ -29,6 +29,7 @@ from holon_common import (
     set_session_cookie,
 )
 from holon_common.audit import emit_audit
+from holon_common.correlation import current_correlation_id
 
 from .seed import (
     VALID_PROJECT_RELATIONS,
@@ -488,7 +489,7 @@ async def _enqueue_permission_event(
         workspace_id=wid,
         aggregate_type="Principal",
         aggregate_id=target_principal_urn,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{tid}/{target_principal_urn}",
         producer="identity-platform@0.1.0",
         actor=EventActor(type=actor.type, urn=actor.urn, on_behalf_of=actor.on_behalf_of),
