@@ -182,3 +182,42 @@ def test_existing_workspace_grant_still_reads_a_newly_project_scoped_object_type
 
     status, body = _request("GET", ontology_url("/objects/InventoryLevel"), token=jdoe_token)
     assert status == 200, body
+
+
+def _scope_inventory_level_to(token: str, project_urn: str) -> None:
+    status, draft = _request(
+        "POST", ontology_url("/objectTypes/InventoryLevel/versions"), token=token,
+        body={"description": "re-scoped to another project", "project_urn": project_urn},
+    )
+    assert status == 201, draft
+    status, published = _request(
+        "POST", ontology_url(f"/objectTypes/InventoryLevel/versions/{draft['version']}/publish"), token=token,
+    )
+    assert status == 200, published
+    assert published["project_urn"] == project_urn, published
+
+
+def test_moving_an_object_type_to_another_project_revokes_the_old_project_grant(
+    msmith_token: str, alice_token: str
+) -> None:
+    """The old `parent_project` edge must be gone, not just shadowed by the new one."""
+    old_name, old_urn = _create_project(msmith_token)
+    _, new_urn = _create_project(msmith_token)
+    _scope_inventory_level_to(msmith_token, old_urn)
+
+    alice_urn = f"hl:{TENANT_ID}:global:user:alice"
+    _grant_project_access(msmith_token, old_name, alice_urn)
+    try:
+        def _alice_reads() -> None:
+            status, body = _request("GET", ontology_url("/objects/InventoryLevel"), token=alice_token)
+            assert status == 200, body
+
+        def _alice_denied() -> None:
+            status, body = _request("GET", ontology_url("/objects/InventoryLevel"), token=alice_token)
+            assert status == 403, body
+
+        _wait_until(_alice_reads)
+        _scope_inventory_level_to(msmith_token, new_urn)
+        _wait_until(_alice_denied)
+    finally:
+        _revoke_project_access(msmith_token, old_name, alice_urn)

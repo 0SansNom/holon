@@ -180,6 +180,49 @@ class PermissionClient:
         )
         response.raise_for_status()
 
+    async def set_single_subject(
+        self,
+        *,
+        resource_type: str,
+        resource_urn: str,
+        relation: str,
+        subject_type: str,
+        subject_urn: Optional[str],
+    ) -> None:
+        """Make `subject_urn` the only subject of a single-valued relation
+        such as `parent_project`, or clear the relation when it is None.
+
+        Relationships are additive (`OPERATION_TOUCH`), so a Postgres column
+        that moves to a new value leaves the old edge behind unless it is
+        deleted. The touch and the deletes go in one `WriteRelationships`
+        call, which SpiceDB applies atomically. Stale edges are deleted
+        exactly as read: their subject ids are already encoded and must not
+        go through `spicedb_object_id` again.
+        """
+        existing = await self.read_relationships(
+            resource_type=resource_type, resource_urn=resource_urn, relation=relation
+        )
+        target = _subject(subject_type, subject_urn) if subject_urn is not None else None
+        stale = [rel for rel in existing if target is None or rel["subject"].get("object") != target["object"]]
+        if not stale and (target is None or existing):
+            return
+        updates: list[dict] = [{"operation": "OPERATION_DELETE", "relationship": rel} for rel in stale]
+        if target is not None:
+            updates.append(
+                {
+                    "operation": "OPERATION_TOUCH",
+                    "relationship": {
+                        "resource": {"objectType": resource_type, "objectId": _object_id(resource_urn)},
+                        "relation": relation,
+                        "subject": target,
+                    },
+                }
+            )
+        response = await self._client.post(
+            f"{self._spicedb_url}/v1/relationships/write", headers=self._spicedb_headers, json={"updates": updates}
+        )
+        response.raise_for_status()
+
     async def read_relationships(
         self, *, resource_type: str, resource_urn: str, relation: Optional[str] = None
     ) -> list[dict]:
