@@ -983,6 +983,26 @@ async def _resolve_one(
     return None
 
 
+async def instance_not_found(
+    object_type: str, tenant_id: str, instance_id, *, as_of: Optional[datetime] = None
+) -> HolonError:
+    """The 404 for a `_resolve_one` miss. Called only after the caller passed
+    the ObjectType read check, so saying the type has no data yet reveals
+    nothing about the instance; a marking-denied instance stays a plain miss.
+    """
+    if as_of is None and not await serving_store.is_materialized(pool, object_type, tenant_id):
+        return HolonError.not_found(
+            "ObjectTypeNotMaterialized",
+            f"{object_type} has not been materialized yet; instances become readable after its first sync",
+            object_type=object_type,
+            instance_id=instance_id,
+        )
+    detail = f"{object_type}/{instance_id} not found"
+    if as_of is not None:
+        detail += f" as of {as_of.isoformat()} (no history recorded yet at that time)"
+    return HolonError.not_found("ObjectInstanceNotFound", detail, object_type=object_type, instance_id=instance_id)
+
+
 async def _resolve_many(
     object_type: str,
     tenant_id: str,

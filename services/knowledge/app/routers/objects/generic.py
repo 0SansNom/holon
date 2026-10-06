@@ -117,12 +117,7 @@ async def get_generic_object(
         object_type, principal.tenant_id, instance_id, fetch_fn, "id_value", as_of=as_of, principal=principal
     )
     if row is None:
-        detail = f"{object_type}/{instance_id} not found"
-        if as_of is not None:
-            detail += f" as of {as_of.isoformat()} (no history recorded yet at that time)"
-        raise HolonError.not_found(
-            "ObjectInstanceNotFound", detail, object_type=object_type, instance_id=instance_id
-        )
+        raise await core.instance_not_found(object_type, principal.tenant_id, instance_id, as_of=as_of)
     from ...api.object_wire import enrich_object_row
 
     # Historical read reports the object's own state as of that time —
