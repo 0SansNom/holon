@@ -135,3 +135,11 @@ def test_semantic_isolation_passes_caller_tenant(monkeypatch) -> None:
         )
     )
     assert seen["tenant_id"] == "other-tenant"
+
+
+def test_object_card_marks_failed_derived_fields_as_unavailable() -> None:
+    card = context_builder._object_card(
+        "Customer", "7", {"name": "Acme", "_failedDerivedFields": ["score"], "materializedAt": "2026-10-01"}
+    )
+    assert "score: <unavailable — computation failed>" in card.text
+    assert "_failedDerivedFields" not in card.text
