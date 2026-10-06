@@ -295,6 +295,14 @@ async def apply_structural_edits(
                 """,
                 object_type, tenant_id, new_id, json.dumps(data, default=str),
             )
+            await conn.execute(
+                """
+                INSERT INTO object_type_materialization (object_type, tenant_id, source_snapshot_id)
+                VALUES ($1, $2, -1)
+                ON CONFLICT (object_type, tenant_id) DO NOTHING
+                """,
+                object_type, tenant_id,
+            )
             objects.append({
                 "kind": "create_object",
                 "object_type": object_type,
