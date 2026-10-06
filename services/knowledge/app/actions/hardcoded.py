@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from holon_common import EventActor, EventEnvelope, Principal
+from holon_common.correlation import current_correlation_id
 
 WORKFLOW_ENGINE_URN_NAME = "automation-workflow-engine"
 
@@ -18,7 +19,7 @@ def _event(*, event_type: str, tenant_id: str, workspace_id: str, instance_urn: 
         workspace_id=workspace_id,
         aggregate_type="ObjectType",
         aggregate_id=instance_urn,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{tenant_id}/{instance_urn}",
         producer="knowledge-platform@0.1.0",
         actor=EventActor(type=actor.type, urn=actor.urn, on_behalf_of=actor.on_behalf_of),

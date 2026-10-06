@@ -14,6 +14,7 @@ import httpx
 
 from .knowledge_urls import holon_url, ontology_url
 from holon_common import EventActor, EventEnvelope, build_urn, outbox
+from holon_common.correlation import current_correlation_id
 
 from . import tool_plugin_registry, tool_plugin_sandbox
 from .llm_gateway import LLMClient
@@ -230,7 +231,7 @@ def _session_completed_event(session: dict, *, status: str, consumed: dict) -> E
         tenant_id=session["tenant_id"],
         aggregate_type="AgentSession",
         aggregate_id=session["urn"],
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         causation_id=session.get("causation_id"),
         partition_key=f"{session['tenant_id']}/{session['urn']}",
         producer="intelligence-platform@0.1.0",

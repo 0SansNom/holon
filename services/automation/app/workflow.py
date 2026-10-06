@@ -26,6 +26,7 @@ from holon_common import (
     outbox,
 )
 from holon_common.audit import emit_audit
+from holon_common.correlation import current_correlation_id
 
 logger = logging.getLogger("automation.workflow")
 
@@ -131,7 +132,7 @@ def _publish_event(*, tenant_id: str, workspace_id: str, instance_urn: str, acti
         workspace_id=workspace_id,
         aggregate_type="Workflow",
         aggregate_id=instance_urn,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{tenant_id}/{instance_urn}",
         producer="automation-platform@0.1.0",
         actor=EventActor(type=actor.type, urn=actor.urn, on_behalf_of=actor.on_behalf_of),

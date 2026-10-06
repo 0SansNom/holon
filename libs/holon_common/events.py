@@ -19,6 +19,7 @@ from aiokafka.errors import KafkaConnectionError
 from pydantic import BaseModel, Field, field_validator
 
 from . import registry
+from .correlation import set_correlation_id
 from .observability import retry_with_backoff
 from .urn import build as build_urn
 
@@ -194,6 +195,7 @@ class EventConsumer:
                 if await self._quarantine(msg.value, exc):
                     await self.commit()
                 continue
+            set_correlation_id(envelope.correlation_id)
             yield envelope
 
     async def quarantine_envelope(self, envelope: EventEnvelope, exc: Exception) -> bool:

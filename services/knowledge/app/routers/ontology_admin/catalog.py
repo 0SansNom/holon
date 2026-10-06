@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from pyiceberg.exceptions import NoSuchTableError
 
 from holon_common import EventActor, EventEnvelope, HolonError, Principal, build_urn
+from holon_common.correlation import current_correlation_id
 
 from ... import actions, catalog, glossary, ontology, ontology_health, query_log, resolver
 from ... import core
@@ -173,7 +174,7 @@ async def generate_join_dataset(
             workspace_id=workspace_id,
             aggregate_type="Connector",
             aggregate_id=connector_urn,
-            correlation_id=event_id,
+            correlation_id=current_correlation_id() or event_id,
             partition_key=f"{principal.tenant_id}/{payload['dataset_urn']}",
             producer="knowledge-platform@0.1.0",
             actor=EventActor(type=principal.type, urn=principal.urn, on_behalf_of=principal.on_behalf_of),
