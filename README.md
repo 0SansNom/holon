@@ -22,8 +22,7 @@ What that means in practice:
   (not a general AI platform). Same tools and policy as a human session;
   off by default in production (see `services/intelligence/BETA.md`).
 
-One deployment per tenant (subsidiary): the data model is multi-tenant,
-the runtime is not yet — see [`docs/tenancy.md`](docs/tenancy.md). MIT.
+One deployment per tenant (subsidiary) — see [Tenancy](#tenancy). MIT.
 
 It is **not production-ready**. Empty instance on first boot; you
 create ontology, connectors, and principals through the APIs.
@@ -48,6 +47,15 @@ Six FastAPI services, each with its own Postgres:
 
 Infra: Postgres, MinIO, Iceberg REST, Redpanda, SpiceDB, OPA,
 OpenSearch, Qdrant. Shared primitives in `libs/holon_common`.
+
+## Tenancy
+
+URNs, rows, search documents, SpiceDB tuples and audit records all carry
+a tenant, and requests are scoped by the caller's token. The runtime is
+narrower: each process reads one `HOLON_TENANT_ID` / `HOLON_WORKSPACE_ID`
+pair (Helm `bootstrap.tenantId` / `bootstrap.workspaceId`), and service
+accounts, background jobs (syncs, workflows, indexing), Experience and
+default workspaces run as that pair. Run one deployment per tenant.
 
 ## Run
 
