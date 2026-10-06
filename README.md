@@ -22,7 +22,8 @@ What that means in practice:
   (not a general AI platform). Same tools and policy as a human session;
   off by default in production (see `services/intelligence/BETA.md`).
 
-One instance, N orgs (filiales). MIT.
+One deployment per tenant (subsidiary): the data model is multi-tenant,
+the runtime is not yet — see [`docs/tenancy.md`](docs/tenancy.md). MIT.
 
 It is **not production-ready**. Empty instance on first boot; you
 create ontology, connectors, and principals through the APIs.
