@@ -159,8 +159,12 @@ def _object_card(object_type: str, instance_id: str, data: dict) -> ContextItem:
     """Render deterministic textual representation of an object instance for LLM context."""
     masked_fields = set(data.get("_maskedFields") or [])
     fields = {
-        k: v for k, v in data.items() if k not in ("materializedAt", "sourceLagSeconds", "degraded", "asOf", "_maskedFields")
+        k: v
+        for k, v in data.items()
+        if k not in ("materializedAt", "sourceLagSeconds", "degraded", "asOf", "_maskedFields", "_failedDerivedFields")
     }
+    for name in data.get("_failedDerivedFields") or []:
+        fields.setdefault(name, "<unavailable — computation failed>")
     field_text = ", ".join(
         f"{k}: {'<forbidden — masked by permission>' if k in masked_fields else v}" for k, v in fields.items()
     )

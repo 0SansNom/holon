@@ -8,6 +8,7 @@ export const OBJECT_METADATA_KEYS = new Set([
   "sourceLagSeconds",
   "degraded",
   "_maskedFields",
+  "_failedDerivedFields",
   "title",
   "asOf",
   "__apiName",

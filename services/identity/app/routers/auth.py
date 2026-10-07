@@ -219,6 +219,7 @@ async def list_identity_audit_events(
     action: str | None = None,
     actor: str | None = None,
     outcome: str | None = None,
+    traceId: str | None = None,
     pageSize: int | None = None,
     pageToken: str | None = None,
     workspace_id: str | None = None,
@@ -258,6 +259,7 @@ async def list_identity_audit_events(
         action=action,
         actor_urn=actor,
         outcome=outcome,
+        trace_id=traceId,
         after_id=after_id,
         page_size=page_size + 1,
     )

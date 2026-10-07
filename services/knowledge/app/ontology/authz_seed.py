@@ -84,14 +84,13 @@ async def _write_parent(
         subject_type="workspace",
         subject_urn=workspace_urn(tenant_id, _parent_workspace_id(urn, workspace_id)),
     )
-    if project_urn:
-        await client.write_relationship(
-            resource_type=resource_type,
-            resource_urn=urn,
-            relation="parent_project",
-            subject_type="project",
-            subject_urn=project_urn,
-        )
+    await client.set_single_subject(
+        resource_type=resource_type,
+        resource_urn=urn,
+        relation="parent_project",
+        subject_type="project",
+        subject_urn=project_urn or None,
+    )
 
 
 async def discover_seed_pairs(

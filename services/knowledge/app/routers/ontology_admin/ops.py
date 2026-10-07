@@ -59,6 +59,7 @@ async def list_audit_events(
     action: Optional[str] = None,
     actor: Optional[str] = None,
     outcome: Optional[str] = None,
+    traceId: Optional[str] = None,
     pageSize: Optional[int] = None,
     pageToken: Optional[str] = None,
 ) -> dict:
@@ -92,6 +93,7 @@ async def list_audit_events(
         action=action,
         actor_urn=actor,
         outcome=outcome,
+        trace_id=traceId,
         after_id=after_id,
         page_size=page_size + 1,
     )
