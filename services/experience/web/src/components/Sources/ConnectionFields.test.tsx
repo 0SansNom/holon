@@ -17,6 +17,30 @@ function Harness() {
   );
 }
 
+function ConstrainedHarness() {
+  const [name, setName] = useState("erp");
+  const [dialect, setDialect] = useState("postgres");
+  const [password, setPassword] = useState("");
+  return (
+    <ConnectionFields
+      fields={[
+        { kind: "text", id: "name", label: "Name", value: name, onChange: setName, disabled: true },
+        {
+          kind: "select",
+          id: "dialect",
+          label: "Dialect",
+          value: dialect,
+          onChange: setDialect,
+          helperText: "Wire protocol family",
+          disabled: true,
+          options: [{ value: "postgres", label: "PostgreSQL" }],
+        },
+        { kind: "secret", id: "password", label: "Password", value: password, onChange: setPassword },
+      ]}
+    />
+  );
+}
+
 describe("ConnectionFields", () => {
   it("renders a url field and a secret reference", async () => {
     const user = userEvent.setup();
@@ -32,5 +56,15 @@ describe("ConnectionFields", () => {
     expect(screen.getByText(/Holon stores the reference/)).toBeInTheDocument();
     await user.type(secret, "env:ERP_PASSWORD");
     expect(secret).toHaveValue("env:ERP_PASSWORD");
+  });
+
+  it("disables a field, shows select help, and masks a secret", () => {
+    render(<ConstrainedHarness />);
+
+    expect(screen.getByLabelText("Name")).toBeDisabled();
+    const dialect = screen.getByLabelText("Dialect");
+    expect(dialect).toBeDisabled();
+    expect(screen.getByText("Wire protocol family")).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
   });
 });
