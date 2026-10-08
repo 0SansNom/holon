@@ -23,7 +23,7 @@ from pyarrow.lib import ArrowException
 from app.file_cursor import info_mtime_ns, select_files
 from app.source_registry_base import (
     ConnectionInUseError,
-    SourceConflictError,
+    SourceConflictError as SourceConflictError,
     SourceConfigError,
     SourceFetchError,
     assert_dataset_available,

@@ -11,12 +11,11 @@ from typing import Any, Optional
 
 import asyncpg
 
+from .lifecycle import REGISTRY_LIFECYCLE_STATUSES
 from .object_types import get_object_type
 from .urns import object_type_urn
 
 VALID_OPS = frozenset({"eq", "neq", "in", "gt", "gte", "lt", "lte", "contains"})
-from .lifecycle import REGISTRY_LIFECYCLE_STATUSES
-
 VALID_LIFECYCLE = REGISTRY_LIFECYCLE_STATUSES
 VALID_VISIBILITY = frozenset({"prominent", "normal", "hidden"})
 

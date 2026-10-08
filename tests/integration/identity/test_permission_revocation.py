@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, TENANT_ID, _request, ontology_url, holon_url
+from conftest import IDENTITY, TENANT_ID, _request, ontology_url
 
 
 KENJI_URN = f"hl:{TENANT_ID}:global:user:kenji"

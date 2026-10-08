@@ -2,42 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from pyiceberg.exceptions import NoSuchTableError
 
-from holon_common import EventActor, EventEnvelope, HolonError, Principal, build_urn
+from holon_common import HolonError, Principal
 
-from ... import actions, catalog, glossary, ontology, ontology_health, query_log, resolver
+from ... import catalog, ontology
 from ... import core
-from ...paging import interface_instance_key
-from ..objects.paging_deps import page_response, paging_query
 from ._auth import (
     IDENTITY_URL,
     _ALLOWED_CLASSIFICATIONS,
-    _authorize_marking_administer,
     _authorize_ontology_governance,
     _authorize_ontology_write,
-    _authorize_relation_type,
-    _authorize_shared_property_type,
-    _authorize_value_type,
-    _authorize_workspace_read,
     _identity_validation_token,
     _link_object_type_to_project,
-    _link_relation_type_to_project,
-    _link_shared_property_type_to_project,
-    _link_value_type_to_project,
-    _seed_relation_type_authz,
-    _seed_shared_property_type_authz,
-    _seed_value_type_authz,
-    _validate_optional_project_urn,
-    _validate_resource_type,
 )
 
 router = APIRouter()
@@ -160,8 +142,8 @@ async def propose_object_type_version(
     await _authorize_ontology_write(principal, workspace_id)
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     try:
         return await ontology.propose_object_type_version(
             core.pool,
@@ -197,8 +179,8 @@ async def list_object_type_versions(
 ) -> list[dict]:
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     return await ontology.list_object_type_versions(core.pool, object_type_urn)
 
 
@@ -213,8 +195,8 @@ async def publish_object_type_version(
     await _authorize_ontology_governance(principal, workspace_id)
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     try:
         result = await ontology.publish_object_type_version(
             core.pool,
@@ -301,8 +283,8 @@ async def create_branch(name: str, request: CreateBranchRequest, principal: Prin
     await _authorize_ontology_write(principal, workspace_id)
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     try:
         return await ontology.create_branch(
             core.pool,
@@ -329,8 +311,8 @@ async def list_branches(
 ) -> list[dict]:
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     return await ontology.list_branches(core.pool, object_type_urn)
 
 
@@ -340,8 +322,8 @@ async def get_branch(
 ) -> dict:
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     branch = await ontology.get_branch(core.pool, object_type_urn, branch_name)
     if branch is None:
         raise HolonError.not_found('BranchNotFound', f"unknown branch: {branch_name}")
@@ -358,8 +340,8 @@ async def update_branch_draft(
     await _authorize_ontology_write(principal, workspace_id)
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     try:
         return await ontology.update_branch_draft(
             core.pool,
@@ -392,8 +374,8 @@ async def review_branch(
     await _authorize_ontology_governance(principal, workspace_id)
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     try:
         result = await ontology.review_branch(
             core.pool,
@@ -425,8 +407,8 @@ async def list_branch_reviews(
 ) -> list[dict]:
     try:
         object_type_urn = await core._object_type_urn_for(name, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {name}") from exc
     branch = await ontology.get_branch(core.pool, object_type_urn, branch_name)
     if branch is None:
         raise HolonError.not_found('BranchNotFound', f"unknown branch: {branch_name}")

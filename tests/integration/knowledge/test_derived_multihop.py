@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import CONNECTIVITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, _request, ontology_url
 
 
 CUSTOMER_ID = 1

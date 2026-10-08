@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _unique_name, as_items, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, TENANT_ID, _unique_name, as_items, ontology_url, holon_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "libs"))
 

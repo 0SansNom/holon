@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, _request, _unique_name, ontology_url
 
 
 def _provision_filiale(msmith_token: str) -> tuple[str, str]:

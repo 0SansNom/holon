@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import IDENTITY, _request, ontology_url
 
 
 def _token_for(principal_urn: str) -> str:

@@ -3,25 +3,21 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from typing import Optional
 
 import asyncpg
-import httpx
 
 from holon_common import EventActor, EventEnvelope, build_urn, outbox
 from holon_common.correlation import current_correlation_id
 
 from . import markings as markings_module
 from .object_types import get_object_type, get_object_type_version, validate_ot_metadata
-from .type_classes import normalize_type_classes
-from .render_hints import ALLOWED_RENDER_HINTS, normalize_render_hints
 
 
 from .publishing_validate import (
     _validate_implements,
-    assert_interface_tighten_compatible,  # re-exported; interfaces.py imports it from here
+    assert_interface_tighten_compatible as assert_interface_tighten_compatible,  # interfaces.py imports it from here
     _validate_derived_properties,
     _validate_property_formats,
     _validate_conditional_formats,

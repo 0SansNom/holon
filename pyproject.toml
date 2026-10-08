@@ -1,0 +1,11 @@
+[tool.ruff]
+target-version = "py311"
+src = ["services", "libs", "cli", "tests"]
+
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9", "B"]
+ignore = [
+    "BLE001",  # bare except Exception; narrowing them is a separate change
+    "B008",    # FastAPI Depends() in argument defaults
+    "B905",    # zip(strict=True) would turn truncation into an exception
+]

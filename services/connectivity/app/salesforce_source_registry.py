@@ -19,7 +19,7 @@ from app.cursor_window import advance_cursor
 from app.pinned_http import pinned_transport
 from app.source_registry_base import (
     ConnectionInUseError,
-    SourceConflictError,
+    SourceConflictError as SourceConflictError,
     SourceConfigError,
     SourceFetchError,
     assert_dataset_available,

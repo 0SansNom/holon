@@ -9,7 +9,7 @@ import urllib.request
 import uuid
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, ontology_url, holon_url
+from conftest import IDENTITY, holon_url
 
 
 def _request(method: str, url: str, *, token: str | None = None):
