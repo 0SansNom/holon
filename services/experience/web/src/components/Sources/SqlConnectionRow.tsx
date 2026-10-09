@@ -3,6 +3,7 @@ import { Alert, Button, Card, Tag } from "@blueprintjs/core";
 import { useDeleteSqlConnection } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { SqlConnection } from "../../api/connectivity";
+import { DIALECT_LABELS } from "./SqlConnectionDialog";
 
 export function SqlConnectionRow({ connection, onEdit }: { connection: SqlConnection; onEdit: () => void }) {
   const del = useDeleteSqlConnection();
@@ -34,7 +35,7 @@ export function SqlConnectionRow({ connection, onEdit }: { connection: SqlConnec
             <Tag minimal icon="database">
               SQL
             </Tag>
-            <Tag minimal>{connection.dialect ?? "postgres"}</Tag>
+            <Tag minimal>{DIALECT_LABELS[connection.dialect ?? "postgres"] ?? connection.dialect}</Tag>
           </div>
         </div>
         <div className="hl-source-row-buttons">
