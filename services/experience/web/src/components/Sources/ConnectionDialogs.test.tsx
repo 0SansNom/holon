@@ -52,6 +52,7 @@ const sqlEditing: SqlConnection = {
   port: 5432,
   database: "analytics",
   username: "readonly_user",
+  use_tls: false,
   has_password: true,
   created_by_urn: "hl:acme:global:user:ada",
   created_at: "2026-01-01T00:00:00Z",
@@ -165,6 +166,27 @@ describe("connection dialogs", () => {
     expect(screen.getByLabelText("Warehouse")).toBeInTheDocument();
     expect(screen.getByLabelText("Account / host")).toBeInTheDocument();
     expect(screen.getByLabelText("Port")).toHaveValue(443);
+  });
+
+  it("defaults TLS from the dialect and hides it for Snowflake", async () => {
+    const user = userEvent.setup();
+    render(<SqlConnectionDialog editing={null} onClose={() => {}} />);
+    expect(screen.getByLabelText("Require TLS")).not.toBeChecked();
+
+    await user.selectOptions(screen.getByLabelText("Dialect"), "azure_synapse_serverless");
+    expect(screen.getByLabelText("Require TLS")).toBeChecked();
+    expect(screen.getByText(/Serverless allows OPENROWSET/)).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Dialect"), "snowflake");
+    expect(screen.queryByLabelText("Require TLS")).not.toBeInTheDocument();
+  });
+
+  it("sends the TLS choice with the connection", async () => {
+    const user = userEvent.setup();
+    render(<SqlConnectionDialog editing={sqlEditing} onClose={() => {}} />);
+    await user.click(screen.getByLabelText("Require TLS"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(hooks.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ dialect: "postgres", use_tls: true }));
   });
 
   it("shows the API error in the SQL callout", async () => {

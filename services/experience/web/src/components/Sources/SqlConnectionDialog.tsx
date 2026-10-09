@@ -12,9 +12,11 @@ const DEFAULT_PORTS: Record<SqlDialect, number> = {
   enterprisedb: 5444,
   greenplum: 5432,
   mysql: 3306,
+  mariadb: 3306,
   singlestore: 3306,
   mssql: 1433,
   azure_synapse: 1433,
+  azure_synapse_serverless: 1433,
   snowflake: 443,
 };
 
@@ -24,11 +26,27 @@ export const DIALECT_LABELS: Record<SqlDialect, string> = {
   cockroachdb: "CockroachDB",
   enterprisedb: "EnterpriseDB",
   greenplum: "Greenplum",
-  mysql: "MySQL / MariaDB",
+  mysql: "MySQL",
+  mariadb: "MariaDB",
   singlestore: "SingleStore",
   mssql: "SQL Server",
   azure_synapse: "Azure Synapse (dedicated)",
+  azure_synapse_serverless: "Azure Synapse (serverless)",
   snowflake: "Snowflake",
+};
+
+const TLS_BY_DEFAULT = new Set<SqlDialect>([
+  "alloydb",
+  "cockroachdb",
+  "azure_synapse",
+  "azure_synapse_serverless",
+]);
+
+const DIALECT_HELP: Partial<Record<SqlDialect, string>> = {
+  singlestore: "MySQL protocol, port 3306. SingleStore has no Postgres listener.",
+  azure_synapse: "Dedicated pools reject OPENROWSET. Host looks like workspace.sql.azuresynapse.net.",
+  azure_synapse_serverless:
+    "Serverless allows OPENROWSET for files. Host looks like workspace-ondemand.sql.azuresynapse.net.",
 };
 
 function isDefaultPort(port: string, dialect: SqlDialect): boolean {
@@ -48,6 +66,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState("");
   const [secretRef, setSecretRef] = useState("");
+  const [useTls, setUseTls] = useState(editing != null ? editing.use_tls === true : TLS_BY_DEFAULT.has("postgres"));
   const [error, setError] = useState<string | null>(null);
   const register = useRegisterSqlConnection();
 
@@ -55,6 +74,9 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
     setDialect(next);
     if (isDefaultPort(port, dialect)) {
       setPort(String(DEFAULT_PORTS[next]));
+    }
+    if (!isEditing) {
+      setUseTls(TLS_BY_DEFAULT.has(next));
     }
   }
 
@@ -71,6 +93,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         username,
         password: requireSecretRef ? undefined : password || undefined,
         secret_ref: secretRef || undefined,
+        use_tls: dialect === "snowflake" ? undefined : useTls,
       });
       onClose();
     } catch (err) {
@@ -97,6 +120,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
       label: "Dialect",
       value: dialect,
       onChange: (value) => onDialectChange(value as SqlDialect),
+      helperText: DIALECT_HELP[dialect],
       disabled: isEditing,
       options: (Object.keys(DIALECT_LABELS) as SqlDialect[]).map((d) => ({ value: d, label: DIALECT_LABELS[d] })),
     },
@@ -140,6 +164,19 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
           },
         ]
       : []),
+    ...(!isSnowflake
+      ? [
+          {
+            kind: "checkbox" as const,
+            id: "sql-connection-use-tls",
+            label: "Require TLS",
+            checked: useTls,
+            onChange: setUseTls,
+            helperText:
+              "Verified TLS with the system trust store. Uncheck for a local proxy. Changing this on an existing connection requires the secret again.",
+          },
+        ]
+      : []),
     {
       kind: "text",
       id: "sql-connection-username",
@@ -176,7 +213,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
+            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/MariaDB/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
         </p>
         <ConnectionFields fields={fields} />
         {error && (
