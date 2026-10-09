@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button, Callout, Dialog, DialogBody, DialogFooter, FormGroup, InputGroup } from "@blueprintjs/core";
+import { Button, Callout, Dialog, DialogBody, DialogFooter } from "@blueprintjs/core";
 import { useRegisterConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { GenericConnection } from "../../api/connectivity";
-import { SecretRefField } from "./ConnectionFields";
+import { ConnectionFields, type ConnectionField } from "./ConnectionFields";
 
 export function ConnectionDialog({ editing, onClose }: { editing: GenericConnection | null; onClose: () => void }) {
   const isEditing = editing !== null;
@@ -34,6 +34,57 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
   }
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(authHeaderValue));
+  const fields: ConnectionField[] = [
+    {
+      kind: "text",
+      id: "connection-name",
+      label: "Name",
+      value: name,
+      onChange: setName,
+      placeholder: "my_api_credential",
+      helperText: "e.g. hubspot_prod — just a label, not the dataset name of any one source",
+      disabled: isEditing,
+    },
+    {
+      kind: "text",
+      id: "connection-allowed-origin",
+      label: "Allowed origin",
+      value: allowedOrigin,
+      onChange: setAllowedOrigin,
+      placeholder: "https://api.example.com",
+      helperText:
+        "The only origin sources using this connection may call, e.g. https://api.hubapi.com. Changing it requires re-entering the secret.",
+    },
+    {
+      kind: "text",
+      id: "connection-auth-header-name",
+      label: "Auth header name",
+      value: authHeaderName,
+      onChange: setAuthHeaderName,
+      placeholder: "Authorization",
+      helperText: 'e.g. "Authorization" or "X-API-Key"',
+    },
+    ...(!requireSecretRef
+      ? [
+          {
+            kind: "secret" as const,
+            id: "connection-auth-header-value",
+            label: "Auth header value",
+            value: authHeaderValue,
+            onChange: setAuthHeaderValue,
+            placeholder: isEditing ? "•••••••• (unchanged)" : "Bearer sk_live_...",
+            helperText: isEditing ? "A value is already set — leave blank to keep it." : undefined,
+          },
+        ]
+      : []),
+    {
+      kind: "secretRef",
+      id: "connection-secret-ref",
+      value: secretRef,
+      onChange: setSecretRef,
+      placeholder: "env:HOLON_CONN_<TENANT>__HUBSPOT_TOKEN",
+    },
+  ];
 
   return (
     <Dialog isOpen title={isEditing ? "Edit connection" : "New connection"} onClose={onClose} style={{ width: 440 }}>
@@ -43,46 +94,7 @@ export function ConnectionDialog({ editing, onClose }: { editing: GenericConnect
             ? "Rotate the auth header — the name stays fixed since it's what every source pointed at this connection already references."
             : "A reusable credential — point as many sources at this as you like without re-entering the secret each time."}
         </p>
-        <FormGroup label="Name" helperText="e.g. hubspot_prod — just a label, not the dataset name of any one source">
-          <InputGroup
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="my_api_credential"
-            disabled={isEditing}
-          />
-        </FormGroup>
-        <FormGroup
-          label="Allowed origin"
-          helperText="The only origin sources using this connection may call, e.g. https://api.hubapi.com. Changing it requires re-entering the secret."
-        >
-          <InputGroup
-            value={allowedOrigin}
-            onChange={(e) => setAllowedOrigin(e.target.value)}
-            placeholder="https://api.example.com"
-          />
-        </FormGroup>
-        <FormGroup label="Auth header name" helperText='e.g. "Authorization" or "X-API-Key"'>
-          <InputGroup value={authHeaderName} onChange={(e) => setAuthHeaderName(e.target.value)} placeholder="Authorization" />
-        </FormGroup>
-        {!requireSecretRef && (
-          <FormGroup
-            label="Auth header value"
-            helperText={isEditing ? "A value is already set — leave blank to keep it." : undefined}
-          >
-            <InputGroup
-              type="password"
-              value={authHeaderValue}
-              onChange={(e) => setAuthHeaderValue(e.target.value)}
-              placeholder={isEditing ? "•••••••• (unchanged)" : "Bearer sk_live_..."}
-            />
-          </FormGroup>
-        )}
-        <SecretRefField
-          id="connection-secret-ref"
-          value={secretRef}
-          onChange={setSecretRef}
-          placeholder="env:HOLON_CONN_<TENANT>__HUBSPOT_TOKEN"
-        />
+        <ConnectionFields fields={fields} />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}

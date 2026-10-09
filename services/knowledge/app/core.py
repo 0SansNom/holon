@@ -718,6 +718,19 @@ def _compute_struct_reducer(rule: dict, object_type: dict, row: dict) -> Optiona
     return _reduce_array(array_value, rule.get("reducer"), rule.get("by"))
 
 
+def _skip_derived_property(property_name: str, exc: BaseException) -> None:
+    """One derived property failed. It stays off the row; the read stays 200.
+
+    Function plugins do external I/O and can fail on a downstream outage.
+    Link aggregates and struct reducers are isolated the same way.
+    """
+    logger.exception(
+        "derived property %r failed, skipping it for this row",
+        property_name,
+        exc_info=exc,
+    )
+
+
 async def _apply_derived_properties(object_type_urn: str, rows: list[dict], principal: Principal) -> list[dict]:
     """Read-time computation of every `derived_properties` entry — a
     plain string is a Function plugin invocation (the original,
@@ -788,15 +801,8 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
                 continue
             try:
                 output = await plugin.call(**translated)
-            except Exception:
-                # Function plugins performing external I/O (such as HTTP calls to
-                # Intelligence) may fail due to downstream outages or model errors.
-                # Isolate plugin execution errors so a single failed derived property
-                # leaves that property absent rather than failing the entire read.
-                logger.exception(
-                    "derived property %r (function %r) failed for %s, skipping it for this row",
-                    property_name, registration["manifest"].get("function_name"), object_type_urn,
-                )
+            except Exception as exc:
+                _skip_derived_property(property_name, exc)
                 failed.append(property_name)
                 continue
             if isinstance(output, dict) and property_name in output:
@@ -809,11 +815,8 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
                     property_mapping_cache=property_mapping_cache,
                     neighbor_property_mapping_cache=neighbor_property_mapping_cache,
                 )
-            except Exception:
-                logger.exception(
-                    "derived property %r (link_aggregate over %r) failed for %s, skipping it for this row",
-                    property_name, rule.get("path"), object_type_urn,
-                )
+            except Exception as exc:
+                _skip_derived_property(property_name, exc)
                 failed.append(property_name)
                 continue
             if value is not None:
@@ -821,11 +824,8 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
         for property_name, rule in struct_reducer_entries.items():
             try:
                 value = _compute_struct_reducer(rule, object_type, row)
-            except Exception:
-                logger.exception(
-                    "derived property %r (struct_reducer over %r) failed for %s, skipping it for this row",
-                    property_name, rule.get("property"), object_type_urn,
-                )
+            except Exception as exc:
+                _skip_derived_property(property_name, exc)
                 failed.append(property_name)
                 continue
             if value is not None:
