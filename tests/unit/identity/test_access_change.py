@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
 import sys
+import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,7 +32,13 @@ sys.path.insert(0, str(REPO / "services" / "identity"))
 
 from holon_common import HolonError, Principal  # noqa: E402
 from app import access_ops, deps  # noqa: E402
-from app.routers import directory  # noqa: E402
+
+# Load directory without `routers/__init__.py` (that pulls auth Form routes and
+# needs python-multipart, which unit CI may not have installed yet).
+_routers = types.ModuleType("app.routers")
+_routers.__path__ = [str(REPO / "services" / "identity" / "app" / "routers")]
+sys.modules.setdefault("app.routers", _routers)
+directory = importlib.import_module("app.routers.directory")
 
 
 def _principal(urn: str, type_: str = "user") -> Principal:
