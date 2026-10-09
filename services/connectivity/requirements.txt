@@ -16,7 +16,7 @@ pymongo==4.18.2
 paramiko==5.0.0
 google-auth==2.38.0
 # 4.x drops the cffi<2 pin that conflicted with cryptography>=50.
-snowflake-connector-python==4.7.1
+snowflake-connector-python==4.7.3
 # Owns the botocore window (pulled via pyiceberg[s3fs]); Snowflake's unpinned
 # boto3 follows it. Bump this rather than pinning boto3/botocore by hand.
 aiobotocore==3.9.1
