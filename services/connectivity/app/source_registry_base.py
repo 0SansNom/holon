@@ -227,3 +227,116 @@ def make_column_cursor_commit(
         )
 
     return _commit
+
+
+def _require_source_table(table: str) -> None:
+    if table not in _ALLOWED_SOURCE_TABLES:
+        raise ValueError(f"unknown source table {table!r}")
+
+
+async def get_source_row(
+    pool: asyncpg.Pool, *, table: str, public_columns: str, tenant_id: str, name: str
+) -> Optional[dict]:
+    _require_source_table(table)
+    row = await pool.fetchrow(
+        f"SELECT {public_columns} FROM {table} WHERE tenant_id = $1 AND name = $2",
+        tenant_id,
+        name,
+    )
+    return None if row is None else dict(row)
+
+
+async def list_sources_for_tenant(
+    pool: asyncpg.Pool, *, table: str, public_columns: str, tenant_id: str
+) -> list[dict]:
+    _require_source_table(table)
+    rows = await pool.fetch(
+        f"SELECT {public_columns} FROM {table} WHERE tenant_id = $1 ORDER BY name",
+        tenant_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def delete_source_row(pool: asyncpg.Pool, *, table: str, tenant_id: str, name: str) -> None:
+    _require_source_table(table)
+    await pool.execute(f"DELETE FROM {table} WHERE tenant_id = $1 AND name = $2", tenant_id, name)
+
+
+async def set_source_status_row(
+    pool: asyncpg.Pool,
+    *,
+    table: str,
+    public_columns: str,
+    tenant_id: str,
+    name: str,
+    status: str,
+) -> Optional[dict]:
+    _require_source_table(table)
+    await pool.execute(
+        f"UPDATE {table} SET status = $1 WHERE tenant_id = $2 AND name = $3",
+        status,
+        tenant_id,
+        name,
+    )
+    return await get_source_row(
+        pool, table=table, public_columns=public_columns, tenant_id=tenant_id, name=name
+    )
+
+
+async def list_scheduled_sources_rows(pool: asyncpg.Pool, *, table: str, tenant_id: str) -> list[dict]:
+    _require_source_table(table)
+    rows = await pool.fetch(
+        f"SELECT name, schedule_interval_minutes FROM {table} "
+        "WHERE tenant_id = $1 AND status = 'active' AND schedule_interval_minutes IS NOT NULL",
+        tenant_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def list_all_scheduled_sources_rows(pool: asyncpg.Pool, *, table: str) -> list[dict]:
+    _require_source_table(table)
+    rows = await pool.fetch(
+        f"SELECT tenant_id, name, workspace_id, schedule_interval_minutes FROM {table} "
+        "WHERE status = 'active' AND schedule_interval_minutes IS NOT NULL"
+    )
+    return [dict(row) for row in rows]
+
+
+async def is_source_active(pool: asyncpg.Pool, *, table: str, tenant_id: str, name: str) -> bool:
+    _require_source_table(table)
+    return (
+        await pool.fetchval(
+            f"SELECT true FROM {table} WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+            tenant_id,
+            name,
+        )
+        or False
+    )
+
+
+async def delete_connection_if_unused(
+    pool: asyncpg.Pool,
+    *,
+    connection_table: str,
+    source_table: str,
+    tenant_id: str,
+    name: str,
+    connection_column: str = "connection_name",
+) -> None:
+    """Delete a connection row when no source still references it."""
+    _require_source_table(source_table)
+    in_use = await pool.fetch(
+        f"SELECT name FROM {source_table} WHERE tenant_id = $1 AND {connection_column} = $2",
+        tenant_id,
+        name,
+    )
+    if in_use:
+        source_names = [row["name"] for row in in_use]
+        raise ConnectionInUseError(
+            f"connection {name!r} is still used by source(s) {source_names} — repoint or delete them first"
+        )
+    await pool.execute(
+        f"DELETE FROM {connection_table} WHERE tenant_id = $1 AND name = $2",
+        tenant_id,
+        name,
+    )

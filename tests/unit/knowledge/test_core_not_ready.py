@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import types
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 os.environ.setdefault("HOLON_TENANT_ID", "acme")
 os.environ.setdefault("HOLON_WORKSPACE_ID", "main")
@@ -18,16 +22,37 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
 os.environ.setdefault("AWS_REGION", "us-east-1")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "libs"))
-sys.path.insert(0, str(REPO_ROOT / "services" / "knowledge"))
-sys.modules.setdefault("duckdb", types.ModuleType("duckdb"))
-
-from holon_common import HolonError  # noqa: E402
+_STUBBED_ELSEWHERE = ("app", "holon_common", "pyiceberg", "asyncpg", "httpx", "prometheus_client")
 
 
-def test_pool_access_before_lifespan_is_unavailable() -> None:
-    import app.core as core
+def _is_stubbable(name: str) -> bool:
+    return name.split(".")[0] in _STUBBED_ELSEWHERE
 
+
+@pytest.fixture
+def knowledge_core():
+    """Import real knowledge `app.core` without a stale `app` from another service."""
+    saved = {name: module for name, module in sys.modules.items() if _is_stubbable(name)}
+    for name in saved:
+        del sys.modules[name]
+    sys.modules.setdefault("duckdb", types.ModuleType("duckdb"))
+    try:
+        with patch.object(
+            sys,
+            "path",
+            [str(REPO_ROOT / "services" / "knowledge"), str(REPO_ROOT / "libs"), *sys.path],
+        ):
+            yield importlib.import_module("app.core")
+    finally:
+        for name in [name for name in sys.modules if _is_stubbable(name)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+
+
+def test_pool_access_before_lifespan_is_unavailable(knowledge_core) -> None:
+    from holon_common import HolonError
+
+    core = knowledge_core
     if not isinstance(core.pool, core._NotReady):
         return
     try:

@@ -16,6 +16,8 @@ from typing import Optional
 from fastapi import Header, Query
 
 from holon_common import HolonError, Principal, active_jwt, build_urn, make_principal_dependency, require_urn_tenant_match
+from holon_common.iceberg_env import iceberg_catalog_config_from_env
+from holon_common.iceberg_env import iceberg_kwargs as _iceberg_kwargs
 from holon_common.spicedb_id import spicedb_object_id
 
 from . import function_registry as function_registry
@@ -64,18 +66,11 @@ JWT_SECRET, JWT_ACTIVE_KID, JWT_SECRETS = active_jwt()
 # requires HOLON_SERVING_STORE_REQUIRE_MATERIALIZED so the operator
 # flag matches this code path.
 
-ICEBERG_CONFIG = dict(
-    catalog_uri=os.environ["HOLON_ICEBERG_CATALOG_URI"],
-    warehouse=os.environ["HOLON_ICEBERG_WAREHOUSE"],
-    s3_endpoint=os.environ["HOLON_S3_ENDPOINT"],
-    access_key=os.environ["AWS_ACCESS_KEY_ID"],
-    secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    region=os.environ["AWS_REGION"],
-)
+ICEBERG_CONFIG = iceberg_catalog_config_from_env()
 
 
 def iceberg_kwargs(tenant_id: str) -> dict:
-    return {**ICEBERG_CONFIG, "tenant_id": tenant_id}
+    return _iceberg_kwargs(tenant_id, config=ICEBERG_CONFIG)
 
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 

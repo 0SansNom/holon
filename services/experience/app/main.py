@@ -2,49 +2,37 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from holon_common import (
     CircuitBreaker,
-    PermissionClient,
-    Principal,
     assert_production_posture,
     configure_json_logging,
-    create_pool,
     install_error_handlers,
     instrument_cors,
     instrument_metrics,
     instrument_tracing,
     retry_with_backoff,
-    run_migrations,
-    is_production,
 )
 from holon_common.correlation import instrument_correlation
-from holon_common.principal_status import (
-    consume_identity_auth_events,
-    hydrate_revocation_snapshot,
-    make_principal_status_consumer,
-    refresh_revocation_snapshot_forever,
-)
-from holon_common.audit import clear_durable_audit_hooks
-from holon_common.audit_store import install_durable_audit, list_events, list_events_page
 from holon_common.readiness import check_kafka_bootstrap, check_opa, check_postgres, check_spicedb, report_ready
+from holon_common.service_runtime import (
+    boot_postgres,
+    reset_durable_audit,
+    start_principal_status,
+    stop_principal_status,
+    wire_authz,
+)
 
 from . import application_builder, deps
 from .deps import (
-    AUTOMATION_URL,
-    CONNECTIVITY_URL,
     DB_URL,
-    IDENTITY_URL,
-    INTELLIGENCE_URL,
     KAFKA_BOOTSTRAP,
-    KNOWLEDGE_URL,
     OPA_URL,
     OTLP_ENDPOINT,
     SERVICE_NAME,
@@ -53,18 +41,36 @@ from .deps import (
     TENANT_ID,
     WORKSPACE_ID,
     WORKSPACE_URN,
-    _authorize_workspace,
-    _get_json,
-    _intelligence_enabled,
-    _upstream_authorization,
-    current_principal,
+    _TIMEOUT_SECONDS,
 )
 from .routers import router as api_router
-from .routers.spa import router as spa_router
 
 configure_json_logging(SERVICE_NAME)
 
-_TIMEOUT_SECONDS = 5.0
+STATIC_DIR = Path(__file__).parent / "static"
+
+# Hashed Vite chunks under /assets/ can be cached forever. index.html and
+# unhashed files must revalidate — a cached shell after `npm run build`
+# points at deleted filenames.
+_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+_HTML_CACHE_CONTROL = "no-cache, must-revalidate"
+_STATIC_ASSET_SUFFIXES = {
+    ".css",
+    ".eot",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".map",
+    ".png",
+    ".svg",
+    ".ttf",
+    ".webp",
+    ".woff",
+    ".woff2",
+}
 
 
 @asynccontextmanager
@@ -73,20 +79,22 @@ async def lifespan(app: FastAPI):
     app.state.client = httpx.AsyncClient(
         timeout=_TIMEOUT_SECONDS, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
     )
-    deps.client = app.state.client
     app.state.breaker = CircuitBreaker(name="experience-proxy", failure_threshold=5, cooldown_seconds=30.0)
+    deps.client = app.state.client
     deps.breaker = app.state.breaker
 
-    app.state.pool = await create_pool(DB_URL)
-    deps.pool = app.state.pool
     # Experience-owned tables live in app/migrations/0000_baseline.sql.
-    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
-
-    clear_durable_audit_hooks()
-    install_durable_audit(app.state.pool)
-
-    app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
-    deps.authz = app.state.authz
+    await boot_postgres(
+        app, db_url=DB_URL, migrations_dir=Path(__file__).parent / "migrations", deps_module=deps
+    )
+    reset_durable_audit(app.state.pool)
+    wire_authz(
+        app,
+        spicedb_url=SPICEDB_URL,
+        spicedb_preshared_key=SPICEDB_PRESHARED_KEY,
+        opa_url=OPA_URL,
+        deps_module=deps,
+    )
 
     async def _seed_application_authz() -> None:
         backfilled = await application_builder.backfill_urns(
@@ -103,15 +111,14 @@ async def lifespan(app: FastAPI):
 
     await retry_with_backoff(_seed_application_authz, what="experience authz seed")
 
-    status_consumer = make_principal_status_consumer(KAFKA_BOOTSTRAP, service_name=SERVICE_NAME)
-    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
-    await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
-    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
+    status_handle = await start_principal_status(
+        kafka_bootstrap=KAFKA_BOOTSTRAP,
+        service_name=SERVICE_NAME,
+        authz=app.state.authz,
+    )
 
     yield
-    revocation_refresh_task.cancel()
-    status_task.cancel()
-    await status_consumer.stop()
+    await stop_principal_status(status_handle)
     await app.state.pool.close()
     await app.state.client.aclose()
 
@@ -122,6 +129,7 @@ instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
 instrument_correlation(app)
 install_error_handlers(app, service_name=SERVICE_NAME)
+app.include_router(api_router)
 
 
 @app.get("/health")
@@ -146,98 +154,28 @@ async def ready() -> dict:
     )
 
 
-@app.get("/api/config")
-async def config() -> dict:
-    """Public bootstrap flags. No demo principal or ObjectType — the
-    instance may be empty (ADR 026) and login is Identity's job.
+def _looks_like_static_asset(full_path: str) -> bool:
+    if full_path.startswith("assets/"):
+        return True
+    return Path(full_path).suffix.lower() in _STATIC_ASSET_SUFFIXES
+
+
+@app.get("/{full_path:path}")
+async def spa(full_path: str) -> FileResponse:
+    """SPA shell + static asset server.
+
+    Registered last so every real API route above wins the match first.
+    Serves the requested file if it exists under STATIC_DIR (built JS/CSS
+    chunks, favicon, ...); otherwise falls back to index.html so the
+    client-side router can render deep links (e.g. a hard refresh on
+    `/applications/foo`). Missing hashed assets return 404 — never HTML —
+    so a stale import does not execute the shell as a module.
     """
-    return {
-        "tenant_id": TENANT_ID,
-        "workspace_id": WORKSPACE_ID,
-        "intelligence_enabled": _intelligence_enabled(),
-        "require_connector_secret_ref": is_production(),
-    }
-
-
-@app.get("/api/audit-events")
-async def list_experience_audit_events(
-    principal: Principal = Depends(current_principal),
-    category: Optional[str] = None,
-    action: Optional[str] = None,
-    actor: Optional[str] = None,
-    outcome: Optional[str] = None,
-    traceId: Optional[str] = None,
-    pageSize: Optional[int] = None,
-    pageToken: Optional[str] = None,
-) -> dict:
-    """Durable Experience audit (applications, collections, UI plugins)."""
-    await _authorize_workspace(principal, "approve")
-    return await list_events_page(
-        app.state.pool,
-        principal.tenant_id,
-        category=category,
-        action=action,
-        actor_urn=actor,
-        outcome=outcome,
-        trace_id=traceId,
-        page_size=50 if pageSize is None else pageSize,
-        page_token=pageToken,
-    )
-
-
-_AUDIT_TRACE_PAGE_SIZE = 100
-
-
-def _audit_sources() -> list[tuple[str, str]]:
-    sources = [
-        ("identity", f"{IDENTITY_URL}/audit-events"),
-        ("connectivity", f"{CONNECTIVITY_URL}/audit-events"),
-        ("knowledge", f"{KNOWLEDGE_URL}/api/holon/audit-events"),
-        ("intelligence", f"{INTELLIGENCE_URL}/audit-events"),
-    ]
-    if AUTOMATION_URL:
-        sources.append(("automation", f"{AUTOMATION_URL}/audit-events"))
-    return sources
-
-
-@app.get("/api/audit-events/trace/{trace_id}")
-async def get_audit_trace(
-    trace_id: str, request: Request, principal: Principal = Depends(current_principal)
-) -> dict:
-    """Every service's audit records for one action (one correlation id), oldest first.
-
-    Each service still enforces its own audit permission. A service that
-    cannot answer is listed in `unavailable` instead of failing the view;
-    one with more than a page of records is listed in `truncated`.
-    """
-    await _authorize_workspace(principal, "approve")
-    authorization = _upstream_authorization(request)
-    query = httpx.QueryParams({"traceId": trace_id, "pageSize": _AUDIT_TRACE_PAGE_SIZE})
-
-    async def fetch(service: str, url: str) -> tuple[str, int, object]:
-        try:
-            status, body = await _get_json(f"{url}?{query}", authorization=authorization)
-        except httpx.HTTPError as exc:
-            return service, 503, {"detail": str(exc)}
-        return service, status, body
-
-    local = await list_events(
-        app.state.pool, principal.tenant_id, trace_id=trace_id, page_size=_AUDIT_TRACE_PAGE_SIZE + 1
-    )
-    events = [{**event, "service": "experience"} for event in local[:_AUDIT_TRACE_PAGE_SIZE]]
-    truncated = ["experience"] if len(local) > _AUDIT_TRACE_PAGE_SIZE else []
-    unavailable: list[dict] = []
-    for service, status, body in await asyncio.gather(*(fetch(name, url) for name, url in _audit_sources())):
-        if status != 200 or not isinstance(body, dict):
-            unavailable.append({"service": service, "status": status})
-            continue
-        events.extend({**event, "service": service} for event in body.get("data") or [])
-        if body.get("nextPageToken"):
-            truncated.append(service)
-    events.sort(key=lambda event: event.get("occurredAt") or "")
-    return {"traceId": trace_id, "data": events, "unavailable": unavailable, "truncated": truncated}
-
-
-app.include_router(api_router)
-# After every API route. A missing hashed asset stays 404, not index.html.
-app.include_router(spa_router)
+    index = STATIC_DIR / "index.html"
+    candidate = (STATIC_DIR / full_path).resolve()
+    if full_path and candidate.is_file() and STATIC_DIR.resolve() in candidate.parents:
+        cache = _ASSET_CACHE_CONTROL if full_path.startswith("assets/") else _HTML_CACHE_CONTROL
+        return FileResponse(candidate, headers={"Cache-Control": cache})
+    if _looks_like_static_asset(full_path):
+        raise HTTPException(status_code=404, detail="Not Found")
+    return FileResponse(index, headers={"Cache-Control": _HTML_CACHE_CONTROL})

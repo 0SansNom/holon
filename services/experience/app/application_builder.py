@@ -14,25 +14,28 @@ import httpx
 from holon_common import build_urn
 
 from . import ui_component_registry
+from .application_validate import (  # noqa: F401
+    InvalidApplicationDefinition,
+    _agent_app_surfaces,
+    _form_surfaces,
+    _holon_url,
+    _ontology_url,
+    _referenced_actions,
+    _referenced_components,
+    _referenced_object_sets,
+    _referenced_object_types,
+    _referenced_relation_types,
+    _referenced_tools,
+    _validate_definition,
+)
 
 logger = logging.getLogger("experience.application_builder")
 
 _WORKSPACE_ID = os.environ.get("HOLON_WORKSPACE_ID", "main")
 
 
-def _ontology_url(knowledge_url: str, path: str) -> str:
-    suffix = path if path.startswith("/") else f"/{path}"
-    return f"{knowledge_url.rstrip('/')}/api/ontologies/{_WORKSPACE_ID}{suffix}"
-
-
-def _holon_url(knowledge_url: str, path: str) -> str:
-    suffix = path if path.startswith("/") else f"/{path}"
-    return f"{knowledge_url.rstrip('/')}/api/holon{suffix}"
-
-
 def application_urn(tenant_id: str, workspace_id: str, name: str) -> str:
     return build_urn(tenant_id, workspace_id, "application", name)
-
 
 async def backfill_urns(pool: asyncpg.Pool, *, tenant_id: str, workspace_id: str) -> list[str]:
     """One-time (but idempotent — safe every startup) catch-up for
@@ -54,7 +57,6 @@ async def backfill_urns(pool: asyncpg.Pool, *, tenant_id: str, workspace_id: str
         )
     return names
 
-
 async def record_agent_app_session(
     pool: asyncpg.Pool, *, session_urn: str, tenant_id: str, application_name: str, created_by_urn: str
 ) -> None:
@@ -66,14 +68,8 @@ async def record_agent_app_session(
         session_urn, tenant_id, application_name, created_by_urn,
     )
 
-
 async def get_agent_app_session_owner(pool: asyncpg.Pool, session_urn: str) -> Optional[str]:
     return await pool.fetchval("SELECT created_by_urn FROM agent_app_session WHERE session_urn = $1", session_urn)
-
-
-class InvalidApplicationDefinition(ValueError):
-    pass
-
 
 class FormValidationError(ValueError):
     """A form submission at runtime, not a definition problem — kept
@@ -81,200 +77,8 @@ class FormValidationError(ValueError):
     every submit, not just at draft/promote time.
     """
 
-
 _VALID_FIELD_TYPES = {"string", "integer", "boolean"}
 _VALID_BUDGET_KEYS = {"max_iterations", "max_tool_calls", "max_tokens"}
-
-
-def _referenced_object_types(definition: dict) -> set[str]:
-    types = {s["objectType"] for s in definition.get("surfaces", []) if "objectType" in s}
-    types |= {b["objectType"] for b in definition.get("bindings", [])}
-    for surface in definition.get("surfaces", []):
-        if surface.get("type") == "dashboard":
-            types |= {w["objectType"] for w in surface.get("widgets", []) if "objectType" in w}
-    return types
-
-
-def _referenced_relation_types(definition: dict) -> set[str]:
-    """Optional link-type bindings on objectApp surfaces (api accessor names)."""
-    names: set[str] = set()
-    for surface in definition.get("surfaces", []):
-        if surface.get("type") == "objectApp":
-            for link in surface.get("links") or []:
-                if isinstance(link, str) and link.strip():
-                    names.add(link.strip())
-    return names
-
-
-def _referenced_object_sets(definition: dict) -> set[str]:
-    """Optional Object Set bindings on objectApp / dashboard widgets."""
-    names: set[str] = set()
-    for surface in definition.get("surfaces", []):
-        if surface.get("type") == "objectApp" and surface.get("objectSet"):
-            names.add(surface["objectSet"])
-        if surface.get("type") == "dashboard":
-            for widget in surface.get("widgets", []):
-                if widget.get("objectSet"):
-                    names.add(widget["objectSet"])
-    return names
-
-
-def _referenced_actions(definition: dict) -> set[str]:
-    return {a["action"] for a in definition.get("actionRefs", [])}
-
-
-def _form_surfaces(definition: dict) -> list[dict]:
-    return [s for s in definition.get("surfaces", []) if s.get("type") == "form"]
-
-
-def _agent_app_surfaces(definition: dict) -> list[dict]:
-    return [s for s in definition.get("surfaces", []) if s.get("type") == "agentApp"]
-
-
-def _referenced_tools(definition: dict) -> set[str]:
-    tools: set[str] = set()
-    for surface in _agent_app_surfaces(definition):
-        tools |= set(surface.get("tools", []))
-    return tools
-
-
-def _referenced_components(definition: dict) -> set[str]:
-    components = {b["component"] for b in definition.get("bindings", []) if "component" in b}
-    for surface in definition.get("surfaces", []):
-        if surface.get("type") == "dashboard":
-            components |= {w["component"] for w in surface.get("widgets", []) if "component" in w}
-    return components
-
-
-async def _validate_definition(
-    pool: asyncpg.Pool,
-    http: httpx.AsyncClient,
-    *,
-    knowledge_url: str,
-    intelligence_url: str,
-    authorization: str,
-    definition: dict,
-) -> dict:
-    """Validate that application definition references valid ObjectTypes, Actions, components, and tools."""
-    headers = {"Authorization": authorization}
-    object_types = sorted(_referenced_object_types(definition))
-    object_sets = sorted(_referenced_object_sets(definition))
-    actions = sorted(_referenced_actions(definition))
-    components = sorted(_referenced_components(definition))
-    tools = sorted(_referenced_tools(definition))
-    relation_link_names = sorted(_referenced_relation_types(definition))
-
-    for object_type in object_types:
-        response = await http.get(_ontology_url(knowledge_url, f"/objectTypes/{object_type}"), headers=headers)
-        if response.status_code == 404:
-            raise InvalidApplicationDefinition(f"unknown ObjectType {object_type!r}")
-        response.raise_for_status()
-
-    if relation_link_names:
-        response = await http.get(_ontology_url(knowledge_url, "/linkTypes"), headers=headers)
-        response.raise_for_status()
-        relation_rows = response.json()
-        known_accessors: set[str] = set()
-        for row in relation_rows:
-            local = str(row.get("name", "")).split(".", 1)[-1]
-            known_accessors.add((row.get("source_api_name") or "").strip() or local)
-            known_accessors.add((row.get("target_api_name") or "").strip() or row.get("target_property") or local)
-            known_accessors.add(row.get("target_property") or "")
-            known_accessors.add(local)
-        unknown_links = [n for n in relation_link_names if n not in known_accessors]
-        if unknown_links:
-            raise InvalidApplicationDefinition(f"unknown link accessor(s) declared: {unknown_links}")
-        for surface in definition.get("surfaces", []):
-            if surface.get("type") != "objectApp" or not surface.get("links"):
-                continue
-            ot = surface.get("objectType") or ""
-            for link in surface.get("links") or []:
-                attached = False
-                for row in relation_rows:
-                    source = str(row.get("source_object_type_urn", "")).rsplit(":", 1)[-1]
-                    target = str(row.get("target_object_type_urn", "")).rsplit(":", 1)[-1]
-                    local = str(row.get("name", "")).split(".", 1)[-1]
-                    fwd = (row.get("source_api_name") or "").strip() or local
-                    rev = (row.get("target_api_name") or "").strip() or row.get("target_property") or local
-                    if ot == source and link in (fwd, local):
-                        attached = True
-                    if ot == target and link in (rev, row.get("target_property"), local):
-                        attached = True
-                if not attached:
-                    raise InvalidApplicationDefinition(
-                        f"link {link!r} is not attached to ObjectType {ot!r}"
-                    )
-
-    for object_set in object_sets:
-        response = await http.get(_ontology_url(knowledge_url, f"/objectSets/{object_set}"), headers=headers)
-        if response.status_code == 404:
-            raise InvalidApplicationDefinition(f"unknown Object Set {object_set!r}")
-        response.raise_for_status()
-        body = response.json()
-        set_type = str(body.get("object_type_urn", "")).rsplit(":", 1)[-1]
-        # Every objectSet binding must also declare a matching objectType so
-        # dependency tracking and PDP type auth stay coherent.
-        declared_types: set[str] = set()
-        for surface in definition.get("surfaces", []):
-            if surface.get("type") == "objectApp" and surface.get("objectSet") == object_set:
-                declared_types.add(surface.get("objectType", ""))
-            if surface.get("type") == "dashboard":
-                for widget in surface.get("widgets", []):
-                    if widget.get("objectSet") == object_set:
-                        declared_types.add(widget.get("objectType", ""))
-        for declared in declared_types:
-            if declared and declared != set_type:
-                raise InvalidApplicationDefinition(
-                    f"Object Set {object_set!r} targets {set_type!r}, not {declared!r}"
-                )
-
-    for action in actions:
-        response = await http.get(_holon_url(knowledge_url, f"/actions/{action}"), headers=headers)
-        if response.status_code == 404:
-            raise InvalidApplicationDefinition(f"unknown Action {action!r}")
-        response.raise_for_status()
-
-    for component in components:
-        if not await ui_component_registry.is_valid_component_name(pool, component):
-            raise InvalidApplicationDefinition(f"unknown component {component!r} — not built-in or a registered plugin")
-
-    for form in _form_surfaces(definition):
-        if form.get("action") not in actions:
-            raise InvalidApplicationDefinition(
-                f"form surface references action {form.get('action')!r}, which isn't in this "
-                f"application's own actionRefs"
-            )
-        for field in form.get("fields", []):
-            if field.get("type") not in _VALID_FIELD_TYPES:
-                raise InvalidApplicationDefinition(
-                    f"form field {field.get('name')!r} has invalid type {field.get('type')!r}"
-                )
-
-    for agent_app in _agent_app_surfaces(definition):
-        if not agent_app.get("systemPrompt"):
-            raise InvalidApplicationDefinition("agentApp surface requires a non-empty systemPrompt")
-        budget = agent_app.get("budget", {})
-        if not isinstance(budget, dict) or not set(budget.keys()) <= _VALID_BUDGET_KEYS:
-            raise InvalidApplicationDefinition(f"agentApp budget may only declare {sorted(_VALID_BUDGET_KEYS)}")
-        for key, value in budget.items():
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise InvalidApplicationDefinition(f"agentApp budget.{key} must be a positive integer")
-
-    if tools:
-        response = await http.get(f"{intelligence_url}/tools", headers=headers)
-        response.raise_for_status()
-        available_tool_names = {t["name"] for t in response.json()}
-        unknown_tools = [t for t in tools if t not in available_tool_names]
-        if unknown_tools:
-            raise InvalidApplicationDefinition(f"unknown tool(s) declared: {unknown_tools}")
-
-    return {
-        "objectTypes": object_types,
-        "objectSets": object_sets,
-        "actions": actions,
-        "relationTypes": relation_link_names,
-    }
-
 
 async def list_applications(pool: asyncpg.Pool, *, tenant_id: str) -> list[dict]:
     """List latest versions of all applications for a tenant."""
@@ -296,7 +100,6 @@ async def list_applications(pool: asyncpg.Pool, *, tenant_id: str) -> list[dict]
         results.append(result)
     return results
 
-
 async def set_application_project(
     pool: asyncpg.Pool, *, tenant_id: str, name: str, project_urn: Optional[str]
 ) -> Optional[dict]:
@@ -305,7 +108,6 @@ async def set_application_project(
         "UPDATE application SET project_urn = $1 WHERE tenant_id = $2 AND name = $3", project_urn, tenant_id, name,
     )
     return await get_application(pool, tenant_id=tenant_id, name=name)
-
 
 async def get_application(pool: asyncpg.Pool, *, tenant_id: str, name: str) -> Optional[dict]:
     row = await pool.fetchrow(
@@ -319,7 +121,6 @@ async def get_application(pool: asyncpg.Pool, *, tenant_id: str, name: str) -> O
         if isinstance(result[field], str):
             result[field] = json.loads(result[field])
     return result
-
 
 async def create_or_update_draft(
     pool: asyncpg.Pool,
@@ -361,7 +162,6 @@ async def create_or_update_draft(
 
     return await get_application(pool, tenant_id=tenant_id, name=name)
 
-
 async def promote(
     pool: asyncpg.Pool,
     http: httpx.AsyncClient,
@@ -392,13 +192,11 @@ async def promote(
     )
     return await get_application(pool, tenant_id=tenant_id, name=name)
 
-
 def resolve_object_app_object_type(application: dict) -> Optional[str]:
     for surface in application["definition"].get("surfaces", []):
         if surface.get("type") == "objectApp":
             return surface["objectType"]
     return None
-
 
 def resolve_object_app_object_set(application: dict) -> Optional[str]:
     """Optional Object Set filter on the objectApp list surface."""
@@ -408,7 +206,6 @@ def resolve_object_app_object_set(application: dict) -> Optional[str]:
             return name if isinstance(name, str) and name else None
     return None
 
-
 def resolve_analytics_object_type(application: dict) -> Optional[str]:
     """Resolve declared ObjectType for analytics surface."""
     for surface in application["definition"].get("surfaces", []):
@@ -416,17 +213,14 @@ def resolve_analytics_object_type(application: dict) -> Optional[str]:
             return surface["objectType"]
     return None
 
-
 def resolve_agent_app_config(application: dict) -> Optional[dict]:
     """Resolve agentApp surface configuration (tools, system prompt, budget)."""
     surfaces = _agent_app_surfaces(application["definition"])
     return surfaces[0] if surfaces else None
 
-
 def is_action_declared(application: dict, object_type: str, local_action_name: str) -> bool:
     full_name = f"{object_type}.{local_action_name}"
     return full_name in set(_referenced_actions(application["definition"]))
-
 
 def get_dashboard_widgets(application: dict) -> list[dict]:
     for surface in application["definition"].get("surfaces", []):
@@ -434,11 +228,9 @@ def get_dashboard_widgets(application: dict) -> list[dict]:
             return surface.get("widgets", [])
     return []
 
-
 def get_form_surface(application: dict) -> Optional[dict]:
     forms = _form_surfaces(application["definition"])
     return forms[0] if forms else None
-
 
 def validate_form_submission(form: dict, submitted: dict) -> None:
     """Runtime counterpart to `_validate_definition`'s form checks — the
@@ -456,3 +248,4 @@ def validate_form_submission(form: dict, submitted: dict) -> None:
             expected_type = type_checks[field["type"]]
             if not isinstance(submitted[name], expected_type):
                 raise FormValidationError(f"field {name!r} must be of type {field['type']!r}")
+

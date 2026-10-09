@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 
 from holon_common import Principal, build_urn, require_tenant_match
 from holon_common.audit import emit_audit
-from holon_common.audit_store import list_events_page
+from holon_common.service_runtime import list_audit_events_http
 
 from .. import deps
 from ..deps import TENANT_ID, _authorize_workspace, current_principal
@@ -31,16 +31,16 @@ async def list_connectivity_audit_events(
 ) -> dict:
     """Durable Connectivity audit (syncs, plugins, sources, quiesce)."""
     await _authorize_workspace(principal, "approve", workspace_id=workspace_id)
-    return await list_events_page(
+    return await list_audit_events_http(
         deps.pool,
         principal.tenant_id,
         category=category,
         action=action,
-        actor_urn=actor,
+        actor=actor,
         outcome=outcome,
-        trace_id=traceId,
-        page_size=50 if pageSize is None else pageSize,
-        page_token=pageToken,
+        traceId=traceId,
+        pageSize=pageSize,
+        pageToken=pageToken,
     )
 
 

@@ -17,6 +17,7 @@ from holon_common import (
     build_urn,
     make_principal_dependency,
 )
+from holon_common.iceberg_env import iceberg_catalog_config_from_env
 from holon_common.spicedb_id import spicedb_object_id
 
 from . import kafka_stream_registry
@@ -39,14 +40,7 @@ pool = None
 authz = None
 kafka_stream_tasks: dict = {}
 
-ICEBERG_CONFIG = dict(
-    catalog_uri=os.environ["HOLON_ICEBERG_CATALOG_URI"],
-    warehouse=os.environ["HOLON_ICEBERG_WAREHOUSE"],
-    s3_endpoint=os.environ["HOLON_S3_ENDPOINT"],
-    access_key=os.environ["AWS_ACCESS_KEY_ID"],
-    secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    region=os.environ["AWS_REGION"],
-)
+ICEBERG_CONFIG = iceberg_catalog_config_from_env()
 
 CONNECTOR_URN_PIPELINE = build_urn(TENANT_ID, "global", "connector", "pipeline-transform")
 STREAM_INGEST_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-stream-ingest")

@@ -126,7 +126,7 @@ def test_strip_attributes_drops_salesforce_metadata() -> None:
 
 
 def test_next_page_url_joins_relative_path_to_instance() -> None:
-    with patch("app.salesforce_source_registry.assert_http_url"):
+    with patch("app.salesforce_source_fetch.assert_http_url"):
         url = _next_page_url(
             instance_url="https://na1.salesforce.com",
             next_records_url="/services/data/v59.0/query/01gxx",
@@ -243,8 +243,8 @@ def test_fetch_for_dataset_mints_token_and_paginates() -> None:
     client.get = AsyncMock(side_effect=[page1, page2])
 
     with (
-        patch("app.salesforce_source_registry.assert_http_url"),
-        patch("app.salesforce_source_registry.httpx.AsyncClient", return_value=client),
+        patch("app.salesforce_source_fetch.assert_http_url"),
+        patch("app.salesforce_source_fetch.httpx.AsyncClient", return_value=client),
     ):
         rows, commit = asyncio.run(fetch_for_dataset(pool, "t1", "sf_accounts"))
 

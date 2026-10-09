@@ -19,19 +19,15 @@ import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
 from app.file_cursor import mtime_ns_from_stamp, select_files
+from app import source_registry_base
 from app.source_registry_base import (
     ConnectionInUseError,
-    SourceConflictError as SourceConflictError,
+    SourceConflictError,
     SourceConfigError,
     SourceFetchError,
     assert_dataset_available,
-    delete_row,
-    get_row,
-    is_registered as source_is_registered,
-    list_rows,
     make_column_cursor_commit,
     resolve_source_secret,
-    set_status,
 )
 
 from holon_common.connector_safety import (
@@ -149,16 +145,13 @@ async def list_connections(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
 
 
 async def delete_connection(pool: asyncpg.Pool, tenant_id: str, name: str) -> None:
-    in_use = await pool.fetch(
-        "SELECT name FROM sftp_source WHERE tenant_id = $1 AND connection_name = $2", tenant_id, name
+    await source_registry_base.delete_connection_if_unused(
+        pool,
+        connection_table="sftp_connection",
+        source_table="sftp_source",
+        tenant_id=tenant_id,
+        name=name,
     )
-    if in_use:
-        source_names = [row["name"] for row in in_use]
-        raise ConnectionInUseError(
-            f"connection {name!r} is still used by source(s) {source_names} — repoint or delete them first"
-        )
-    await pool.execute("DELETE FROM sftp_connection WHERE tenant_id = $1 AND name = $2", tenant_id, name)
-
 
 async def register_source(
     pool: asyncpg.Pool,
@@ -222,263 +215,38 @@ async def register_source(
 
 
 async def list_scheduled_sources(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
-    rows = await pool.fetch(
-        "SELECT name, schedule_interval_minutes FROM sftp_source "
-        "WHERE tenant_id = $1 AND status = 'active' AND schedule_interval_minutes IS NOT NULL",
-        tenant_id,
-    )
-    return [dict(row) for row in rows]
-
+    return await source_registry_base.list_scheduled_sources_rows(pool, table="sftp_source", tenant_id=tenant_id)
 
 async def list_all_scheduled_sources(pool: asyncpg.Pool) -> list[dict]:
-    rows = await pool.fetch(
-        "SELECT tenant_id, name, workspace_id, schedule_interval_minutes FROM sftp_source "
-        "WHERE status = 'active' AND schedule_interval_minutes IS NOT NULL"
-    )
-    return [dict(row) for row in rows]
-
+    return await source_registry_base.list_all_scheduled_sources_rows(pool, table="sftp_source")
 
 async def set_source_status(pool: asyncpg.Pool, tenant_id: str, name: str, status: str) -> Optional[dict]:
-    return await set_status(
-        pool, table="sftp_source", columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id, name=name, status=status
+    return await source_registry_base.set_source_status_row(
+        pool, table="sftp_source", public_columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id, name=name, status=status
     )
-
 
 async def delete_source(pool: asyncpg.Pool, tenant_id: str, name: str) -> None:
-    await delete_row(pool, table="sftp_source", tenant_id=tenant_id, name=name)
-
+    await source_registry_base.delete_source_row(pool, table="sftp_source", tenant_id=tenant_id, name=name)
 
 async def get_source(pool: asyncpg.Pool, tenant_id: str, name: str) -> Optional[dict]:
-    return await get_row(pool, table="sftp_source", columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id, name=name)
-
+    return await source_registry_base.get_source_row(
+        pool, table="sftp_source", public_columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id, name=name
+    )
 
 async def list_sources(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
-    return await list_rows(pool, table="sftp_source", columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id)
-
+    return await source_registry_base.list_sources_for_tenant(
+        pool, table="sftp_source", public_columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id
+    )
 
 async def is_registered(pool: asyncpg.Pool, tenant_id: str, name: str) -> bool:
-    return await source_is_registered(pool, table="sftp_source", tenant_id=tenant_id, name=name)
+    return await source_registry_base.is_source_active(pool, table="sftp_source", tenant_id=tenant_id, name=name)
 
-
-def _read_bytes(data: bytes, format: str) -> list[dict]:
-    buf = io.BytesIO(data)
-    if format == "csv":
-        return pacsv.read_csv(buf).to_pylist()
-    if format == "ndjson":
-        return pajson.read_json(buf).to_pylist()
-    return papq.read_table(buf).to_pylist()
-
-
-def _format_suffix(format: str) -> str:
-    if format == "ndjson":
-        return ".ndjson"
-    return f".{format}"
-
-
-def _truthy(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes"}
-
-
-_insecure_auto_add_warned = threading.Lock()
-_insecure_auto_add_warned_flag = False
-
-
-def _warn_insecure_auto_add_once() -> None:
-    global _insecure_auto_add_warned_flag
-    with _insecure_auto_add_warned:
-        if _insecure_auto_add_warned_flag:
-            return
-        _insecure_auto_add_warned_flag = True
-    logger.warning(
-        "HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY is set — trusting unknown SFTP host keys "
-        "on first connect (AutoAddPolicy). This is only safe for local/demo/CI use; "
-        "set HOLON_SFTP_KNOWN_HOSTS to a pinned known_hosts file for real deployments."
-    )
-
-
-def _configure_host_key_policy(client: paramiko.SSHClient) -> None:
-    """Set the SFTP client's host-key verification policy.
-
-    Resolution order:
-      1. `HOLON_SFTP_KNOWN_HOSTS` set: load system host keys plus that file
-         and reject anything not already pinned there (`RejectPolicy`).
-      2. Production (`HOLON_ENV=production`): always fail closed
-         (`RejectPolicy`) — host key trust must be pinned via
-         `HOLON_SFTP_KNOWN_HOSTS`, never auto-accepted, even if the
-         insecure opt-in below is (mis)configured.
-      3. `HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY` truthy: explicit opt-in to
-         `AutoAddPolicy`, for local/demo/CI SFTP fixtures with no pinned
-         host key. Warned once per process.
-      4. Otherwise: fail closed (`RejectPolicy`) — no known_hosts and no
-         explicit insecure opt-in means we refuse to trust an unknown host
-         key rather than silently auto-accepting it.
-    """
-    known_hosts_path = (os.environ.get("HOLON_SFTP_KNOWN_HOSTS") or "").strip()
-    if known_hosts_path:
-        client.load_system_host_keys()
-        client.load_host_keys(known_hosts_path)
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        return
-
-    if is_production():
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        return
-
-    if _truthy("HOLON_SFTP_INSECURE_AUTO_ADD_HOSTKEY"):
-        _warn_insecure_auto_add_once()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        return
-
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
-
-
-def _fetch_sync(
-    *,
-    host: str,
-    port: int,
-    username: str,
-    password: str,
-    remote_path: Optional[str],
-    remote_prefix: Optional[str],
-    format: str,
-    incremental: bool,
-    last_synced_path: Optional[str],
-) -> tuple[list[dict], Optional[str]]:
-    client = paramiko.SSHClient()
-    _configure_host_key_policy(client)
-    try:
-        client.connect(
-            hostname=host,
-            port=port,
-            username=username,
-            password=password,
-            look_for_keys=False,
-            allow_agent=False,
-            timeout=15,
-        )
-        sftp = client.open_sftp()
-        try:
-            if remote_path:
-                with sftp.open(remote_path, "rb") as handle:
-                    return _read_bytes(handle.read(), format), None
-
-            prefix = remote_prefix or ""
-            # List one directory level when prefix has no trailing slash file match;
-            # walk recursively under the prefix directory.
-            listed: list[tuple[int, str]] = []
-
-            def _walk(directory: str) -> None:
-                try:
-                    entries = sftp.listdir_attr(directory)
-                except OSError:
-                    return
-                for entry in entries:
-                    child = f"{directory.rstrip('/')}/{entry.filename}"
-                    mode = entry.st_mode or 0
-                    if stat.S_ISDIR(mode):
-                        _walk(child)
-                    elif stat.S_ISREG(mode) and child.endswith(_format_suffix(format)):
-                        listed.append((mtime_ns_from_stamp(entry.st_mtime), child))
-
-            # If prefix points at a directory, walk it; if it is a path prefix
-            # of filenames in a parent dir, list that parent and filter.
-            try:
-                attr = sftp.stat(prefix)
-            except OSError:
-                attr = None
-            if attr is not None and stat.S_ISDIR(attr.st_mode or 0):
-                _walk(prefix)
-            else:
-                parent = prefix.rsplit("/", 1)[0] if "/" in prefix else "."
-                base = prefix if "/" not in prefix else prefix.rsplit("/", 1)[-1]
-                try:
-                    for entry in sftp.listdir_attr(parent):
-                        child = f"{parent.rstrip('/')}/{entry.filename}" if parent != "." else entry.filename
-                        mode = entry.st_mode or 0
-                        if stat.S_ISREG(mode) and entry.filename.startswith(base) and child.endswith(
-                            _format_suffix(format)
-                        ):
-                            listed.append((mtime_ns_from_stamp(entry.st_mtime), child))
-                        elif stat.S_ISDIR(mode) and entry.filename.startswith(base):
-                            _walk(child)
-                except OSError as exc:
-                    raise SourceFetchError(f"could not list remote prefix {prefix!r}: {exc}") from exc
-
-            if incremental:
-                paths, new_cursor = select_files(listed, last_synced_path)
-            else:
-                paths = sorted(key for _, key in listed)
-                new_cursor = None
-
-            rows: list[dict] = []
-            for path in paths:
-                with sftp.open(path, "rb") as handle:
-                    rows.extend(_read_bytes(handle.read(), format))
-            return rows, (new_cursor if incremental else None)
-        finally:
-            sftp.close()
-    finally:
-        client.close()
-
-
-async def fetch_for_dataset(
-    pool: asyncpg.Pool, tenant_id: str, name: str
-) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
-    row = await pool.fetchrow(
-        "SELECT connection_name, remote_path, remote_prefix, format, incremental, last_synced_path "
-        "FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    )
-    if row is None:
-        raise SourceFetchError(f"no active SFTP source registered as {name!r}")
-
-    connection = await pool.fetchrow(
-        "SELECT host, port, username, password, secret_ref FROM sftp_connection "
-        "WHERE tenant_id = $1 AND name = $2",
-        tenant_id, row["connection_name"],
-    )
-    if connection is None:
-        raise SourceFetchError(
-            f"source {name!r} references connection {row['connection_name']!r}, which no longer exists"
-        )
-    try:
-        pinned_host = pin_connector_host(connection["host"])
-    except ConnectorSafetyError as exc:
-        raise SourceFetchError(str(exc)) from exc
-    password = connector_secret(
-        secret_ref=connection["secret_ref"],
-        plaintext=connection["password"],
-        resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
-    ) or ""
-
-    try:
-        rows, new_cursor = await asyncio.to_thread(
-            _fetch_sync,
-            host=pinned_host,
-            port=connection["port"],
-            username=connection["username"],
-            password=password,
-            remote_path=row["remote_path"],
-            remote_prefix=row["remote_prefix"],
-            format=row["format"],
-            incremental=row["incremental"],
-            last_synced_path=row["last_synced_path"],
-        )
-    except SourceFetchError:
-        raise
-    except (OSError, ValueError, ArrowException, paramiko.SSHException) as exc:
-        raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
-
-    commit: Optional[Callable[[], Awaitable[None]]] = None
-    if new_cursor is not None and new_cursor != row["last_synced_path"]:
-
-        commit = make_column_cursor_commit(
-            pool,
-            table="sftp_source",
-            tenant_id=tenant_id,
-            name=name,
-            column="last_synced_path",
-            value=new_cursor,
-        )
-
-    return rows, commit
+from app.sftp_source_fetch import (  # noqa: E402,F401
+    _configure_host_key_policy,
+    _fetch_sync,
+    _format_suffix,
+    _read_bytes,
+    _truthy,
+    _warn_insecure_auto_add_once,
+    fetch_for_dataset,
+)
