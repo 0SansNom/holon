@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button, Callout, Checkbox, Dialog, DialogBody, DialogFooter, FormGroup, HTMLSelect, InputGroup, TextArea } from "@blueprintjs/core";
+import { Button, Callout, Dialog, DialogBody, DialogFooter } from "@blueprintjs/core";
 import { useRegisterObjectConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { ObjectConnection, ObjectConnectionKind } from "../../api/connectivity";
-import { SecretRefField } from "./ConnectionFields";
+import { ConnectionFields, type ConnectionField } from "./ConnectionFields";
 
 export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectConnection | null; onClose: () => void }) {
   const isEditing = editing !== null;
@@ -51,6 +51,166 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(secretAccessKey));
   const endpointRequired = kind === "s3";
+  const secretPlaceholder =
+    isEditing && editing?.has_secret_access_key
+      ? isGcs
+        ? "(unchanged — paste new JSON to replace)"
+        : "•••••••• (unchanged)"
+      : isGcs
+        ? '{\n  "type": "service_account",\n  ...\n}'
+        : "••••••••";
+  const secretHelper =
+    isEditing && editing?.has_secret_access_key
+      ? "A secret is already set — leave blank to keep it."
+      : isGcs
+        ? "Paste the Google service account key JSON (OAuthJWTCertType=GOOGLEJSON)."
+        : undefined;
+  const kindFields: ConnectionField[] = isAzure
+    ? [
+        {
+          kind: "text",
+          id: "object-connection-account",
+          label: "Storage account name",
+          value: accessKeyId,
+          onChange: setAccessKeyId,
+          placeholder: "mystorageaccount",
+        },
+      ]
+    : isGcs
+      ? [
+          {
+            kind: "text",
+            id: "object-connection-project",
+            label: "Project ID",
+            value: accessKeyId,
+            onChange: setAccessKeyId,
+            placeholder: "my-gcp-project",
+            helperText: "GCP Project Id containing the bucket (CData ProjectId)",
+          },
+          {
+            kind: "text",
+            id: "object-connection-location",
+            label: "Default bucket location",
+            value: region,
+            onChange: setRegion,
+            placeholder: "US",
+            helperText: "e.g. US, EU, ASIA — used when creating objects",
+          },
+          {
+            kind: "text",
+            id: "object-connection-endpoint",
+            label: "Endpoint",
+            value: endpoint,
+            onChange: setEndpoint,
+            placeholder: "https://storage.googleapis.com",
+            helperText: "Optional — defaults to https://storage.googleapis.com",
+          },
+        ]
+      : [
+          {
+            kind: "text",
+            id: "object-connection-endpoint",
+            label: "Endpoint",
+            value: endpoint,
+            onChange: setEndpoint,
+            placeholder: "https://s3.us-south.cloud-object-storage.appdomain.cloud",
+            helperText:
+              "e.g. http://localhost:9000, https://s3.amazonaws.com, or https://s3.us-south.cloud-object-storage.appdomain.cloud (IBM COS)",
+          },
+          {
+            kind: "text",
+            id: "object-connection-region",
+            label: "Region",
+            value: region,
+            onChange: setRegion,
+            placeholder: "us-south",
+            helperText: "Match the endpoint region for IBM COS (e.g. us-south, eu-de).",
+          },
+          {
+            kind: "text",
+            id: "object-connection-access-key",
+            label: "Access key ID",
+            value: accessKeyId,
+            onChange: setAccessKeyId,
+            placeholder: "minioadmin",
+            helperText: "HMAC access key for AWS / MinIO / IBM COS",
+          },
+        ];
+  const fields: ConnectionField[] = [
+    {
+      kind: "text",
+      id: "object-connection-name",
+      label: "Name",
+      value: name,
+      onChange: setName,
+      placeholder: "my_bucket_store",
+      helperText: "e.g. gcs_prod — referenced by object sources, not a dataset name",
+      disabled: isEditing,
+    },
+    {
+      kind: "select",
+      id: "object-connection-kind",
+      label: "Kind",
+      value: kind,
+      onChange: (value) => onKindChange(value as ObjectConnectionKind),
+      disabled: isEditing,
+      fill: false,
+      options: [
+        { value: "s3", label: "S3-compatible" },
+        { value: "azure", label: "Azure Blob Storage" },
+        { value: "gcs", label: "Google Cloud Storage" },
+      ],
+    },
+    ...kindFields,
+    ...(!requireSecretRef
+      ? [
+          isGcs
+            ? {
+                kind: "textarea" as const,
+                id: "object-connection-secret",
+                label: "Service account JSON",
+                value: secretAccessKey,
+                onChange: setSecretAccessKey,
+                placeholder: secretPlaceholder,
+                helperText: secretHelper,
+                rows: 6,
+                mono: true,
+              }
+            : {
+                kind: "secret" as const,
+                id: "object-connection-secret",
+                label: isAzure ? "Account key" : "Secret access key",
+                value: secretAccessKey,
+                onChange: setSecretAccessKey,
+                placeholder: secretPlaceholder,
+                helperText: secretHelper,
+              },
+        ]
+      : []),
+    {
+      kind: "secretRef",
+      id: "object-connection-secret-ref",
+      value: secretRef,
+      onChange: setSecretRef,
+      placeholder: isAzure
+        ? "env:HOLON_CONN_<TENANT>__AZURE_STORAGE_KEY"
+        : isGcs
+          ? "env:HOLON_CONN_<TENANT>__GCS_SERVICE_ACCOUNT_JSON"
+          : "env:HOLON_CONN_<TENANT>__S3_SECRET_KEY",
+    },
+    ...(kind === "s3"
+      ? [
+          {
+            kind: "checkbox" as const,
+            id: "object-connection-path-style",
+            label: "Path-style addressing",
+            checked: pathStyle,
+            onChange: setPathStyle,
+            helperText: "Enable for MinIO and most self-hosted S3 — disable for AWS and IBM COS virtual-hosted buckets.",
+          },
+        ]
+      : []),
+  ];
 
   return (
     <Dialog
@@ -65,125 +225,7 @@ export function ObjectConnectionDialog({ editing, onClose }: { editing: ObjectCo
             ? "Update credentials — the name and kind stay fixed since object sources already reference this connection."
             : "S3-compatible (MinIO, AWS S3, IBM COS), Azure Blob, or Google Cloud Storage. Register once, point several sources at it."}
         </p>
-        <FormGroup label="Name" helperText="e.g. gcs_prod — referenced by object sources, not a dataset name">
-          <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_bucket_store" disabled={isEditing} />
-        </FormGroup>
-        <FormGroup label="Kind">
-          <HTMLSelect
-            value={kind}
-            onChange={(e) => onKindChange(e.target.value as ObjectConnectionKind)}
-            disabled={isEditing}
-            options={[
-              { value: "s3", label: "S3-compatible" },
-              { value: "azure", label: "Azure Blob Storage" },
-              { value: "gcs", label: "Google Cloud Storage" },
-            ]}
-          />
-        </FormGroup>
-        {isAzure ? (
-          <FormGroup label="Storage account name">
-            <InputGroup value={accessKeyId} onChange={(e) => setAccessKeyId(e.target.value)} placeholder="mystorageaccount" />
-          </FormGroup>
-        ) : isGcs ? (
-          <>
-            <FormGroup label="Project ID" helperText="GCP Project Id containing the bucket (CData ProjectId)">
-              <InputGroup value={accessKeyId} onChange={(e) => setAccessKeyId(e.target.value)} placeholder="my-gcp-project" />
-            </FormGroup>
-            <FormGroup label="Default bucket location" helperText="e.g. US, EU, ASIA — used when creating objects">
-              <InputGroup value={region} onChange={(e) => setRegion(e.target.value)} placeholder="US" />
-            </FormGroup>
-            <FormGroup
-              label="Endpoint"
-              helperText="Optional — defaults to https://storage.googleapis.com"
-            >
-              <InputGroup
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                placeholder="https://storage.googleapis.com"
-              />
-            </FormGroup>
-          </>
-        ) : (
-          <>
-            <FormGroup
-              label="Endpoint"
-              helperText="e.g. http://localhost:9000, https://s3.amazonaws.com, or https://s3.us-south.cloud-object-storage.appdomain.cloud (IBM COS)"
-            >
-              <InputGroup
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                placeholder="https://s3.us-south.cloud-object-storage.appdomain.cloud"
-              />
-            </FormGroup>
-            <FormGroup
-              label="Region"
-              helperText="Match the endpoint region for IBM COS (e.g. us-south, eu-de)."
-            >
-              <InputGroup value={region} onChange={(e) => setRegion(e.target.value)} placeholder="us-south" />
-            </FormGroup>
-            <FormGroup label="Access key ID" helperText="HMAC access key for AWS / MinIO / IBM COS">
-              <InputGroup value={accessKeyId} onChange={(e) => setAccessKeyId(e.target.value)} placeholder="minioadmin" />
-            </FormGroup>
-          </>
-        )}
-        {!requireSecretRef && (
-          <FormGroup
-            label={isAzure ? "Account key" : isGcs ? "Service account JSON" : "Secret access key"}
-            helperText={
-              isEditing && editing?.has_secret_access_key
-                ? "A secret is already set — leave blank to keep it."
-                : isGcs
-                  ? "Paste the Google service account key JSON (OAuthJWTCertType=GOOGLEJSON)."
-                  : undefined
-            }
-          >
-            {isGcs ? (
-              <TextArea
-                fill
-                rows={6}
-                value={secretAccessKey}
-                onChange={(e) => setSecretAccessKey(e.target.value)}
-                placeholder={
-                  isEditing && editing?.has_secret_access_key
-                    ? "(unchanged — paste new JSON to replace)"
-                    : '{\n  "type": "service_account",\n  ...\n}'
-                }
-                style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 12 }}
-              />
-            ) : (
-              <InputGroup
-                type="password"
-                value={secretAccessKey}
-                onChange={(e) => setSecretAccessKey(e.target.value)}
-                placeholder={isEditing && editing?.has_secret_access_key ? "•••••••• (unchanged)" : "••••••••"}
-              />
-            )}
-          </FormGroup>
-        )}
-        <SecretRefField
-          id="object-connection-secret-ref"
-          value={secretRef}
-          onChange={setSecretRef}
-          placeholder={
-            isAzure
-              ? "env:HOLON_CONN_<TENANT>__AZURE_STORAGE_KEY"
-              : isGcs
-                ? "env:HOLON_CONN_<TENANT>__GCS_SERVICE_ACCOUNT_JSON"
-                : "env:HOLON_CONN_<TENANT>__S3_SECRET_KEY"
-          }
-        />
-        {kind === "s3" && (
-          <FormGroup>
-            <Checkbox
-              checked={pathStyle}
-              label="Path-style addressing"
-              onChange={(e) => setPathStyle((e.target as HTMLInputElement).checked)}
-            />
-            <p className="hl-text-muted-sm hl-mt-xs">
-              Enable for MinIO and most self-hosted S3 — disable for AWS and IBM COS virtual-hosted buckets.
-            </p>
-          </FormGroup>
-        )}
+        <ConnectionFields fields={fields} />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}

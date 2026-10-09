@@ -70,3 +70,8 @@ def test_quote_identifier_one_two_three_parts(dialect: str, one: str, two: str, 
     assert quote_identifier("analytics.public.orders", dialect=dialect) == three
     with pytest.raises(ValueError):
         quote_identifier("a.b.c.d", dialect=dialect)
+
+
+def test_quote_identifier_rejects_unknown_dialect() -> None:
+    with pytest.raises(ValueError):
+        quote_identifier("orders", dialect="singlestore")
