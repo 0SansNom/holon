@@ -19,12 +19,17 @@ from app.cursor_window import advance_cursor
 from app.pinned_http import pinned_transport
 from app.source_registry_base import (
     ConnectionInUseError,
-    SourceConflictError,
+    SourceConflictError as SourceConflictError,
     SourceConfigError,
     SourceFetchError,
     assert_dataset_available,
+    delete_row,
+    get_row,
+    is_registered as source_is_registered,
+    list_rows,
     make_property_cursor_commit,
     resolve_source_secret,
+    set_status,
 )
 from holon_common.connector_safety import (
     ConnectorSafetyError,
@@ -343,44 +348,32 @@ async def list_all_scheduled_sources(pool: asyncpg.Pool) -> list[dict]:
 
 
 async def set_source_status(pool: asyncpg.Pool, tenant_id: str, name: str, status: str) -> Optional[dict]:
-    await pool.execute(
-        "UPDATE salesforce_source SET status = $1 WHERE tenant_id = $2 AND name = $3",
-        status, tenant_id, name,
+    return await set_status(
+        pool,
+        table="salesforce_source",
+        columns=_PUBLIC_SOURCE_COLUMNS,
+        tenant_id=tenant_id,
+        name=name,
+        status=status,
     )
-    return await get_source(pool, tenant_id, name)
 
 
 async def delete_source(pool: asyncpg.Pool, tenant_id: str, name: str) -> None:
-    await pool.execute(
-        "DELETE FROM salesforce_source WHERE tenant_id = $1 AND name = $2",
-        tenant_id, name,
-    )
+    await delete_row(pool, table="salesforce_source", tenant_id=tenant_id, name=name)
 
 
 async def get_source(pool: asyncpg.Pool, tenant_id: str, name: str) -> Optional[dict]:
-    row = await pool.fetchrow(
-        f"SELECT {_PUBLIC_SOURCE_COLUMNS} FROM salesforce_source "
-        "WHERE tenant_id = $1 AND name = $2",
-        tenant_id, name,
+    return await get_row(
+        pool, table="salesforce_source", columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id, name=name
     )
-    return None if row is None else dict(row)
 
 
 async def list_sources(pool: asyncpg.Pool, tenant_id: str) -> list[dict]:
-    rows = await pool.fetch(
-        f"SELECT {_PUBLIC_SOURCE_COLUMNS} FROM salesforce_source "
-        "WHERE tenant_id = $1 ORDER BY name",
-        tenant_id,
-    )
-    return [dict(row) for row in rows]
+    return await list_rows(pool, table="salesforce_source", columns=_PUBLIC_SOURCE_COLUMNS, tenant_id=tenant_id)
 
 
 async def is_registered(pool: asyncpg.Pool, tenant_id: str, name: str) -> bool:
-    return await pool.fetchval(
-        "SELECT true FROM salesforce_source "
-        "WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
-        tenant_id, name,
-    ) or False
+    return await source_is_registered(pool, table="salesforce_source", tenant_id=tenant_id, name=name)
 
 
 async def _bearer_token(
