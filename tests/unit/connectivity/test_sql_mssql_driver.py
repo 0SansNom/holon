@@ -59,8 +59,40 @@ def test_mssql_fetch_dicts_uses_freetds_dsn() -> None:
         assert "SERVER=sqlserver" in dsn
         assert "PORT=1433" in dsn
         assert "DATABASE=erp" in dsn
+        assert "Encryption=" not in dsn
         cursor.execute.assert_awaited_once_with(
             "SELECT id, name FROM orders WHERE id > ?", ["0"]
         )
+
+    asyncio.run(_run())
+
+
+def test_mssql_use_tls_sets_freetds_encryption() -> None:
+    async def _run() -> None:
+        cursor = AsyncMock()
+        cursor.description = None
+        cursor.__aenter__ = AsyncMock(return_value=cursor)
+        cursor.__aexit__ = AsyncMock(return_value=None)
+        conn = AsyncMock()
+        conn.cursor = MagicMock(return_value=cursor)
+        conn.close = AsyncMock()
+        fake_aioodbc = MagicMock()
+        fake_aioodbc.connect = AsyncMock(return_value=conn)
+
+        with patch.dict(sys.modules, {"aioodbc": fake_aioodbc}):
+            await sql_drivers.fetch_dicts(
+                dialect="azure_synapse",
+                host="ws.sql.azuresynapse.net",
+                port=1433,
+                database="pool",
+                username="reader",
+                password="secret",
+                sql="SELECT 1",
+                args=[],
+                use_tls=True,
+            )
+
+        dsn = fake_aioodbc.connect.await_args.kwargs["dsn"]
+        assert "Encryption=require;" in dsn
 
     asyncio.run(_run())
