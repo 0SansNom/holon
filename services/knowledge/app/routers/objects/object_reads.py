@@ -192,7 +192,7 @@ async def get_object_graph(
         object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
     )
     if root_row is None:
-        raise HolonError.not_found('ObjectInstanceNotFound', f"{object_type}/{instance_id} not found", object_type=object_type, instance_id=instance_id)
+        raise await core.instance_not_found(object_type, principal.tenant_id, instance_id)
 
     return await _traverse_neighborhood(object_type, root_row["id"], root_row, hops, principal)
 
@@ -217,7 +217,7 @@ async def _read_object_link(
         object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
     )
     if current_row is None:
-        raise HolonError.not_found('ObjectInstanceNotFound', f"{object_type}/{instance_id} not found", object_type=object_type, instance_id=instance_id)
+        raise await core.instance_not_found(object_type, principal.tenant_id, instance_id)
 
     # Overlay FK edits (link write/unlink) onto the row before traversal so
     # a freshly-written link is visible on the next GET without Iceberg sync.
@@ -331,7 +331,7 @@ async def _mutate_link(
         object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
     )
     if current_row is None:
-        raise HolonError.not_found('ObjectInstanceNotFound', f"{object_type}/{instance_id} not found", object_type=object_type, instance_id=instance_id)
+        raise await core.instance_not_found(object_type, principal.tenant_id, instance_id)
 
     relation_types = await ontology.list_relation_types(core.pool, principal.tenant_id)
     matched = core._find_relation_by_link_name(relation_types, object_type, link_name)
@@ -486,7 +486,7 @@ async def get_object_timeline(
         object_type, principal.tenant_id, typed_id, handle["fetch_fn"], handle["id_kwarg"], principal=principal,
     )
     if current_row is None:
-        raise HolonError.not_found('ObjectInstanceNotFound', f"{object_type}/{instance_id} not found", object_type=object_type, instance_id=instance_id)
+        raise await core.instance_not_found(object_type, principal.tenant_id, instance_id)
 
     instance_urn = build_urn(principal.tenant_id, core.WORKSPACE_ID, "instance", f"{object_type}/{instance_id}")
     return await list_instance_timeline(core.pool, principal.tenant_id, instance_urn)

@@ -74,6 +74,7 @@ async def materialize(
 
     Rows absent from this snapshot are deleted. Batched via `unnest`.
     """
+    await _record_materialization(conn, object_type=object_type, tenant_id=tenant_id, snapshot_id=snapshot_id)
     records = _materialize_records(
         object_type=object_type, tenant_id=tenant_id, snapshot_id=snapshot_id, rows=rows
     )
@@ -134,6 +135,34 @@ async def materialize(
         object_type,
         tenant_id,
         [r[2] for r in records],
+    )
+
+
+async def _record_materialization(
+    conn: asyncpg.Connection, *, object_type: str, tenant_id: str, snapshot_id: int
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO object_type_materialization (object_type, tenant_id, source_snapshot_id, materialized_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (object_type, tenant_id) DO UPDATE SET
+            source_snapshot_id = EXCLUDED.source_snapshot_id,
+            materialized_at = EXCLUDED.materialized_at
+        """,
+        object_type,
+        tenant_id,
+        snapshot_id,
+    )
+
+
+async def is_materialized(pool: asyncpg.Pool, object_type: str, tenant_id: str) -> bool:
+    """Whether any snapshot of this ObjectType has reached the serving store."""
+    return bool(
+        await pool.fetchval(
+            "SELECT 1 FROM object_type_materialization WHERE object_type = $1 AND tenant_id = $2",
+            object_type,
+            tenant_id,
+        )
     )
 
 

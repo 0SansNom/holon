@@ -27,6 +27,7 @@ from holon_common import (
 )
 from holon_common.audit import emit_audit
 from holon_common.connector_safety import ConnectorSafetyError
+from holon_common.correlation import current_correlation_id
 
 from . import (
     deps,
@@ -267,7 +268,7 @@ async def _finalize_sync(
         workspace_id=workspace_id,
         aggregate_type="Connector",
         aggregate_id=connector_urn,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{tenant_id}/{dataset_urn}",
         producer="connectivity-platform@0.1.0",
         actor=actor,

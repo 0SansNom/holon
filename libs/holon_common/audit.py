@@ -5,7 +5,8 @@ Postgres pool may also ``install_durable_audit(pool)`` so the same records
 are queryable in-platform immediately (no file-polling lag).
 
 Schema version 1 answers who / what / when / where / outcome, with an
-enforced ``category`` for filtering.
+enforced ``category`` for filtering. ``traceId`` defaults to the current
+correlation id, which is shared by every service that handles one action.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
+
+from .correlation import current_correlation_id
 
 _audit_logger = logging.getLogger("holon.audit")
 if not _audit_logger.handlers:
@@ -79,7 +82,7 @@ def build_audit_record(
         "resourceUrn": resource_urn,
         "permission": permission,
         "reason": reason,
-        "traceId": trace_id,
+        "traceId": trace_id or current_correlation_id(),
         "requestId": request_id,
     }
     if extra:

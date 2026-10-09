@@ -11,6 +11,7 @@ import asyncpg
 import httpx
 
 from holon_common import EventActor, EventEnvelope, build_urn, outbox
+from holon_common.correlation import current_correlation_id
 
 from . import markings as markings_module
 from .object_types import get_object_type, get_object_type_version, validate_ot_metadata
@@ -339,7 +340,7 @@ async def _write_publish(
         tenant_id=draft["tenant_id"],
         aggregate_type="ObjectType",
         aggregate_id=object_type_urn,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{draft['tenant_id']}/{object_type_urn}",
         producer="knowledge-platform@0.1.0",
         actor=EventActor(type="service_account", urn=build_urn(draft["tenant_id"], "global", "service-account", "ontology-governance")),

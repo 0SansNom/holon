@@ -29,6 +29,7 @@ from holon_common import (
 )
 from holon_common.audit import clear_durable_audit_hooks
 from holon_common.audit_store import install_durable_audit
+from holon_common.correlation import instrument_correlation
 from holon_common.readiness import check_kafka_producer, check_opa, check_postgres, check_spicedb, report_ready
 
 from . import deps, scim
@@ -96,6 +97,7 @@ app = FastAPI(title="Holon — Identity Platform", lifespan=lifespan)
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+instrument_correlation(app)
 install_error_handlers(app, service_name=SERVICE_NAME)
 app.include_router(scim.router, prefix="/scim/v2")
 app.include_router(api_router)

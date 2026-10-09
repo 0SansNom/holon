@@ -8,6 +8,7 @@ import asyncpg
 
 from holon_common import EventActor, EventEnvelope, Principal, outbox
 from holon_common.auth import mark_principal_disabled, mark_principal_enabled
+from holon_common.correlation import current_correlation_id
 
 
 async def enqueue_principal_status_event(
@@ -27,7 +28,7 @@ async def enqueue_principal_status_event(
         workspace_id=workspace_id,
         aggregate_type="Principal",
         aggregate_id=target_principal_urn,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{tenant_id}/{target_principal_urn}",
         producer="identity-platform@0.1.0",
         actor=EventActor(type=actor.type, urn=actor.urn, on_behalf_of=actor.on_behalf_of),

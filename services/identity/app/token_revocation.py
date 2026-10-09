@@ -13,6 +13,7 @@ from holon_common.auth import (
     replace_disabled_principal_urns,
     replace_revoked_jtis,
 )
+from holon_common.correlation import current_correlation_id
 
 
 async def enqueue_token_revoked(
@@ -33,7 +34,7 @@ async def enqueue_token_revoked(
         workspace_id=workspace_id,
         aggregate_type="Token",
         aggregate_id=jti,
-        correlation_id=event_id,
+        correlation_id=current_correlation_id() or event_id,
         partition_key=f"{tenant_id}/{principal_urn}",
         producer="identity-platform@0.1.0",
         actor=EventActor(type=actor.type, urn=actor.urn, on_behalf_of=actor.on_behalf_of),

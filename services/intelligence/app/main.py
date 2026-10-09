@@ -41,6 +41,7 @@ from holon_common import (
 from holon_common.audit import clear_durable_audit_hooks, emit_audit
 from holon_common.audit_store import install_durable_audit, list_events_page
 from holon_common.authz import PermissionClient
+from holon_common.correlation import instrument_correlation
 from holon_common.readiness import check_kafka_producer, check_opa, check_postgres, check_qdrant, check_spicedb, report_ready
 from holon_common.principal_status import (
     consume_identity_auth_events,
@@ -239,6 +240,7 @@ app = FastAPI(title="Holon — Ontology-grounded agent runtime (beta)", lifespan
 instrument_cors(app)
 instrument_metrics(app, service_name=SERVICE_NAME)
 instrument_tracing(app, service_name=SERVICE_NAME, otlp_endpoint=OTLP_ENDPOINT)
+instrument_correlation(app)
 install_error_handlers(app, service_name=SERVICE_NAME)
 current_principal = make_principal_dependency(JWT_SECRET, secrets=JWT_SECRETS)
 
@@ -298,6 +300,7 @@ async def list_intelligence_audit_events(
     action: Optional[str] = None,
     actor: Optional[str] = None,
     outcome: Optional[str] = None,
+    traceId: Optional[str] = None,
     pageSize: Optional[int] = None,
     pageToken: Optional[str] = None,
 ) -> dict:
@@ -310,6 +313,7 @@ async def list_intelligence_audit_events(
         action=action,
         actor_urn=actor,
         outcome=outcome,
+        trace_id=traceId,
         page_size=50 if pageSize is None else pageSize,
         page_token=pageToken,
     )

@@ -37,6 +37,8 @@ CREATE INDEX IF NOT EXISTS audit_event_tenant_category_idx
     ON audit_event (tenant_id, category, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS audit_event_tenant_actor_idx
     ON audit_event (tenant_id, actor_urn, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS audit_event_tenant_trace_idx
+    ON audit_event (tenant_id, trace_id, occurred_at);
 """
 
 
@@ -98,6 +100,7 @@ async def list_events(
     action: Optional[str] = None,
     actor_urn: Optional[str] = None,
     outcome: Optional[str] = None,
+    trace_id: Optional[str] = None,
     occurred_after: Optional[datetime] = None,
     occurred_before: Optional[datetime] = None,
     after_id: Optional[int] = None,
@@ -121,6 +124,10 @@ async def list_events(
     if outcome:
         clauses.append(f"outcome = ${idx}")
         args.append(outcome)
+        idx += 1
+    if trace_id:
+        clauses.append(f"trace_id = ${idx}")
+        args.append(trace_id)
         idx += 1
     if occurred_after is not None:
         clauses.append(f"occurred_at >= ${idx}")
@@ -198,6 +205,7 @@ async def list_events_page(
     action: Optional[str] = None,
     actor_urn: Optional[str] = None,
     outcome: Optional[str] = None,
+    trace_id: Optional[str] = None,
     page_size: int = 50,
     page_token: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -216,6 +224,7 @@ async def list_events_page(
         action=action,
         actor_urn=actor_urn,
         outcome=outcome,
+        trace_id=trace_id,
         after_id=after_id,
         page_size=page_size + 1,
     )

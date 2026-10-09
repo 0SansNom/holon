@@ -583,6 +583,7 @@ services:
       HOLON_IDENTITY_URL: http://identity:8000
       HOLON_CONNECTIVITY_URL: http://connectivity:8000
       HOLON_INTELLIGENCE_URL: http://intelligence:8000
+      HOLON_AUTOMATION_URL: http://automation:8000
     volumes:
       - ./libs:/app/libs
       - ./services/experience/app:/app/app
