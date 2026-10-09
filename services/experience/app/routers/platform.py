@@ -21,12 +21,12 @@ from ..deps import (
     KNOWLEDGE_URL,
     TENANT_ID,
     WORKSPACE_ID,
-    authorize_workspace,
+    _authorize_workspace,
+    _get_json,
+    _intelligence_enabled,
+    _proxy,
+    _upstream_authorization,
     current_principal,
-    get_json,
-    intelligence_enabled,
-    proxy,
-    upstream_authorization,
 )
 
 router = APIRouter()
@@ -54,7 +54,7 @@ async def config() -> dict:
     return {
         "tenant_id": TENANT_ID,
         "workspace_id": WORKSPACE_ID,
-        "intelligence_enabled": intelligence_enabled(),
+        "intelligence_enabled": _intelligence_enabled(),
         "require_connector_secret_ref": is_production(),
     }
 
@@ -71,7 +71,7 @@ async def list_experience_audit_events(
     pageToken: Optional[str] = None,
 ) -> dict:
     """Durable Experience audit (applications, collections, UI plugins)."""
-    await authorize_workspace(principal, "approve")
+    await _authorize_workspace(principal, "approve")
     return await list_audit_events_http(
         deps.pool,
         principal.tenant_id,
@@ -95,13 +95,13 @@ async def get_audit_trace(
     cannot answer is listed in `unavailable` instead of failing the view;
     one with more than a page of records is listed in `truncated`.
     """
-    await authorize_workspace(principal, "approve")
-    authorization = upstream_authorization(request)
+    await _authorize_workspace(principal, "approve")
+    authorization = _upstream_authorization(request)
     query = httpx.QueryParams({"traceId": trace_id, "pageSize": _AUDIT_TRACE_PAGE_SIZE})
 
     async def fetch(service: str, url: str) -> tuple[str, int, Any]:
         try:
-            status, body = await get_json(f"{url}?{query}", authorization=authorization)
+            status, body = await _get_json(f"{url}?{query}", authorization=authorization)
         except httpx.HTTPError as exc:
             return service, 503, {"detail": str(exc)}
         return service, status, body
@@ -131,8 +131,8 @@ async def get_lineage(
     target = f"{KNOWLEDGE_URL}/api/holon/lineage/{urn}"
     if query:
         target = f"{target}?{query}"
-    return await proxy(
+    return await _proxy(
         "GET",
         target,
-        authorization=upstream_authorization(request),
+        authorization=_upstream_authorization(request),
     )
