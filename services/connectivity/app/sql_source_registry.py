@@ -1,4 +1,4 @@
-"""No-code SQL source registry for Postgres, MySQL/MariaDB, SQL Server, and Snowflake."""
+"""No-code SQL source registry for Postgres-compatible engines, MySQL/MariaDB/SingleStore, SQL Server/Synapse, and Snowflake."""
 
 from __future__ import annotations
 
@@ -59,11 +59,13 @@ _MYSQL_FORBIDDEN = re.compile(
     r"\b(load_file\s*\(|into\s+outfile\b|into\s+dumpfile\b|benchmark\s*\(|sleep\s*\()",
     re.IGNORECASE,
 )
-# SQL Server file / OLE / extended-proc / linked-server helpers.
+# SQL Server linked-server / extended-proc helpers. OPENROWSET is separate:
+# dedicated pools forbid it; serverless SQL pools use it to read storage files.
 _MSSQL_FORBIDDEN = re.compile(
-    r"\b(openrowset\s*\(|opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
+    r"\b(opendatasource\s*\(|openquery\s*\(|xp_\w+|sp_oacreate\b)",
     re.IGNORECASE,
 )
+_MSSQL_OPENROWSET = re.compile(r"\bopenrowset\s*\(", re.IGNORECASE)
 # Snowflake stage / system helpers with side effects or file access.
 # Role grants remain the real control plane; this mirrors MySQL/MSSQL denylists.
 _SNOWFLAKE_FORBIDDEN = re.compile(
@@ -84,7 +86,7 @@ _ISO_CURSOR_RE = re.compile(
 )
 
 _PUBLIC_CONNECTION_COLUMNS = (
-    "tenant_id, name, dialect, host, port, database, warehouse, username, "
+    "tenant_id, name, dialect, host, port, database, warehouse, username, use_tls, "
     "(password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
     "created_by_urn, created_at"
 )
@@ -114,12 +116,16 @@ def _require_select_only(query: str, dialect: str = "postgres") -> None:
     ):
         raise SourceConfigError("query must be a read-only SELECT — writes, locks, and file helpers are not allowed")
     try:
-        d = sql_drivers.wire_dialect(dialect)
+        stored = sql_drivers.normalize_dialect(dialect)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
+    d = sql_drivers.wire_dialect(stored)
     if d == "mysql" and _MYSQL_FORBIDDEN.search(stripped):
         raise SourceConfigError("query must be a read-only SELECT — MySQL file helpers are not allowed")
-    if d == "mssql" and _MSSQL_FORBIDDEN.search(stripped):
+    if d == "mssql" and (
+        _MSSQL_FORBIDDEN.search(stripped)
+        or (stored != "azure_synapse_serverless" and _MSSQL_OPENROWSET.search(stripped))
+    ):
         raise SourceConfigError("query must be a read-only SELECT — SQL Server file helpers are not allowed")
     if d == "snowflake" and _SNOWFLAKE_FORBIDDEN.search(stripped):
         raise SourceConfigError(
@@ -213,10 +219,12 @@ async def register_connection(
     warehouse: Optional[str] = None,
     password: Optional[str] = None,
     secret_ref: Optional[str] = None,
+    use_tls: Optional[bool] = None,
 ) -> dict:
     """Register or update a SQL connection credential."""
     try:
         dialect = sql_drivers.normalize_dialect(dialect)
+        use_tls = sql_drivers.resolve_use_tls(dialect, use_tls)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
     if sql_drivers.wire_dialect(dialect) == "snowflake":
@@ -232,7 +240,7 @@ async def register_connection(
         port = sql_drivers.default_port_for(dialect)
 
     existing = await pool.fetchrow(
-        "SELECT host, port, dialect, database, username, password, secret_ref "
+        "SELECT host, port, dialect, database, username, password, secret_ref, use_tls "
         "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
@@ -247,6 +255,7 @@ async def register_connection(
                 or int(existing["port"]) != int(port)
                 or (existing["dialect"] or "postgres") != dialect
                 or existing["database"] != database
+                or bool(existing["use_tls"]) != use_tls
             )
             assert_destination_change_requires_secret(
                 is_update=True,
@@ -265,8 +274,8 @@ async def register_connection(
     await pool.execute(
         """
         INSERT INTO sql_connection
-            (tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, use_tls, created_by_urn)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
             dialect = EXCLUDED.dialect,
             host = EXCLUDED.host,
@@ -275,9 +284,10 @@ async def register_connection(
             warehouse = EXCLUDED.warehouse,
             username = EXCLUDED.username,
             password = EXCLUDED.password,
-            secret_ref = EXCLUDED.secret_ref
+            secret_ref = EXCLUDED.secret_ref,
+            use_tls = EXCLUDED.use_tls
         """,
-        tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn,
+        tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, use_tls, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
@@ -428,7 +438,7 @@ async def fetch_for_dataset(
         raise SourceFetchError(f"no active SQL source registered as {name!r}")
 
     connection = await pool.fetchrow(
-        "SELECT dialect, host, port, database, warehouse, username, password, secret_ref "
+        "SELECT dialect, host, port, database, warehouse, username, password, secret_ref, use_tls "
         "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, row["connection_name"],
     )
@@ -477,6 +487,7 @@ async def fetch_for_dataset(
             sql=sql,
             args=args,
             warehouse=connection["warehouse"],
+            use_tls=bool(connection["use_tls"]),
         )
     except Exception as exc:
         # Drivers raise a mix of OSError, asyncpg/aiomysql/aioodbc errors.
