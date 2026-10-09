@@ -12,7 +12,7 @@ pyiceberg[pyarrow,s3fs]==0.10.0
 # required pyarrow>=9,<18; 0.10.0 allows >=17 with no upper bound. Azure Blob
 # still uses pyarrow.fs.AzureFileSystem (native since 16.0).
 pyarrow==23.0.1
-pymongo==4.17.0
+pymongo==4.18.2
 paramiko==5.0.0
 google-auth==2.38.0
 # 4.x drops the cffi<2 pin that conflicted with cryptography>=50.

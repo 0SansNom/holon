@@ -16,12 +16,18 @@ sys.path.insert(0, str(REPO / "services" / "connectivity"))
 from holon_common.connector_safety import ConnectorSafetyError  # noqa: E402
 
 from app.source_registry_base import (  # noqa: E402
+    ConnectionConflictError,
     SourceConflictError,
     SourceFetchError,
     assert_dataset_available,
+    delete_row,
+    get_row,
+    is_registered,
+    list_rows,
     make_column_cursor_commit,
     make_property_cursor_commit,
     resolve_source_secret,
+    set_status,
 )
 from app import (  # noqa: E402
     generic_source_registry,
@@ -46,6 +52,76 @@ def test_exception_types_are_shared_across_registries() -> None:
         assert mod.SourceFetchError is shared
         assert mod.SourceConflictError is SourceConflictError
         assert issubclass(mod.SourceFetchError, ValueError)
+
+
+def test_connection_conflict_error_is_shared() -> None:
+    for mod in (generic_source_registry, sql_source_registry, object_source_registry):
+        assert mod.ConnectionConflictError is ConnectionConflictError
+        assert issubclass(mod.ConnectionConflictError, ValueError)
+
+
+def test_row_helpers_reject_unknown_table_before_query() -> None:
+    pool = MagicMock()
+    pool.fetchrow = AsyncMock()
+    pool.fetch = AsyncMock()
+    pool.fetchval = AsyncMock()
+    pool.execute = AsyncMock()
+    calls = (
+        get_row(pool, table="pg_user", columns="name", tenant_id="t1", name="orders"),
+        list_rows(pool, table="pg_user", columns="name", tenant_id="t1"),
+        delete_row(pool, table="pg_user", tenant_id="t1", name="orders"),
+        set_status(pool, table="pg_user", columns="name", tenant_id="t1", name="orders", status="active"),
+        is_registered(pool, table="pg_user", tenant_id="t1", name="orders"),
+    )
+    for call in calls:
+        with pytest.raises(ValueError, match="unknown source table"):
+            asyncio.run(call)
+    pool.fetchrow.assert_not_awaited()
+    pool.fetch.assert_not_awaited()
+    pool.fetchval.assert_not_awaited()
+    pool.execute.assert_not_awaited()
+
+
+def test_get_row_reads_allowlisted_table() -> None:
+    pool = MagicMock()
+    pool.fetchrow = AsyncMock(return_value={"name": "orders"})
+    row = asyncio.run(
+        get_row(pool, table="sql_source", columns="tenant_id, name", tenant_id="t1", name="orders")
+    )
+    assert row == {"name": "orders"}
+    sql, tenant_id, name = pool.fetchrow.await_args.args
+    assert sql == "SELECT tenant_id, name FROM sql_source WHERE tenant_id = $1 AND name = $2"
+    assert tenant_id == "t1"
+    assert name == "orders"
+
+
+def test_get_row_rejects_column_list_before_query() -> None:
+    pool = MagicMock()
+    pool.fetchrow = AsyncMock()
+    with pytest.raises(ValueError, match="column list"):
+        asyncio.run(get_row(pool, table="sql_source", columns="name; drop", tenant_id="t1", name="orders"))
+    pool.fetchrow.assert_not_awaited()
+
+
+def test_set_status_updates_then_rereads() -> None:
+    pool = MagicMock()
+    pool.execute = AsyncMock()
+    pool.fetchrow = AsyncMock(return_value={"name": "orders", "status": "disabled"})
+    row = asyncio.run(
+        set_status(
+            pool,
+            table="object_source",
+            columns="name, status",
+            tenant_id="t1",
+            name="orders",
+            status="disabled",
+        )
+    )
+    assert row == {"name": "orders", "status": "disabled"}
+    update = pool.execute.await_args.args
+    assert update[0] == "UPDATE object_source SET status = $1 WHERE tenant_id = $2 AND name = $3"
+    assert update[1:] == ("disabled", "t1", "orders")
+    assert "object_source" in pool.fetchrow.await_args.args[0]
 
 
 def test_resolve_source_secret_maps_connector_safety_to_fetch_error(monkeypatch) -> None:
