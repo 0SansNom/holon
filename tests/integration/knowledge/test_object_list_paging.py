@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from conftest import KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import _request, ontology_url
 
 
 def test_customer_list_pages_with_cursor(jdoe_token: str) -> None:

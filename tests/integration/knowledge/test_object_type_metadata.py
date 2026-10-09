@@ -7,7 +7,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import CONNECTIVITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
+from conftest import CONNECTIVITY, _request, _unique_name, ontology_url, holon_url
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KNOWLEDGE_DIR = REPO_ROOT / "services" / "knowledge"

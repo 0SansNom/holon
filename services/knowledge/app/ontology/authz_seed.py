@@ -11,7 +11,6 @@ from typing import Optional
 
 import asyncpg
 
-logger = logging.getLogger("knowledge.authz_seed")
 from holon_common import parse_urn
 from holon_common.authz import PermissionClient
 from holon_common.urn import InvalidURNError
@@ -21,6 +20,8 @@ from .shared_property_types import list_shared_property_types, shared_property_t
 from .relation_types import list_relation_types
 from .value_types import list_value_types, value_type_urn
 from .urns import workspace_urn
+
+logger = logging.getLogger("knowledge.authz_seed")
 
 # Business workspace lives in the URN for object types and relation types.
 # Shared property types and value types use the `global` namespace; they are

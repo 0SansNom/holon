@@ -105,10 +105,10 @@ async def _authorize_and_prepare(
         object_type_urn = await core._object_type_urn_for(
             resolved_type, tenant_id=principal.tenant_id, workspace_id=workspace_id
         )
-    except KeyError:
+    except KeyError as exc:
         raise HolonError.not_found(
             "ObjectTypeNotFound", f"unknown ObjectType: {resolved_type}", object_type=resolved_type
-        )
+        ) from exc
     await core._authorize_object_type(principal, object_type_urn, action_type["required_permission"])
     return action_type["name"], resolved_type, resolved_key
 

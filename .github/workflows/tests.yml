@@ -6,7 +6,31 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Ruff
+        run: |
+          pip install ruff==0.16.2
+          ruff check services libs cli tests
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: services/experience/web/package-lock.json
+      - name: Frontend check and test
+        working-directory: services/experience/web
+        run: npm ci && npm run check && npm test
+
   unit:
+    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

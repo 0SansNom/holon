@@ -12,7 +12,6 @@ import json
 import time
 import uuid
 
-import pytest
 from aiokafka import AIOKafkaProducer
 from conftest import CONNECTIVITY, _request
 

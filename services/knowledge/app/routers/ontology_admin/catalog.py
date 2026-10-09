@@ -5,39 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from pyiceberg.exceptions import NoSuchTableError
 
 from holon_common import EventActor, EventEnvelope, HolonError, Principal, build_urn
 from holon_common.correlation import current_correlation_id
 
-from ... import actions, catalog, glossary, ontology, ontology_health, query_log, resolver
+from ... import catalog, resolver
 from ... import core
-from ...paging import interface_instance_key
-from ..objects.paging_deps import page_response, paging_query
 from ._auth import (
-    IDENTITY_URL,
-    _ALLOWED_CLASSIFICATIONS,
-    _authorize_marking_administer,
     _authorize_ontology_governance,
-    _authorize_ontology_write,
-    _authorize_relation_type,
-    _authorize_shared_property_type,
-    _authorize_value_type,
     _authorize_workspace_read,
-    _identity_validation_token,
-    _link_object_type_to_project,
-    _link_relation_type_to_project,
-    _link_shared_property_type_to_project,
-    _link_value_type_to_project,
-    _seed_relation_type_authz,
-    _seed_shared_property_type_authz,
-    _seed_value_type_authz,
-    _validate_optional_project_urn,
-    _validate_resource_type,
 )
 
 router = APIRouter()
@@ -63,8 +43,8 @@ async def get_dataset_schema(
     await _authorize_workspace_read(principal, workspace_id)
     try:
         return await asyncio.to_thread(resolver.dataset_schema, name, **core.iceberg_kwargs(principal.tenant_id))
-    except (NoSuchTableError, ValueError):
-        raise HolonError.not_found("DatasetNotFound", f"dataset {name!r} has never been synced")
+    except (NoSuchTableError, ValueError) as exc:
+        raise HolonError.not_found("DatasetNotFound", f"dataset {name!r} has never been synced") from exc
 
 
 @router.get("/catalog/datasets/{name}/preview")
@@ -83,11 +63,11 @@ async def preview_dataset(
     await _authorize_workspace_read(principal, workspace_id)
     try:
         rows = await asyncio.to_thread(resolver.fetch_generic, name, **core.iceberg_kwargs(principal.tenant_id))
-    except (NoSuchTableError, ValueError):
+    except (NoSuchTableError, ValueError) as exc:
         # ValueError: `name` isn't even a legal Iceberg identifier
         # (holon_common.iceberg_ident) — such a dataset could never
         # have been synced, same "not found" outcome as NoSuchTableError.
-        raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced")
+        raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced") from exc
     if not rows:
         return {"columns": []}
     return {"columns": [{"name": key, "sample": value} for key, value in rows[0].items()]}
@@ -119,11 +99,11 @@ async def get_dataset_stats(
         return await asyncio.to_thread(
             resolver.dataset_schema_and_stats, name, **core.iceberg_kwargs(principal.tenant_id)
         )
-    except (NoSuchTableError, ValueError):
+    except (NoSuchTableError, ValueError) as exc:
         # ValueError: `name` isn't even a legal Iceberg identifier
         # (holon_common.iceberg_ident) — such a dataset could never
         # have been synced, same "not found" outcome as NoSuchTableError.
-        raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced")
+        raise HolonError.not_found('DatasetNotFound', f"dataset {name!r} has never been synced") from exc
 
 
 class GenerateJoinDatasetRequest(BaseModel):

@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from conftest import KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
+from conftest import _request, ontology_url, holon_url
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KNOWLEDGE_DIR = REPO_ROOT / "services" / "knowledge"

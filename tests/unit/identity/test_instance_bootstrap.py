@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "identity"))
 
-from holon_common.spicedb_id import spicedb_object_id
+from holon_common.spicedb_id import spicedb_object_id  # noqa: E402
 from app.seed import _verify_client_secret_hash, ensure_instance_bootstrap  # noqa: E402
 
 

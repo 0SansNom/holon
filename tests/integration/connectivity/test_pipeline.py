@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, _request, _unique_name, holon_url
 
 
 def _token_for(principal_urn: str) -> str:

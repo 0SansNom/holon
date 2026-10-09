@@ -9,7 +9,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, holon_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "libs"))
 

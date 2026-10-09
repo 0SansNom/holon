@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import IDENTITY, _request, ontology_url
 
 
 # Mirrors docker/stream-seed/inventory_events.jsonl

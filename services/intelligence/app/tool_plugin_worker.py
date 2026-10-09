@@ -10,7 +10,6 @@ import asyncio
 import json
 import sys
 import traceback
-from typing import Any
 
 
 def run_invoke(entry_point: str, tool_input: dict) -> dict:

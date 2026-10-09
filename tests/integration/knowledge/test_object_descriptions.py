@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, ontology_url, holon_url
+from conftest import IDENTITY, ontology_url, holon_url
 
 
 OBJECT_TYPES = ["Customer", "Order", "SupportTicket", "ProductReview", "Supplier", "InventoryLevel"]

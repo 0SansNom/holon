@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 
 import pytest
-from conftest import AUTOMATION, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import AUTOMATION, IDENTITY, _request, ontology_url, holon_url
 
 
 FAILURE_SENTINEL = "__simulate_failure__"

@@ -100,8 +100,8 @@ async def execute_plan(request: ExecutionRequest, principal: Principal = Depends
     """
     try:
         object_type_urn = await core._object_type_urn_for(request.object_type, tenant_id=principal.tenant_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {request.object_type}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {request.object_type}") from exc
     await core._authorize_object_type(principal, object_type_urn, "read")
 
     object_type = await ontology.get_object_type(core.pool, object_type_urn)
@@ -233,8 +233,8 @@ async def replay_plan(plan_hash: str, principal: Principal = Depends(core.curren
     object_type_name = plan["object_type"]
     try:
         object_type_urn = await core._object_type_urn_for(object_type_name, tenant_id=principal.tenant_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {object_type_name}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType: {object_type_name}") from exc
     await core._authorize_object_type(principal, object_type_urn, "read")
     target_object_type_urn = None
     if operation == "join" and plan.get("target_object_type"):

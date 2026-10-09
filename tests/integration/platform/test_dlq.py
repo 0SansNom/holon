@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import asyncpg
 from conftest import TENANT_ID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "libs"))

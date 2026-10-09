@@ -60,8 +60,8 @@ async def export_objects(
     """
     try:
         object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id)
-    except KeyError:
-        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType {object_type!r}")
+    except KeyError as exc:
+        raise HolonError.not_found('ObjectTypeNotFound', f"unknown ObjectType {object_type!r}") from exc
     await core._authorize_object_type(principal, object_type_urn, "read")
     handle = await _require_handle(object_type, principal.tenant_id)
     rows = await core._resolve_many(object_type, principal.tenant_id, handle["fetch_fn"], principal=principal)

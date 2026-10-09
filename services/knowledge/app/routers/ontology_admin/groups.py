@@ -2,41 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
-from pyiceberg.exceptions import NoSuchTableError
 
-from holon_common import EventActor, EventEnvelope, HolonError, Principal, build_urn
+from holon_common import HolonError, Principal
 
-from ... import actions, catalog, glossary, ontology, ontology_health, query_log, resolver
+from ... import ontology
 from ... import core
-from ...paging import interface_instance_key
-from ..objects.paging_deps import page_response, paging_query
 from ._auth import (
-    IDENTITY_URL,
-    _ALLOWED_CLASSIFICATIONS,
-    _authorize_marking_administer,
     _authorize_ontology_governance,
-    _authorize_ontology_write,
-    _authorize_relation_type,
-    _authorize_shared_property_type,
-    _authorize_value_type,
-    _authorize_workspace_read,
-    _identity_validation_token,
-    _link_object_type_to_project,
-    _link_relation_type_to_project,
-    _link_shared_property_type_to_project,
-    _link_value_type_to_project,
-    _seed_relation_type_authz,
-    _seed_shared_property_type_authz,
-    _seed_value_type_authz,
-    _validate_optional_project_urn,
-    _validate_resource_type,
 )
 
 router = APIRouter()
@@ -201,7 +178,9 @@ async def evaluate_object_set(name: str, principal: Principal = Depends(core.cur
         try:
             await _authorize_ontology_governance(principal, workspace_id)
         except HolonError:
-            raise HolonError.not_found('ObjectSetNotFound', f"unknown object set: {name}")
+            # A hidden set stays absent. The governance denial must not remain
+            # the cause, or a log of this 404 shows that the set exists.
+            raise HolonError.not_found('ObjectSetNotFound', f"unknown object set: {name}") from None
 
     object_type = obj_set["object_type_urn"].rsplit(":", 1)[-1]
     handle = await core._type_handle(object_type, principal.tenant_id)
