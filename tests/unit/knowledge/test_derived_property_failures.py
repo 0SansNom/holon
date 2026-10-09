@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import os
 import sys
 import types
@@ -102,3 +103,82 @@ def test_masked_required_input_is_not_a_failure(core, monkeypatch) -> None:
 
     assert "score" not in row
     assert "_failedDerivedFields" not in row
+
+
+class _RaisingPlugin:
+    async def call(self, **inputs):
+        raise RuntimeError("model unavailable")
+
+
+class _DoublingPlugin:
+    async def call(self, **inputs):
+        return {"doubled": inputs["revenue"] * 2}
+
+
+def test_one_failure_of_each_kind_leaves_the_rest_of_the_row(core, monkeypatch, caplog) -> None:
+    async def get_object_type(pool, urn):
+        return {
+            "property_mapping": {"revenue": "revenue", "region": "region"},
+            "derived_properties": {
+                "score": "score_fn",
+                "doubled": "double_fn",
+                "reviewCount": {"kind": "link_aggregate", "path": "reviewed"},
+                "itemTotal": {"kind": "struct_reducer", "property": "items"},
+            },
+        }
+
+    async def find_active_function_by_name(pool, name):
+        registrations = {
+            "score_fn": {"manifest": {"function_name": "score_fn", "input_schema": {"required": ["revenue"]}}},
+            "double_fn": {"manifest": {"function_name": "double_fn", "input_schema": {"required": ["revenue"]}}},
+        }
+        return registrations.get(name)
+
+    def load_function_plugin(manifest):
+        if manifest["function_name"] == "double_fn":
+            return _DoublingPlugin()
+        return _RaisingPlugin()
+
+    async def list_relation_types(pool, tenant_id):
+        return []
+
+    async def link_aggregate(*args, **kwargs):
+        raise RuntimeError("neighbor lookup failed")
+
+    def struct_reducer(*args, **kwargs):
+        raise RuntimeError("incomparable struct values")
+
+    monkeypatch.setattr(core.ontology, "get_object_type", get_object_type)
+    monkeypatch.setattr(core.ontology, "list_relation_types", list_relation_types)
+    monkeypatch.setattr(core.function_registry, "find_active_function_by_name", find_active_function_by_name)
+    monkeypatch.setattr(core.function_registry, "load_function_plugin", load_function_plugin)
+    monkeypatch.setattr(core, "_compute_link_aggregate", link_aggregate)
+    monkeypatch.setattr(core, "_compute_struct_reducer", struct_reducer)
+
+    source = {
+        "id": 1,
+        "revenue": 5,
+        "region": "eu",
+        "items": [{"amount": 3}, {"amount": 4}],
+    }
+    with caplog.at_level(logging.ERROR, logger="knowledge"):
+        (row,) = asyncio.run(
+            core._apply_derived_properties(_URN, [source], principal=types.SimpleNamespace(tenant_id="acme"))
+        )
+
+    assert row["id"] == 1
+    assert row["revenue"] == 5
+    assert row["region"] == "eu"
+    assert row["items"] == [{"amount": 3}, {"amount": 4}]
+    assert row["doubled"] == 10
+    assert "score" not in row
+    assert "reviewCount" not in row
+    assert "itemTotal" not in row
+    assert row["_failedDerivedFields"] == ["score", "reviewCount", "itemTotal"]
+    errors = [record for record in caplog.records if record.name == "knowledge"]
+    assert [record.message for record in errors] == [
+        "derived property 'score' failed, skipping it for this row",
+        "derived property 'reviewCount' failed, skipping it for this row",
+        "derived property 'itemTotal' failed, skipping it for this row",
+    ]
+    assert all(record.exc_info is not None and record.exc_info[0] is RuntimeError for record in errors)
