@@ -1,18 +1,9 @@
 import { useState } from "react";
-import {
-  Button,
-  Callout,
-  Dialog,
-  DialogBody,
-  DialogFooter,
-  FormGroup,
-  HTMLSelect,
-  InputGroup,
-} from "@blueprintjs/core";
+import { Button, Callout, Dialog, DialogBody, DialogFooter } from "@blueprintjs/core";
 import { useRegisterSqlConnection, useBootstrapConfig } from "../../api/hooks";
 import { ApiError } from "../../api/client";
 import type { SqlConnection, SqlDialect } from "../../api/connectivity";
-import { SecretRefField } from "./ConnectionFields";
+import { ConnectionFields, type ConnectionField } from "./ConnectionFields";
 
 const DEFAULT_PORTS: Record<SqlDialect, number> = {
   postgres: 5432,
@@ -21,23 +12,41 @@ const DEFAULT_PORTS: Record<SqlDialect, number> = {
   enterprisedb: 5444,
   greenplum: 5432,
   mysql: 3306,
+  mariadb: 3306,
   singlestore: 3306,
   mssql: 1433,
   azure_synapse: 1433,
+  azure_synapse_serverless: 1433,
   snowflake: 443,
 };
 
-const DIALECT_LABELS: Record<SqlDialect, string> = {
+export const DIALECT_LABELS: Record<SqlDialect, string> = {
   postgres: "PostgreSQL",
   alloydb: "AlloyDB",
   cockroachdb: "CockroachDB",
   enterprisedb: "EnterpriseDB",
   greenplum: "Greenplum",
-  mysql: "MySQL / MariaDB",
+  mysql: "MySQL",
+  mariadb: "MariaDB",
   singlestore: "SingleStore",
   mssql: "SQL Server",
   azure_synapse: "Azure Synapse (dedicated)",
+  azure_synapse_serverless: "Azure Synapse (serverless)",
   snowflake: "Snowflake",
+};
+
+const TLS_BY_DEFAULT = new Set<SqlDialect>([
+  "alloydb",
+  "cockroachdb",
+  "azure_synapse",
+  "azure_synapse_serverless",
+]);
+
+const DIALECT_HELP: Partial<Record<SqlDialect, string>> = {
+  singlestore: "MySQL protocol, port 3306. SingleStore has no Postgres listener.",
+  azure_synapse: "Dedicated pools reject OPENROWSET. Host looks like workspace.sql.azuresynapse.net.",
+  azure_synapse_serverless:
+    "Serverless allows OPENROWSET for files. Host looks like workspace-ondemand.sql.azuresynapse.net.",
 };
 
 function isDefaultPort(port: string, dialect: SqlDialect): boolean {
@@ -57,6 +66,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState("");
   const [secretRef, setSecretRef] = useState("");
+  const [useTls, setUseTls] = useState(editing != null ? editing.use_tls === true : TLS_BY_DEFAULT.has("postgres"));
   const [error, setError] = useState<string | null>(null);
   const register = useRegisterSqlConnection();
 
@@ -64,6 +74,9 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
     setDialect(next);
     if (isDefaultPort(port, dialect)) {
       setPort(String(DEFAULT_PORTS[next]));
+    }
+    if (!isEditing) {
+      setUseTls(TLS_BY_DEFAULT.has(next));
     }
   }
 
@@ -80,6 +93,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         username,
         password: requireSecretRef ? undefined : password || undefined,
         secret_ref: secretRef || undefined,
+        use_tls: dialect === "snowflake" ? undefined : useTls,
       });
       onClose();
     } catch (err) {
@@ -89,6 +103,109 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
 
   const secretOk = isEditing || Boolean(secretRef) || (!requireSecretRef && Boolean(password));
   const isSnowflake = dialect === "snowflake";
+  const fields: ConnectionField[] = [
+    {
+      kind: "text",
+      id: "sql-connection-name",
+      label: "Name",
+      value: name,
+      onChange: setName,
+      placeholder: "my_db",
+      helperText: "e.g. erp_prod — referenced by SQL sources, not a dataset name",
+      disabled: isEditing,
+    },
+    {
+      kind: "select",
+      id: "sql-connection-dialect",
+      label: "Dialect",
+      value: dialect,
+      onChange: (value) => onDialectChange(value as SqlDialect),
+      helperText: DIALECT_HELP[dialect],
+      disabled: isEditing,
+      options: (Object.keys(DIALECT_LABELS) as SqlDialect[]).map((d) => ({ value: d, label: DIALECT_LABELS[d] })),
+    },
+    {
+      kind: "text",
+      id: "sql-connection-host",
+      label: isSnowflake ? "Account / host" : "Host",
+      value: host,
+      onChange: setHost,
+      placeholder: isSnowflake ? "xy12345.eu-central-1" : "db.example.com",
+      helperText: isSnowflake
+        ? "Account locator (xy12345.eu-central-1) or full *.snowflakecomputing.com hostname"
+        : undefined,
+    },
+    {
+      kind: "number",
+      id: "sql-connection-port",
+      label: "Port",
+      value: port,
+      onChange: setPort,
+      placeholder: String(DEFAULT_PORTS[dialect]),
+    },
+    {
+      kind: "text",
+      id: "sql-connection-database",
+      label: "Database",
+      value: database,
+      onChange: setDatabase,
+      placeholder: "analytics",
+    },
+    ...(isSnowflake
+      ? [
+          {
+            kind: "text" as const,
+            id: "sql-connection-warehouse",
+            label: "Warehouse",
+            value: warehouse,
+            onChange: setWarehouse,
+            placeholder: "COMPUTE_WH",
+            helperText: "Optional compute warehouse. Leave blank to use the user default.",
+          },
+        ]
+      : []),
+    ...(!isSnowflake
+      ? [
+          {
+            kind: "checkbox" as const,
+            id: "sql-connection-use-tls",
+            label: "Require TLS",
+            checked: useTls,
+            onChange: setUseTls,
+            helperText:
+              "Verified TLS with the system trust store. Uncheck for a local proxy. Changing this on an existing connection requires the secret again.",
+          },
+        ]
+      : []),
+    {
+      kind: "text",
+      id: "sql-connection-username",
+      label: "Username",
+      value: username,
+      onChange: setUsername,
+      placeholder: "readonly_user",
+    },
+    ...(!requireSecretRef
+      ? [
+          {
+            kind: "secret" as const,
+            id: "sql-connection-password",
+            label: "Password",
+            value: password,
+            onChange: setPassword,
+            placeholder: isEditing && editing?.has_password ? "•••••••• (unchanged)" : "••••••••",
+            helperText: isEditing && editing?.has_password ? "A password is already set — leave blank to keep it." : undefined,
+          },
+        ]
+      : []),
+    {
+      kind: "secretRef",
+      id: "sql-connection-secret-ref",
+      value: secretRef,
+      onChange: setSecretRef,
+      placeholder: "env:HOLON_CONN_<TENANT>__ERP_PASSWORD",
+    },
+  ];
 
   return (
     <Dialog isOpen title={isEditing ? "Edit SQL connection" : "New SQL connection"} onClose={onClose} style={{ width: 480 }}>
@@ -96,84 +213,9 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
+            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/MariaDB/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
         </p>
-        <FormGroup label="Name" helperText="e.g. erp_prod — referenced by SQL sources, not a dataset name">
-          <InputGroup value={name} onChange={(e) => setName(e.target.value)} placeholder="my_db" disabled={isEditing} />
-        </FormGroup>
-        <FormGroup label="Dialect">
-          <HTMLSelect
-            fill
-            value={dialect}
-            onChange={(e) => onDialectChange(e.target.value as SqlDialect)}
-            disabled={isEditing}
-          >
-            {(Object.keys(DIALECT_LABELS) as SqlDialect[]).map((d) => (
-              <option key={d} value={d}>
-                {DIALECT_LABELS[d]}
-              </option>
-            ))}
-          </HTMLSelect>
-        </FormGroup>
-        <FormGroup
-          label={isSnowflake ? "Account / host" : "Host"}
-          helperText={
-            isSnowflake
-              ? "Account locator (xy12345.eu-central-1) or full *.snowflakecomputing.com hostname"
-              : undefined
-          }
-        >
-          <InputGroup
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
-            placeholder={isSnowflake ? "xy12345.eu-central-1" : "db.example.com"}
-          />
-        </FormGroup>
-        <FormGroup label="Port">
-          <InputGroup
-            type="number"
-            value={port}
-            onChange={(e) => setPort(e.target.value)}
-            placeholder={String(DEFAULT_PORTS[dialect])}
-          />
-        </FormGroup>
-        <FormGroup label="Database">
-          <InputGroup value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="analytics" />
-        </FormGroup>
-        {isSnowflake && (
-          <FormGroup
-            label="Warehouse"
-            helperText="Optional compute warehouse. Leave blank to use the user default."
-          >
-            <InputGroup
-              value={warehouse}
-              onChange={(e) => setWarehouse(e.target.value)}
-              placeholder="COMPUTE_WH"
-            />
-          </FormGroup>
-        )}
-        <FormGroup label="Username">
-          <InputGroup value={username} onChange={(e) => setUsername(e.target.value)} placeholder="readonly_user" />
-        </FormGroup>
-        {!requireSecretRef && (
-          <FormGroup
-            label="Password"
-            helperText={isEditing && editing?.has_password ? "A password is already set — leave blank to keep it." : undefined}
-          >
-            <InputGroup
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={isEditing && editing?.has_password ? "•••••••• (unchanged)" : "••••••••"}
-            />
-          </FormGroup>
-        )}
-        <SecretRefField
-          id="sql-connection-secret-ref"
-          value={secretRef}
-          onChange={setSecretRef}
-          placeholder="env:HOLON_CONN_<TENANT>__ERP_PASSWORD"
-        />
+        <ConnectionFields fields={fields} />
         {error && (
           <Callout intent="danger" className="hl-mt-sm" title="Couldn't save">
             {error}

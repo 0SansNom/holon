@@ -147,6 +147,9 @@ class RegisterSqlConnectionRequest(BaseModel):
     # Optional; if omitted on edit, existing secret is retained
     password: Optional[str] = None
     secret_ref: Optional[str] = None
+    # Omitted → dialect default (TLS for AlloyDB, CockroachDB, Synapse).
+    # Explicit false stays cleartext, for a local proxy that already encrypts.
+    use_tls: Optional[bool] = None
 
 
 class RegisterSqlSourceRequest(BaseModel):

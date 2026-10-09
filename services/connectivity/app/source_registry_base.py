@@ -7,6 +7,7 @@ a fix is not applied five times.
 
 from __future__ import annotations
 
+import re
 from typing import Awaitable, Callable, Optional
 
 import asyncpg
@@ -28,6 +29,8 @@ _ALLOWED_SOURCE_TABLES = frozenset(table for table, _ in SOURCE_DATASET_TABLES)
 _ALLOWED_CURSOR_COLUMNS = frozenset(
     {"last_cursor_value", "last_synced_key", "last_synced_path", "cursor_boundary_keys"}
 )
+# Public projections are identifier lists plus `(col IS NOT NULL) AS alias`.
+_COLUMN_LIST = re.compile(r"^[A-Za-z0-9_(),\s]+$")
 
 
 class SourceConflictError(ValueError):
@@ -44,6 +47,75 @@ class SourceFetchError(ValueError):
 
 class ConnectionInUseError(ValueError):
     pass
+
+
+class ConnectionConflictError(ValueError):
+    pass
+
+
+def _require_source_table(table: str) -> None:
+    if table not in _ALLOWED_SOURCE_TABLES:
+        raise ValueError(f"unknown source table {table!r}")
+
+
+def _require_column_list(columns: str) -> None:
+    if not columns or _COLUMN_LIST.fullmatch(columns) is None:
+        raise ValueError("invalid source column list")
+
+
+async def get_row(
+    pool: asyncpg.Pool, *, table: str, columns: str, tenant_id: str, name: str
+) -> Optional[dict]:
+    _require_source_table(table)
+    _require_column_list(columns)
+    row = await pool.fetchrow(
+        f"SELECT {columns} FROM {table} WHERE tenant_id = $1 AND name = $2",
+        tenant_id,
+        name,
+    )
+    return None if row is None else dict(row)
+
+
+async def list_rows(pool: asyncpg.Pool, *, table: str, columns: str, tenant_id: str) -> list[dict]:
+    _require_source_table(table)
+    _require_column_list(columns)
+    rows = await pool.fetch(
+        f"SELECT {columns} FROM {table} WHERE tenant_id = $1 ORDER BY name",
+        tenant_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def delete_row(pool: asyncpg.Pool, *, table: str, tenant_id: str, name: str) -> None:
+    _require_source_table(table)
+    await pool.execute(
+        f"DELETE FROM {table} WHERE tenant_id = $1 AND name = $2",
+        tenant_id,
+        name,
+    )
+
+
+async def set_status(
+    pool: asyncpg.Pool, *, table: str, columns: str, tenant_id: str, name: str, status: str
+) -> Optional[dict]:
+    _require_source_table(table)
+    _require_column_list(columns)
+    await pool.execute(
+        f"UPDATE {table} SET status = $1 WHERE tenant_id = $2 AND name = $3",
+        status,
+        tenant_id,
+        name,
+    )
+    return await get_row(pool, table=table, columns=columns, tenant_id=tenant_id, name=name)
+
+
+async def is_registered(pool: asyncpg.Pool, *, table: str, tenant_id: str, name: str) -> bool:
+    _require_source_table(table)
+    return await pool.fetchval(
+        f"SELECT true FROM {table} WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
+        tenant_id,
+        name,
+    ) or False
 
 
 def resolve_source_secret(ref: Optional[str], *, tenant_id: str) -> Optional[str]:
