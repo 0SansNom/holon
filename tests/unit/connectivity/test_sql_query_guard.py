@@ -95,16 +95,17 @@ def test_normalize_dialect_rejects_unknown() -> None:
 
 def test_compatible_dialects_map_to_wire_drivers() -> None:
     cases = {
-        "alloydb": "postgres",
-        "cockroachdb": "postgres",
-        "enterprisedb": "postgres",
-        "greenplum": "postgres",
-        "singlestore": "mysql",
-        "azure_synapse": "mssql",
-        "Azure Synapse": "mssql",
+        "alloydb": ("alloydb", "postgres"),
+        "cockroachdb": ("cockroachdb", "postgres"),
+        "enterprisedb": ("enterprisedb", "postgres"),
+        "greenplum": ("greenplum", "postgres"),
+        "singlestore": ("singlestore", "mysql"),
+        "azure_synapse": ("azure_synapse", "mssql"),
+        "Azure Synapse": ("azure_synapse", "mssql"),
+        " Azure-Synapse ": ("azure_synapse", "mssql"),
     }
-    for name, wire in cases.items():
-        assert sql_drivers.normalize_dialect(name) == name.strip().lower().replace("-", "_").replace(" ", "_")
+    for name, (stored, wire) in cases.items():
+        assert sql_drivers.normalize_dialect(name) == stored
         assert sql_drivers.wire_dialect(name) == wire
     assert sql_drivers.cursor_placeholder("cockroachdb") == "$1"
     assert sql_drivers.cursor_placeholder("singlestore") == "%s"
@@ -116,7 +117,10 @@ def test_compatible_dialect_query_guards_follow_wire() -> None:
         _require_select_only("SELECT LOAD_FILE('/etc/passwd')", "singlestore")
     with pytest.raises(SourceConfigError):
         _require_select_only("SELECT * FROM OPENROWSET('x', 'y')", "azure_synapse")
+    with pytest.raises(SourceConfigError):
+        _require_select_only("SELECT crdb_internal.reset_sql_stats()", "cockroachdb")
     _require_select_only("SELECT id FROM orders", "cockroachdb")
+    _require_select_only("SELECT * FROM crdb_internal.cluster_settings", "cockroachdb")
 
 
 def test_cursor_placeholders() -> None:

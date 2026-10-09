@@ -40,7 +40,7 @@ _FORBIDDEN_STMT = re.compile(
 _COPY_STMT = re.compile(r"(^\s*copy\b|\bcopy\s+\S+\s+(from|to)\b)", re.IGNORECASE)
 _FORBIDDEN_FUNCS = re.compile(
     r"\b(pg_read_\w+|pg_ls_\w+|pg_file_\w+|pg_write_\w+|lo_import|lo_export|lo_get|lo_put|"
-    r"lo_from_bytea|lo_create|lo_unlink|dblink\w*|pg_sleep)\s*\(",
+    r"lo_from_bytea|lo_create|lo_unlink|dblink\w*|pg_sleep|crdb_internal\.\w+)\s*\(",
     re.IGNORECASE,
 )
 _SELECT_INTO = re.compile(
@@ -464,19 +464,19 @@ async def fetch_for_dataset(
         if row["cursor_property"] and row["last_cursor_value"] is not None:
             # Uniform bind across dialects (no pg_attribute type cast).
             col = quote_identifier(row["cursor_property"], dialect=wire)
-            sql += f" WHERE {col} >= {sql_drivers.cursor_placeholder(dialect)}"
+            sql += f" WHERE {col} >= {sql_drivers.cursor_placeholder(wire)}"
             args.append(_bind_cursor_value(row["last_cursor_value"]))
     else:
         sql = row["query"]
         args = []
         try:
-            _require_select_only(sql, dialect)
+            _require_select_only(sql, wire)
         except SourceConfigError as exc:
             raise SourceFetchError(str(exc)) from exc
 
     try:
         rows = await sql_drivers.fetch_dicts(
-            dialect=dialect,
+            dialect=wire,
             host=pinned_host,
             port=connection["port"],
             database=connection["database"],

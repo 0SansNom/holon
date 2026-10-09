@@ -66,6 +66,7 @@ def wire_dialect(dialect: str) -> str:
 def default_port_for(dialect: str) -> int:
     return DEFAULT_PORTS[normalize_dialect(dialect)]
 
+
 def normalize_snowflake_host(host: str) -> str:
     """Expand an account locator to the public Snowflake HTTPS hostname.
 
