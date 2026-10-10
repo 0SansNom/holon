@@ -48,6 +48,7 @@ SCHEDULER_ACTOR_URN = build_urn(TENANT_ID, "global", "service-account", "connect
 SCHEDULER_POLL_SECONDS = 60
 SCHEDULER_MAX_CONCURRENCY = int(os.environ.get("HOLON_SCHEDULER_MAX_CONCURRENCY", "4"))
 SCHEDULER_TENANT_CONCURRENCY = int(os.environ.get("HOLON_SCHEDULER_TENANT_CONCURRENCY", "2"))
+INGEST_BATCH_ROWS = int(os.environ.get("HOLON_INGEST_BATCH_ROWS", "50000"))
 SCHEDULER_FETCH_TIMEOUT_SECONDS = float(os.environ.get("HOLON_SCHEDULER_FETCH_TIMEOUT_SECONDS", "1800"))
 PIPELINE_FUNCTION_CALLER_URN = build_urn(TENANT_ID, "global", "service-account", "connectivity-pipeline-runner")
 CLOSE_ACCOUNT_FAILURE_SENTINEL = "__simulate_failure__"

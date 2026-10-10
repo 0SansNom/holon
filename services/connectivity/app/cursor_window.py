@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -93,6 +93,59 @@ class CursorAdvance:
     changed: bool
 
 
+class CursorTracker:
+    """`advance_cursor` fed batch by batch, so a sync never holds every row at once."""
+
+    def __init__(self, *, cursor_property: str, last_cursor: Optional[str], boundary_keys: Optional[str]) -> None:
+        self._cursor_property = cursor_property
+        self._last_cursor = last_cursor
+        self._seen = parse_boundary_keys(boundary_keys)
+        self._last_key = _cursor_key(last_cursor) if last_cursor is not None else None
+        self._newest: Any = None
+        self._boundary_ids: set[str] = set()
+
+    def keep(self, records: list[dict]) -> list[dict]:
+        """Rows at or after the stored cursor, except identities already stored at it."""
+        kept: list[dict] = []
+        for record in records:
+            raw = record.get(self._cursor_property)
+            if raw is None:
+                if self._last_key is None:
+                    kept.append(record)
+                continue
+            key = _cursor_key(raw)
+            ident = row_identity(record)
+            if self._last_key is not None:
+                order = _cmp(key, self._last_key)
+                if order < 0:
+                    continue
+                if order == 0 and ident in self._seen:
+                    continue
+            kept.append(record)
+            if self._newest is None or _cmp(key, self._newest) > 0:
+                self._newest = key
+                self._boundary_ids = {ident}
+            elif _cmp(key, self._newest) == 0:
+                self._boundary_ids.add(ident)
+        return kept
+
+    def result(self) -> CursorAdvance:
+        """The cursor to store once every kept row is written (`rows` is left empty)."""
+        if self._newest is None:
+            return CursorAdvance(
+                rows=[], cursor=self._last_cursor, boundary_keys=dump_boundary_keys(self._seen), changed=False
+            )
+        if self._last_key is not None and _cmp(self._newest, self._last_key) == 0:
+            new_cursor = self._last_cursor
+            merged = self._seen | self._boundary_ids
+        else:
+            new_cursor = str(self._newest)
+            merged = self._boundary_ids
+        encoded = dump_boundary_keys(merged)
+        changed = new_cursor != self._last_cursor or encoded != dump_boundary_keys(self._seen)
+        return CursorAdvance(rows=[], cursor=new_cursor, boundary_keys=encoded, changed=changed)
+
+
 def advance_cursor(
     records: list[dict],
     *,
@@ -101,48 +154,6 @@ def advance_cursor(
     boundary_keys: Optional[str],
 ) -> CursorAdvance:
     """Keep rows at or after `last_cursor`, except identities already seen there."""
-    seen = parse_boundary_keys(boundary_keys)
-    last_key = _cursor_key(last_cursor) if last_cursor is not None else None
-    kept: list[dict] = []
-    boundary_ids: set[str] = set()
-    newest: Any = None
-
-    for record in records:
-        raw = record.get(cursor_property)
-        if raw is None:
-            if last_key is None:
-                kept.append(record)
-            continue
-        key = _cursor_key(raw)
-        ident = row_identity(record)
-        if last_key is not None:
-            order = _cmp(key, last_key)
-            if order < 0:
-                continue
-            if order == 0 and ident in seen:
-                continue
-        kept.append(record)
-        if newest is None or _cmp(key, newest) > 0:
-            newest = key
-            boundary_ids = {ident}
-        elif _cmp(key, newest) == 0:
-            boundary_ids.add(ident)
-
-    if newest is None:
-        return CursorAdvance(
-            rows=kept,
-            cursor=last_cursor,
-            boundary_keys=dump_boundary_keys(seen),
-            changed=False,
-        )
-
-    if last_key is not None and _cmp(newest, last_key) == 0:
-        new_cursor = last_cursor
-        merged = seen | boundary_ids
-    else:
-        new_cursor = str(newest)
-        merged = boundary_ids
-
-    encoded = dump_boundary_keys(merged)
-    changed = new_cursor != last_cursor or encoded != dump_boundary_keys(seen)
-    return CursorAdvance(rows=kept, cursor=new_cursor, boundary_keys=encoded, changed=changed)
+    tracker = CursorTracker(cursor_property=cursor_property, last_cursor=last_cursor, boundary_keys=boundary_keys)
+    kept = tracker.keep(records)
+    return replace(tracker.result(), rows=kept)
