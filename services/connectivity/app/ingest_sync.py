@@ -21,6 +21,8 @@ from .deps import ICEBERG_CONFIG, TENANT_ID, WORKSPACE_ID, SyncResult
 
 logger = logging.getLogger("connectivity.scheduler")
 
+_SYNC_ERROR_MAX_CHARS = 2000
+
 
 async def _is_quiesced(pool: asyncpg.Pool) -> bool:
     value = await pool.fetchval("SELECT value FROM connectivity_runtime WHERE key = 'quiesced'")
@@ -118,8 +120,57 @@ async def _finalize_sync(
         location=result.location,
     )
 
+async def _record_sync_failure(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    connector_urn: str,
+    dataset_name: str,
+    actor: EventActor,
+    started_at: datetime,
+    exc: Exception,
+) -> None:
+    """Keep a failed or timed-out sync visible as a run, next to the successes in `sync_run`."""
+    dataset_urn = build_urn(tenant_id, workspace_id, "dataset", dataset_name)
+    error_name = exc.error_name if isinstance(exc, HolonError) else type(exc).__name__
+    timed_out = error_name == "SourceFetchTimeout"
+    try:
+        await deps.pool.execute(
+            """
+            INSERT INTO sync_failure (
+                tenant_id, connector_urn, dataset_urn, error_name, error, timed_out, started_at, finished_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            tenant_id,
+            connector_urn,
+            dataset_urn,
+            error_name,
+            str(exc)[:_SYNC_ERROR_MAX_CHARS],
+            timed_out,
+            started_at,
+            datetime.now(timezone.utc),
+        )
+    except Exception:
+        logger.exception("could not record the failed sync of %r (tenant=%s)", dataset_name, tenant_id)
+    emit_audit(
+        category="access",
+        action="connectivity.sync.failed",
+        outcome="failure",
+        tenant_id=tenant_id,
+        actor_urn=actor.urn,
+        actor_type=actor.type,
+        resource_type="dataset",
+        resource_urn=dataset_urn,
+        extra={"connector_urn": connector_urn, "error_name": error_name, "timed_out": timed_out},
+    )
+
 async def _run_sync_for_dataset(
-    dataset_name: str, *, actor: EventActor, tenant_id: str = TENANT_ID, workspace_id: str = WORKSPACE_ID
+    dataset_name: str,
+    *,
+    actor: EventActor,
+    tenant_id: str = TENANT_ID,
+    workspace_id: str = WORKSPACE_ID,
+    fetch_timeout: Optional[float] = None,
 ) -> SyncResult:
     """Execute sync pipeline: fetch data from source, write Iceberg snapshot, and finalize."""
     write_mode: Literal["overwrite", "append"] = "overwrite"
@@ -155,32 +206,54 @@ async def _run_sync_for_dataset(
             write_mode = "append"
 
     started_at = datetime.now(timezone.utc)
-    commit_cursor = None
     try:
-        rows, commit_cursor = await read()
-    except source_registry_base.SourceFetchError as exc:
-        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
-    except ConnectorSafetyError as exc:
-        raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
-        raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
-    except httpx.RequestError as exc:
-        raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
-    result = await asyncio.to_thread(
-        iceberg_writer.write_snapshot, rows, dataset_name, mode=write_mode, tenant_id=tenant_id, **ICEBERG_CONFIG
-    )
-    if commit_cursor is not None:
-        await commit_cursor()
-    finished_at = datetime.now(timezone.utc)
+        commit_cursor = None
+        fetch_deadline = asyncio.timeout(fetch_timeout)
+        try:
+            async with fetch_deadline:
+                rows, commit_cursor = await read()
+        except TimeoutError as exc:
+            if not fetch_deadline.expired():
+                raise
+            raise HolonError.unavailable(
+                'SourceFetchTimeout',
+                f"source {dataset_name!r} was not fetched within {fetch_timeout:g}s",
+                dataset_name=dataset_name,
+            ) from exc
+        except source_registry_base.SourceFetchError as exc:
+            raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+        except ConnectorSafetyError as exc:
+            raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
+        except httpx.RequestError as exc:
+            raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
+        result = await asyncio.to_thread(
+            iceberg_writer.write_snapshot, rows, dataset_name, mode=write_mode, tenant_id=tenant_id, **ICEBERG_CONFIG
+        )
+        if commit_cursor is not None:
+            await commit_cursor()
+        finished_at = datetime.now(timezone.utc)
 
-    return await _finalize_sync(
-        connector_urn=connector_urn,
-        dataset_name=dataset_name,
-        result=result,
-        started_at=started_at,
-        finished_at=finished_at,
-        actor=actor,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-    )
+        return await _finalize_sync(
+            connector_urn=connector_urn,
+            dataset_name=dataset_name,
+            result=result,
+            started_at=started_at,
+            finished_at=finished_at,
+            actor=actor,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        await _record_sync_failure(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            connector_urn=connector_urn,
+            dataset_name=dataset_name,
+            actor=actor,
+            started_at=started_at,
+            exc=exc,
+        )
+        raise
 
