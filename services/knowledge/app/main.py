@@ -104,6 +104,7 @@ async def lifespan(app: FastAPI):
 
     outbox_handle = await start_outbox_relay(app.state.pool, kafka_bootstrap=KAFKA_BOOTSTRAP)
     app.state.producer = outbox_handle.producer
+    core.producer = outbox_handle.producer
 
     consumer = EventConsumer(
         KAFKA_BOOTSTRAP,
