@@ -28,7 +28,7 @@ from app.sql_source_validation import _require_select_only
 from holon_common.sql_ident import require_identifier
 
 _PUBLIC_CONNECTION_COLUMNS = (
-    "tenant_id, name, dialect, host, port, database, warehouse, username, "
+    "tenant_id, name, dialect, host, port, database, warehouse, username, use_tls, "
     "(password IS NOT NULL OR secret_ref IS NOT NULL) AS has_password, "
     "created_by_urn, created_at"
 )
@@ -52,10 +52,12 @@ async def register_connection(
     warehouse: Optional[str] = None,
     password: Optional[str] = None,
     secret_ref: Optional[str] = None,
+    use_tls: Optional[bool] = None,
 ) -> dict:
     """Register or update a SQL connection credential."""
     try:
         dialect = sql_drivers.normalize_dialect(dialect)
+        use_tls = sql_drivers.resolve_use_tls(dialect, use_tls)
     except ValueError as exc:
         raise SourceConfigError(str(exc)) from exc
     if sql_drivers.wire_dialect(dialect) == "snowflake":
@@ -71,7 +73,7 @@ async def register_connection(
         port = sql_drivers.default_port_for(dialect)
 
     existing = await pool.fetchrow(
-        "SELECT host, port, dialect, database, username, password, secret_ref "
+        "SELECT host, port, dialect, database, username, password, secret_ref, use_tls "
         "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, name,
     )
@@ -86,6 +88,7 @@ async def register_connection(
                 or int(existing["port"]) != int(port)
                 or (existing["dialect"] or "postgres") != dialect
                 or existing["database"] != database
+                or bool(existing["use_tls"]) != use_tls
             )
             assert_destination_change_requires_secret(
                 is_update=True,
@@ -104,8 +107,8 @@ async def register_connection(
     await pool.execute(
         """
         INSERT INTO sql_connection
-            (tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, use_tls, created_by_urn)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (tenant_id, name) DO UPDATE SET
             dialect = EXCLUDED.dialect,
             host = EXCLUDED.host,
@@ -114,9 +117,10 @@ async def register_connection(
             warehouse = EXCLUDED.warehouse,
             username = EXCLUDED.username,
             password = EXCLUDED.password,
-            secret_ref = EXCLUDED.secret_ref
+            secret_ref = EXCLUDED.secret_ref,
+            use_tls = EXCLUDED.use_tls
         """,
-        tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, created_by_urn,
+        tenant_id, name, dialect, host, port, database, warehouse, username, password, secret_ref, use_tls, created_by_urn,
     )
     return await get_connection(pool, tenant_id, name)
 
