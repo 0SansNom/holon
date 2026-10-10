@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 import asyncpg
 
 from app import sql_drivers
-from app.cursor_window import advance_cursor
+from app.cursor_window import CursorTracker
 from app.source_registry_base import (
     SourceConfigError,
     SourceFetchError,
@@ -93,8 +93,9 @@ def _row_get(row: dict, key: str, *, dialect: str) -> Any:
     return None
 
 async def fetch_for_dataset(
-    pool: asyncpg.Pool, tenant_id: str, name: str
-) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
+    pool: asyncpg.Pool, tenant_id: str, name: str, *, batch_size: int = 10_000
+) -> tuple[AsyncIterator[list[dict]], Callable[[], Awaitable[None]]]:
+    """Batches of the source's rows, and the cursor commit to run once they are all written."""
     row = await pool.fetchrow(
         "SELECT connection_name, table_name, query, cursor_property, last_cursor_value, "
         "cursor_boundary_keys "
@@ -143,8 +144,22 @@ async def fetch_for_dataset(
         except SourceConfigError as exc:
             raise SourceFetchError(str(exc)) from exc
 
-    try:
-        rows = await sql_drivers.fetch_dicts(
+    incremental_table = bool(row["table_name"] and row["cursor_property"])
+    tracker = (
+        CursorTracker(
+            cursor_property=row["cursor_property"],
+            last_cursor=row["last_cursor_value"],
+            boundary_keys=row["cursor_boundary_keys"],
+        )
+        if incremental_table
+        else None
+    )
+    query_cursor_key = row["cursor_property"] if not incremental_table else None
+    newest: Any = None
+
+    async def batches() -> AsyncIterator[list[dict]]:
+        nonlocal newest
+        stream = sql_drivers.stream_dicts(
             dialect=dialect,
             host=pinned_host,
             port=connection["port"],
@@ -153,50 +168,53 @@ async def fetch_for_dataset(
             password=password,
             sql=sql,
             args=args,
+            batch_size=batch_size,
             warehouse=connection["warehouse"],
         )
-    except Exception as exc:
-        # Drivers raise a mix of OSError, asyncpg/aiomysql/aioodbc errors.
-        raise SourceFetchError(f"could not fetch source {name!r}: {exc}") from exc
+        while True:
+            try:
+                rows = await anext(stream)
+            except StopAsyncIteration:
+                return
+            except Exception as exc:
+                # Drivers raise a mix of OSError, asyncpg/aiomysql/aioodbc errors.
+                raise SourceFetchError(f"could not fetch source {name!r}: {exc}") from exc
+            if tracker is not None:
+                rows = tracker.keep(rows)
+            elif query_cursor_key:
+                candidates = [
+                    value
+                    for r in rows
+                    if (value := _row_get(r, query_cursor_key, dialect=wire)) is not None
+                ]
+                if candidates:
+                    batch_max = max(candidates)
+                    newest = batch_max if newest is None else max(newest, batch_max)
+            if rows:
+                yield rows
 
-    commit: Optional[Callable[[], Awaitable[None]]] = None
-    if row["table_name"] and row["cursor_property"]:
-        advanced = advance_cursor(
-            rows,
-            cursor_property=row["cursor_property"],
-            last_cursor=row["last_cursor_value"],
-            boundary_keys=row["cursor_boundary_keys"],
-        )
-        rows = advanced.rows
-        if advanced.changed and advanced.cursor is not None:
-
-            commit = make_property_cursor_commit(
-                pool,
-                table="sql_source",
-                tenant_id=tenant_id,
-                name=name,
-                cursor=advanced.cursor,
-                boundary_keys=advanced.boundary_keys,
-            )
-    elif row["cursor_property"]:
-        cursor_key = row["cursor_property"]
-        candidates = [
-            value
-            for r in rows
-            if (value := _row_get(r, cursor_key, dialect=wire)) is not None
-        ]
-        if candidates:
-            new_cursor = _cursor_to_str(max(candidates))
+    async def commit() -> None:
+        if tracker is not None:
+            advanced = tracker.result()
+            if advanced.changed and advanced.cursor is not None:
+                await make_property_cursor_commit(
+                    pool,
+                    table="sql_source",
+                    tenant_id=tenant_id,
+                    name=name,
+                    cursor=advanced.cursor,
+                    boundary_keys=advanced.boundary_keys,
+                )()
+        elif newest is not None:
+            new_cursor = _cursor_to_str(newest)
             if new_cursor != row["last_cursor_value"]:
-
-                commit = make_column_cursor_commit(
+                await make_column_cursor_commit(
                     pool,
                     table="sql_source",
                     tenant_id=tenant_id,
                     name=name,
                     column="last_cursor_value",
                     value=new_cursor,
-                )
+                )()
 
-    return rows, commit
-
+    return batches(), commit

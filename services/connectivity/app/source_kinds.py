@@ -8,7 +8,7 @@ Plugins, Kafka streams, and pipelines stay on their own paths.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
 import asyncpg
 
@@ -21,7 +21,8 @@ from . import (
 )
 
 GetSource = Callable[[asyncpg.Pool, str, str], Awaitable[Optional[dict]]]
-FetchForDataset = Callable[..., Awaitable[tuple[list[dict], Any]]]
+# Rows come whole (a list) or as batches; the commit runs once they are all written.
+FetchForDataset = Callable[..., Awaitable[tuple[Union[list[dict], AsyncIterator[list[dict]]], Any]]]
 ListAllScheduled = Callable[[asyncpg.Pool], Awaitable[list[dict]]]
 
 
