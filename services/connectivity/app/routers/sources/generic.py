@@ -19,11 +19,11 @@ from ...deps import (
     source_urn,
 )
 from . import _shared
+from ... import generic_source_registry
+from ...ingest import RegisterConnectionRequest, RegisterSourceRequest
 
 router = APIRouter()
 
-from ... import generic_source_registry
-from ...ingest import RegisterConnectionRequest, RegisterSourceRequest
 
 @router.post("/connections")
 async def register_connection(body: RegisterConnectionRequest, principal: Principal = Depends(current_principal)) -> dict:

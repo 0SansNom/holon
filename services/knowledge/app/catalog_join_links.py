@@ -7,7 +7,7 @@ import time
 
 import asyncpg
 
-from . import catalog_state, lineage, link_overlays, ontology, relation_links, resolver
+from . import catalog_state, link_overlays, ontology, relation_links, resolver
 from .catalog_state import (
     _ENSURE_MISS_TTL_SECONDS,
     _ensure_locks,

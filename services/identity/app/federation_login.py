@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncpg
 from fastapi.responses import RedirectResponse
 
-from holon_common import HolonError, Principal, set_session_cookie
+from holon_common import HolonError, set_session_cookie
 from holon_common.audit import emit_audit
 
 from . import deps

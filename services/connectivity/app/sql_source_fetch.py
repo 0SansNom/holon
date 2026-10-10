@@ -10,14 +10,15 @@ import asyncpg
 from app import sql_drivers
 from app.cursor_window import advance_cursor
 from app.source_registry_base import (
+    SourceConfigError,
     SourceFetchError,
     make_column_cursor_commit,
     make_property_cursor_commit,
     resolve_source_secret,
 )
 from app.sql_source_validation import _require_select_only
-from holon_common.connector_safety import ConnectorSafetyError, connector_secret
-from holon_common.sql_ident import quote_identifier, require_identifier
+from holon_common.connector_safety import ConnectorSafetyError, connector_secret, pin_connector_host
+from holon_common.sql_ident import quote_identifier
 
 _ISO_CURSOR_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?)?$"

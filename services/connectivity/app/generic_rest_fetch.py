@@ -187,7 +187,6 @@ async def fetch_for_dataset(
         assert_http_url(url)
     except ConnectorSafetyError as exc:
         raise SourceFetchError(str(exc)) from exc
-    origin_url = url
     # Append incremental parameter only to the first page request.
     if row["incremental_param"] and row["last_cursor_value"] is not None:
         url = _add_query_param(url, row["incremental_param"], lookback_value(row["last_cursor_value"]))

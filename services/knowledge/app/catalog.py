@@ -9,7 +9,8 @@ import asyncpg
 
 from holon_common import Classification, EventConsumer, most_restrictive
 
-from . import catalog_join_links, catalog_reindex, catalog_state, lineage, ontology, resolver, search, serving_store
+from . import catalog_reindex as catalog_reindex
+from . import catalog_state, lineage, ontology, search, serving_store
 from .catalog_errors import TransientCatalogError  # noqa: F401
 from .catalog_join_links import (  # noqa: F401
     _EVENT_ATTEMPTS,

@@ -1,16 +1,13 @@
 """Property-type and project-scope checks at ObjectType publish time."""
 from __future__ import annotations
 
-from typing import Optional
 
 import asyncpg
 import httpx
 
 from .publishing_validate_formats import (
     _ALLOWED_PROPERTY_TYPE_KINDS,
-    _ALLOWED_RENDER_HINTS,
     _validate_property_control_metadata,
-    _validate_struct_field_metadata,
 )
 
 

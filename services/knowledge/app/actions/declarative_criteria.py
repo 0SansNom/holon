@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from holon_common import HolonError
+from holon_common import HolonError, Principal
 
 
 class ActionValidationError(Exception):

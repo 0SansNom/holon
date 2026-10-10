@@ -9,7 +9,7 @@ import asyncpg
 
 from holon_common import EventActor, build_urn
 
-from . import deps, pipeline, plugin_registry, source_kinds
+from . import pipeline, plugin_registry, source_kinds
 from .deps import SCHEDULER_ACTOR_URN, SCHEDULER_POLL_SECONDS, WORKSPACE_ID, _SCHEDULER_LOCK_KEY
 from .ingest_pipeline import _run_pipeline
 from .ingest_sync import _is_quiesced, _run_sync_for_dataset

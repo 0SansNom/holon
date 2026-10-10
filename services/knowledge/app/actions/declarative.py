@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Optional
 
 import asyncpg
 
@@ -26,6 +26,7 @@ from .declarative_edits import (  # noqa: F401
     revert_declarative_action,
 )
 from .hardcoded import _event
+from .metrics import ACTION_EVENTS
 
 
 async def validate_generic_action(

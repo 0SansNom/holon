@@ -5,24 +5,19 @@ Allows registering REST data sources, authentication headers, record extraction 
 
 from __future__ import annotations
 
-import datetime
-from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from typing import Optional
+from urllib.parse import urlsplit
 
 import asyncpg
-import httpx
 
-from app.pinned_http import pinned_transport
 from app import source_registry_base
 from app.source_registry_base import (
     ConnectionConflictError as ConnectionConflictError,
-    ConnectionInUseError,
+    ConnectionInUseError as ConnectionInUseError,
     SourceConflictError as SourceConflictError,
     SourceConfigError,
-    SourceFetchError,
+    SourceFetchError as SourceFetchError,
     assert_dataset_available,
-    make_property_cursor_commit,
-    resolve_source_secret,
 )
 from holon_common.connector_safety import (
     ConnectorSafetyError,
@@ -31,11 +26,9 @@ from holon_common.connector_safety import (
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
-    connector_secret,
     same_origin,
 )
 
-from app.cursor_window import advance_cursor, lookback_value
 
 # Columns safe to return to caller (excludes raw credential values).
 _PUBLIC_COLUMNS = (

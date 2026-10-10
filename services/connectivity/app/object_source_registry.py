@@ -7,41 +7,31 @@ endpoint such as ``https://s3.us-south.cloud-object-storage.appdomain.cloud``
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
-from typing import Awaitable, Callable, Optional
+from typing import Optional
 from urllib.parse import urlsplit
 
 import asyncpg
-import pyarrow.csv as pacsv
-import pyarrow.fs as pafs
-import pyarrow.json as pajson
-import pyarrow.parquet as papq
-from pyarrow.lib import ArrowException
+import pyarrow.fs as pafs  # noqa: F401
 
-from app.file_cursor import info_mtime_ns, select_files
 from app import source_registry_base
 from app.source_registry_base import (
     ConnectionConflictError as ConnectionConflictError,
-    ConnectionInUseError,
+    ConnectionInUseError as ConnectionInUseError,
     SourceConflictError as SourceConflictError,
     SourceConfigError,
-    SourceFetchError,
+    SourceFetchError as SourceFetchError,
     assert_dataset_available,
-    make_column_cursor_commit,
-    resolve_source_secret,
 )
 
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
-    pin_object_endpoint,
     assert_connector_secret_ref,
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
-    connector_secret,
 )
 
 logger = logging.getLogger(__name__)

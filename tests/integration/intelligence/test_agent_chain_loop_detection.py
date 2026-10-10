@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import pytest

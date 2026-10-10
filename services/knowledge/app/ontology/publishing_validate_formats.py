@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
-from .render_hints import ALLOWED_RENDER_HINTS
+from .render_hints import ALLOWED_RENDER_HINTS, normalize_render_hints
 from .type_classes import normalize_type_classes
 
 

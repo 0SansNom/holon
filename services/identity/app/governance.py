@@ -49,8 +49,6 @@ async def _delete_relationship_or_reraise(
     subject_urn: str,
 ) -> None:
     """Idempotently delete SpiceDB relationship, erroring on store unavailability."""
-    import httpx
-
     try:
         await deps.authz.delete_relationship(
             resource_type=resource_type,

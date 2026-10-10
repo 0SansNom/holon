@@ -1,12 +1,14 @@
 """Application definition validation for the Experience builder."""
 from __future__ import annotations
 
-from typing import Optional
+import os
 
 import asyncpg
 import httpx
 
 from . import ui_component_registry
+
+_WORKSPACE_ID = os.environ.get("HOLON_WORKSPACE_ID", "main")
 
 
 class InvalidApplicationDefinition(ValueError):

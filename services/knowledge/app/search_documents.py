@@ -1,8 +1,7 @@
 """Search document construction and field/marking helpers."""
 from __future__ import annotations
 
-import json
-from typing import Any, Optional
+from typing import Any
 
 from .search_constants import POLICY_VERSION
 from .struct_values import assemble_struct_value

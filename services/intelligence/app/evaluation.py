@@ -17,7 +17,7 @@ from qdrant_client import AsyncQdrantClient
 
 from .context_builder import ask as context_builder_ask
 from .embeddings import EmbeddingClient
-from .gold_set import gold_set_disclaimer
+from .gold_set import STARTER_GOLD_SET, gold_set_disclaimer
 from .llm_gateway import LLMClient
 
 logger = logging.getLogger("intelligence.evaluation")

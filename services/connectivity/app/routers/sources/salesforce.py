@@ -19,11 +19,11 @@ from ...deps import (
     source_urn,
 )
 from . import _shared
+from ... import salesforce_source_registry
+from ...ingest import RegisterSalesforceConnectionRequest, RegisterSalesforceSourceRequest
 
 router = APIRouter()
 
-from ... import salesforce_source_registry
-from ...ingest import RegisterSalesforceConnectionRequest, RegisterSalesforceSourceRequest
 
 @router.post("/salesforce-connections")
 async def register_salesforce_connection(

@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, holon_url
 
 
 def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):

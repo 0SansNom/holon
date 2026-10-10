@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-import asyncpg
 
 from .object_types import VALID_VISIBILITIES
 from .type_classes import normalize_type_classes

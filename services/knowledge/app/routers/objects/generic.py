@@ -168,8 +168,8 @@ async def _resolve_action_for_object(
         object_type_urn = await core._object_type_urn_for(
             object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id
         )
-    except KeyError:
-        raise HolonError.not_found("ObjectTypeNotFound", f"unknown ObjectType: {object_type}", object_type=object_type)
+    except KeyError as exc:
+        raise HolonError.not_found("ObjectTypeNotFound", f"unknown ObjectType: {object_type}", object_type=object_type) from exc
     qualified_name = action_name if "." in action_name else f"{object_type}.{action_name}"
     action_type = await ontology.get_action_type(core.pool, principal.tenant_id, qualified_name)
     if action_type is None and qualified_name != action_name:
@@ -382,8 +382,8 @@ async def revert_action_invocation(
     object_type, _ = _object_type_and_instance_id_from_instance_urn(row["instance_urn"])
     try:
         object_type_urn = await core._object_type_urn_for(object_type, tenant_id=principal.tenant_id, workspace_id=workspace_id)
-    except KeyError:
-        raise HolonError.not_found("ObjectTypeNotFound", f"unknown ObjectType: {object_type}", object_type=object_type)
+    except KeyError as exc:
+        raise HolonError.not_found("ObjectTypeNotFound", f"unknown ObjectType: {object_type}", object_type=object_type) from exc
     action_type = await ontology.get_action_type(core.pool, principal.tenant_id, row["action_name"])
     required_permission = action_type["required_permission"] if action_type else "write"
     await core._authorize_object_type(principal, object_type_urn, required_permission)

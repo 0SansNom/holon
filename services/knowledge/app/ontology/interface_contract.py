@@ -1,7 +1,6 @@
 """Interface contract validation, hierarchy, and effective merge."""
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 import asyncpg
@@ -182,6 +181,7 @@ async def validate_link_constraints(
     if not isinstance(link_constraints, list):
         raise ValueError("link_constraints must be a list")
 
+    from .interfaces import get_interface_type
     from .object_types import list_object_types
 
     object_type_names = {ot["name"] for ot in await list_object_types(pool, tenant_id)}
@@ -271,6 +271,8 @@ async def validate_parent_interfaces(
     parent_interfaces: list,
 ) -> list[str]:
     """Normalize parent list — known interfaces, no self, no cycles."""
+    from .interfaces import get_interface_type
+
     if not isinstance(parent_interfaces, list):
         raise ValueError("parent_interfaces must be a list")
     normalized: list[str] = []
@@ -300,6 +302,8 @@ async def ancestor_interface_names(
     pool: asyncpg.Pool, tenant_id: str, interface_name: str
 ) -> set[str]:
     """All transitive parents of `interface_name` (not including itself)."""
+    from .interfaces import get_interface_type
+
     ancestors: set[str] = set()
     stack = [interface_name]
     visited: set[str] = set()
@@ -346,6 +350,8 @@ async def descendant_interface_names(
     pool: asyncpg.Pool, tenant_id: str, interface_name: str
 ) -> set[str]:
     """Interfaces that transitively extend `interface_name`."""
+    from .interfaces import list_interface_types
+
     descendants: set[str] = set()
     for iface in await list_interface_types(pool, tenant_id):
         if iface["name"] == interface_name:
@@ -388,6 +394,8 @@ async def effective_interface_contract(
     (child wins on same property/link api_name). `override` / `overrides`
     substitute row(s) pre-write during tighten checks.
     """
+    from .interfaces import get_interface_type
+
     override_map = dict(overrides or {})
     if override is not None:
         override_map[interface_name] = override

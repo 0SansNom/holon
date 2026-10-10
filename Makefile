@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test test-unit test-soak clean
+.PHONY: infra-up infra-down build up down logs ps seed provision-test-fixtures test test-unit test-soak lint clean
 
 COMPOSE := docker compose
 
@@ -49,6 +49,11 @@ test-unit:
 test:
 	pip3 install -q -r tests/requirements.txt
 	python3 -m pytest -q -m "not llm and not soak" tests
+
+lint:
+	pip3 install -q ruff==0.16.2
+	python3 -m ruff check services libs cli tests
+	cd services/experience/web && npm run check && npm test
 
 test-soak:
 	pip3 install -q -r tests/requirements.txt

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 import urllib.error
@@ -12,7 +11,7 @@ import urllib.request
 
 import asyncpg
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, _request, ontology_url, holon_url
 
 
 SOURCE_ERP_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/source_erp"
@@ -96,7 +95,7 @@ def test_as_of_read_returns_the_state_that_was_true_at_that_time(jdoe_token: str
         asyncio.run(_set_email(CUSTOMER_ID, MUTATED_EMAIL))
         _sync_and_wait(jdoe_token)
 
-        after = _poll_customer_email(jdoe_token, CUSTOMER_ID, MUTATED_EMAIL)
+        _poll_customer_email(jdoe_token, CUSTOMER_ID, MUTATED_EMAIL)
 
         # 3. A historical read pinned to the pre-mutation timestamp must
         # still show the *old* email

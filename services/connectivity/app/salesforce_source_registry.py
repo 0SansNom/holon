@@ -7,25 +7,18 @@ instance_url is cached on the connection and used for subsequent query calls.
 
 from __future__ import annotations
 
-import datetime
 import re
-from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
+from typing import Optional
 
 import asyncpg
-import httpx
 
-from app.cursor_window import advance_cursor
-from app.pinned_http import pinned_transport
 from app import source_registry_base
 from app.source_registry_base import (
-    ConnectionInUseError,
-    SourceConflictError,
+    ConnectionInUseError as ConnectionInUseError,
+    SourceConflictError as SourceConflictError,
     SourceConfigError,
-    SourceFetchError,
+    SourceFetchError as SourceFetchError,
     assert_dataset_available,
-    make_property_cursor_commit,
-    resolve_source_secret,
 )
 from holon_common.connector_safety import (
     ConnectorSafetyError,
@@ -34,8 +27,6 @@ from holon_common.connector_safety import (
     assert_http_url,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
-    connector_secret,
-    same_origin,
 )
 
 _DEFAULT_LOGIN_URL = "https://login.salesforce.com"

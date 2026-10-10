@@ -19,11 +19,11 @@ from ...deps import (
     source_urn,
 )
 from . import _shared
+from ... import sql_source_registry
+from ...ingest import RegisterSqlConnectionRequest, RegisterSqlSourceRequest
 
 router = APIRouter()
 
-from ... import sql_source_registry
-from ...ingest import RegisterSqlConnectionRequest, RegisterSqlSourceRequest
 
 @router.post("/sql-connections")
 async def register_sql_connection(

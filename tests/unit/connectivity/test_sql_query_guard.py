@@ -13,7 +13,7 @@ sys.modules.setdefault("asyncpg", MagicMock())
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "connectivity"))
 
-from app.source_registry_base import SourceConfigError
+from app.source_registry_base import SourceConfigError  # noqa: E402
 from app.sql_source_validation import _require_select_only  # noqa: E402
 from app import sql_drivers  # noqa: E402
 

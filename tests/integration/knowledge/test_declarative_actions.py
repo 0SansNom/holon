@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import time
-import urllib.error
-import urllib.request
 
-import pytest
-from conftest import CONNECTIVITY, KNOWLEDGE, _request, _unique_name, ontology_url, holon_url, resync_and_wait_for_instance
+from conftest import CONNECTIVITY, _request, _unique_name, ontology_url, holon_url, resync_and_wait_for_instance
 
 REVIEWS_WITH_TAGS_API = "http://reviews-api:8000/reviews_with_tags.json"
 

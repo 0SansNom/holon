@@ -19,11 +19,11 @@ from ...deps import (
     source_urn,
 )
 from . import _shared
+from ... import sftp_source_registry
+from ...ingest import RegisterSftpConnectionRequest, RegisterSftpSourceRequest
 
 router = APIRouter()
 
-from ... import sftp_source_registry
-from ...ingest import RegisterSftpConnectionRequest, RegisterSftpSourceRequest
 
 @router.post("/sftp-connections")
 async def register_sftp_connection(

@@ -13,7 +13,6 @@ import httpx
 
 from holon_common import build_urn
 
-from . import ui_component_registry
 from .application_validate import (  # noqa: F401
     InvalidApplicationDefinition,
     _agent_app_surfaces,

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 
-from holon_common import HolonError, Principal
+from holon_common import EventActor, HolonError, Principal, build_urn
 
 from . import deps, stream_connector
-from .deps import KAFKA_BOOTSTRAP, STREAM_INGEST_URN, WORKFLOW_ENGINE_URN
+from .ingest_sync import _finalize_sync
+from .deps import ICEBERG_CONFIG, KAFKA_BOOTSTRAP, STREAM_INGEST_URN, WORKFLOW_ENGINE_URN
 
 logger = logging.getLogger("connectivity.scheduler")
 

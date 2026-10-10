@@ -55,7 +55,6 @@ def test_unknown_category_rejected() -> None:
 
 
 def test_emit_audit_writes_json_line(caplog: pytest.LogCaptureFixture) -> None:
-    logger = logging.getLogger("holon.audit")
     with caplog.at_level(logging.INFO, logger="holon.audit"):
         # StreamHandler on holon.audit bypasses caplog; call build via emit and
         # inspect return value instead.

@@ -12,7 +12,7 @@ import urllib.request
 import asyncio
 import asyncpg
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, OPENSEARCH, TENANT_ID, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, IDENTITY, OPENSEARCH, TENANT_ID, _request, ontology_url, holon_url
 
 # Both read from the environment, not hardcoded
 # .env with different values than a dev's local one (see

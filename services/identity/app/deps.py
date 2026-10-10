@@ -8,39 +8,24 @@ from __future__ import annotations
 import logging
 import os
 import time
-import uuid
 from collections import OrderedDict
 
 import asyncpg
 from fastapi import Request
-from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from holon_common import (
     HolonError,
-    EventActor,
-    EventEnvelope,
     Principal,
     active_jwt,
     issue_token,
     make_principal_dependency,
     mark_principal_disabled,
-    outbox,
-    set_session_cookie,
 )
-from holon_common.audit import emit_audit
-from holon_common.correlation import current_correlation_id
 
 from .seed import (
-    VALID_PROJECT_RELATIONS,
-    VALID_WORKSPACE_RELATIONS,
     get_tenant,
-    get_workspace,
-    insert_principal,
-    list_projects,
-    list_workspaces,
-    tenant_urn,
-    workspace_urn,
+    workspace_urn as workspace_urn,
 )
 
 SERVICE_NAME = "identity-platform"

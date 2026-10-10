@@ -8,11 +8,10 @@ from typing import Any, Optional
 
 import asyncpg
 
-from holon_common import HolonError, Principal, build_urn, outbox
+from holon_common import Principal, outbox
 
 from .declarative_criteria import _deep_set, _object_type_and_instance_id_from_instance_urn
 from .hardcoded import _event
-from .metrics import ACTION_EVENTS
 
 
 async def _write_instance_edits(

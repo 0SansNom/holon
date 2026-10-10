@@ -2,45 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
-import io
 import logging
-import os
 import re
-import stat
-import threading
-from typing import Awaitable, Callable, Optional
+from typing import Optional
 
 import asyncpg
-import paramiko
-import pyarrow.csv as pacsv
-import pyarrow.json as pajson
-import pyarrow.parquet as papq
-from pyarrow.lib import ArrowException
 
-from app.file_cursor import mtime_ns_from_stamp, select_files
 from app import source_registry_base
 from app.source_registry_base import (
-    ConnectionInUseError,
-    SourceConflictError,
+    ConnectionInUseError as ConnectionInUseError,
+    SourceConflictError as SourceConflictError,
     SourceConfigError,
-    SourceFetchError,
+    SourceFetchError as SourceFetchError,
     assert_dataset_available,
-    make_column_cursor_commit,
-    resolve_source_secret,
 )
 
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
-    pin_connector_host,
     assert_connector_secret_ref,
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
-    connector_secret,
 )
-from holon_common.security_posture import is_production
 
 logger = logging.getLogger(__name__)
 

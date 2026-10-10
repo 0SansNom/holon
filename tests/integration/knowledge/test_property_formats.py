@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, TENANT_ID, ontology_url, holon_url
+from conftest import IDENTITY, TENANT_ID, ontology_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "libs"))
 

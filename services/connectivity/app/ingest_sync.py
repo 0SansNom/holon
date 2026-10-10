@@ -11,13 +11,13 @@ from typing import Literal, Optional
 import asyncpg
 import httpx
 
-from holon_common import EventActor, EventEnvelope, build_urn, outbox
+from holon_common import EventActor, EventEnvelope, HolonError, build_urn, outbox
 from holon_common.audit import emit_audit
 from holon_common.connector_safety import ConnectorSafetyError
 from holon_common.correlation import current_correlation_id
 
-from . import deps, iceberg_writer, source_kinds, source_registry_base
-from .deps import ICEBERG_CONFIG, KNOWLEDGE_URL, TENANT_ID, WORKSPACE_ID, SyncResult
+from . import deps, iceberg_writer, plugin_registry, source_kinds, source_registry_base
+from .deps import ICEBERG_CONFIG, TENANT_ID, WORKSPACE_ID, SyncResult
 
 logger = logging.getLogger("connectivity.scheduler")
 

@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from conftest import IDENTITY, KNOWLEDGE, ontology_url, holon_url
+from conftest import IDENTITY, ontology_url, holon_url
 
 
 PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"

@@ -2,32 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Optional
+from typing import Optional
 
 import asyncpg
 
 from holon_common.connector_safety import (
     ConnectorSafetyError,
     assert_connector_host,
-    pin_connector_host,
     assert_connector_secret_ref,
     assert_destination_change_requires_secret,
     assert_no_inline_connector_secret,
     assert_production_requires_secret_ref,
-    connector_secret,
 )
 
-from app import source_registry_base
+from app import source_registry_base, sql_drivers
 from app.source_registry_base import (
     ConnectionConflictError as ConnectionConflictError,
-    ConnectionInUseError,
+    ConnectionInUseError as ConnectionInUseError,
     SourceConflictError as SourceConflictError,
     SourceConfigError,
-    SourceFetchError,
+    SourceFetchError as SourceFetchError,
     assert_dataset_available,
-    resolve_source_secret,
 )
 from app.sql_source_validation import _require_select_only
+from holon_common.sql_ident import require_identifier
 
 _PUBLIC_CONNECTION_COLUMNS = (
     "tenant_id, name, dialect, host, port, database, warehouse, username, "

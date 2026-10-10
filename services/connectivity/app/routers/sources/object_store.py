@@ -19,11 +19,11 @@ from ...deps import (
     source_urn,
 )
 from . import _shared
+from ... import object_source_registry
+from ...ingest import RegisterObjectConnectionRequest, RegisterObjectSourceRequest
 
 router = APIRouter()
 
-from ... import object_source_registry
-from ...ingest import RegisterObjectConnectionRequest, RegisterObjectSourceRequest
 
 @router.post("/object-connections")
 async def register_object_connection(

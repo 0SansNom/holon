@@ -35,8 +35,6 @@ def _build_gcs_filesystem(*, project_id: str, service_account_json: str, locatio
     OAuthJWTCertType=GOOGLEJSON: mint an access token from the key, then
     hand it to GcsFileSystem (avoids process-global ADC / temp files).
     """
-    import json
-
     from google.auth.transport.requests import Request
     from google.oauth2 import service_account
 

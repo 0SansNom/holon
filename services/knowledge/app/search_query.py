@@ -7,12 +7,9 @@ from holon_common import Principal
 
 from .search_constants import POLICY_VERSION
 from .search_documents import (
-    _is_confidential_property,
-    _is_property_searchable,
     _marking_filter,
     _principal_marking_tokens,
     _rebac_object_type_filter,
-    confidential_property_names,
 )
 
 

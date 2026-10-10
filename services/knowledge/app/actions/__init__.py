@@ -36,8 +36,6 @@ import asyncpg
 
 from holon_common import Principal, build_urn, outbox
 
-logger = logging.getLogger("knowledge.actions")
-
 from .approval import (
     APPROVAL_TTL,
     get_approval,
@@ -63,6 +61,8 @@ from .hardcoded import (
 )
 from .timeline import list_instance_timeline
 from .wire import operation_id, resolve_target, success_envelope, validation_report
+
+logger = logging.getLogger("knowledge.actions")
 
 __all__ = [
     "ActionValidationError",

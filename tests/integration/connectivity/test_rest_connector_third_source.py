@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, KNOWLEDGE, TENANT_ID, _request, ontology_url, holon_url, as_items
+from conftest import CONNECTIVITY, IDENTITY, TENANT_ID, _request, ontology_url, as_items
 
 
 WORKSPACE_ID = "main"
