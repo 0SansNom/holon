@@ -12,28 +12,15 @@ from fastapi import FastAPI
 
 from holon_common import (
     EventConsumer,
-    EventProducer,
     assert_production_posture,
     configure_json_logging,
-    create_pool,
     install_error_handlers,
     instrument_cors,
     instrument_metrics,
     instrument_tracing,
-    outbox,
     retry_with_backoff,
-    run_migrations,
 )
-from holon_common.audit import clear_durable_audit_hooks
-from holon_common.audit_store import install_durable_audit
-from holon_common.authz import PermissionClient
 from holon_common.correlation import instrument_correlation
-from holon_common.principal_status import (
-    consume_identity_auth_events,
-    hydrate_revocation_snapshot,
-    make_principal_status_consumer,
-    refresh_revocation_snapshot_forever,
-)
 from holon_common.readiness import (
     check_iceberg_catalog,
     check_kafka_producer,
@@ -42,6 +29,15 @@ from holon_common.readiness import (
     check_postgres,
     check_spicedb,
     report_ready,
+)
+from holon_common.service_runtime import (
+    boot_postgres,
+    reset_durable_audit,
+    start_outbox_relay,
+    start_principal_status,
+    stop_outbox,
+    stop_principal_status,
+    wire_authz,
 )
 
 from . import (
@@ -77,24 +73,22 @@ SPICEDB_PRESHARED_KEY = os.environ["HOLON_SPICEDB_PRESHARED_KEY"]
 OPA_URL = os.environ["HOLON_OPA_URL"]
 
 
-async def _consume_identity_events(consumer: EventConsumer) -> None:
-    await consume_identity_auth_events(consumer, authz=app.state.authz)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
-    app.state.pool = await create_pool(DB_URL)
-    core.pool = app.state.pool
     # Knowledge-owned tables live in app/migrations (0000_baseline + 0001–).
     # Shared holon_common helpers (audit/outbox) are included in 0000.
-    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
-
-    clear_durable_audit_hooks()
-    install_durable_audit(app.state.pool)
-
-    app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
-    core.authz = app.state.authz
+    await boot_postgres(
+        app, db_url=DB_URL, migrations_dir=Path(__file__).parent / "migrations", deps_module=core
+    )
+    reset_durable_audit(app.state.pool)
+    wire_authz(
+        app,
+        spicedb_url=SPICEDB_URL,
+        spicedb_preshared_key=SPICEDB_PRESHARED_KEY,
+        opa_url=OPA_URL,
+        deps_module=core,
+    )
     policy.bind_authz(app.state.authz)
     await retry_with_backoff(
         lambda: ontology.ensure_authz_seeded_all(
@@ -104,16 +98,19 @@ async def lifespan(app: FastAPI):
     )
 
     await retry_with_backoff(
-        lambda: search.ensure_index(OPENSEARCH_URL, OPENSEARCH_PASSWORD), what="knowledge search index setup"
+        lambda: search.ensure_index(OPENSEARCH_URL, OPENSEARCH_PASSWORD),
+        what="knowledge search index setup",
     )
 
-    app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
-    await app.state.producer.start()
-    core.producer = app.state.producer
-    relay_task = asyncio.create_task(outbox.relay_forever(app.state.pool, app.state.producer, dlq_producer=app.state.producer))
+    outbox_handle = await start_outbox_relay(app.state.pool, kafka_bootstrap=KAFKA_BOOTSTRAP)
+    app.state.producer = outbox_handle.producer
+    core.producer = outbox_handle.producer
 
     consumer = EventConsumer(
-        KAFKA_BOOTSTRAP, topics=["connectivity"], group_id="knowledge-platform", dlq_producer=app.state.producer
+        KAFKA_BOOTSTRAP,
+        topics=["connectivity"],
+        group_id="knowledge-platform",
+        dlq_producer=app.state.producer,
     )
     ingest_task = asyncio.create_task(
         catalog.consume_events(
@@ -129,28 +126,25 @@ async def lifespan(app: FastAPI):
         catalog.reindex_search_from_serving_store(app.state.pool, OPENSEARCH_URL, OPENSEARCH_PASSWORD)
     )
 
-    authz_cache_consumer = make_principal_status_consumer(
-        KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
+    status_handle = await start_principal_status(
+        kafka_bootstrap=KAFKA_BOOTSTRAP,
+        service_name=SERVICE_NAME,
+        authz=app.state.authz,
+        dlq_producer=app.state.producer,
     )
-    authz_cache_invalidation_task = asyncio.create_task(_consume_identity_events(authz_cache_consumer))
-    await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
-    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
 
     expiry_task = asyncio.create_task(actions.sweep_expired_approvals_forever(app.state.pool, WORKSPACE_ID))
     backfill_task = asyncio.create_task(catalog.backfill_join_links(app.state.pool, ICEBERG_CONFIG))
 
     yield
 
-    revocation_refresh_task.cancel()
+    await stop_principal_status(status_handle)
     reindex_task.cancel()
     backfill_task.cancel()
     expiry_task.cancel()
-    authz_cache_invalidation_task.cancel()
     ingest_task.cancel()
-    relay_task.cancel()
-    await authz_cache_consumer.stop()
     await consumer.stop()
-    await app.state.producer.stop()
+    await stop_outbox(outbox_handle)
     await app.state.authz.aclose()
     await app.state.pool.close()
 

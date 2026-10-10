@@ -12,28 +12,15 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from holon_common import (
-    EventProducer,
-    PermissionClient,
     assert_production_posture,
     configure_json_logging,
-    create_pool,
     install_error_handlers,
     instrument_cors,
     instrument_metrics,
     instrument_tracing,
-    outbox,
     retry_with_backoff,
-    run_migrations,
 )
-from holon_common.audit import clear_durable_audit_hooks
-from holon_common.audit_store import install_durable_audit
 from holon_common.correlation import instrument_correlation
-from holon_common.principal_status import (
-    consume_identity_auth_events,
-    hydrate_revocation_snapshot,
-    make_principal_status_consumer,
-    refresh_revocation_snapshot_forever,
-)
 from holon_common.readiness import (
     check_iceberg_catalog,
     check_kafka_producer,
@@ -41,6 +28,15 @@ from holon_common.readiness import (
     check_postgres,
     check_spicedb,
     report_ready,
+)
+from holon_common.service_runtime import (
+    boot_postgres,
+    reset_durable_audit,
+    start_outbox_relay,
+    start_principal_status,
+    stop_outbox,
+    stop_principal_status,
+    wire_authz,
 )
 
 from . import deps, kafka_stream_registry
@@ -64,25 +60,26 @@ configure_json_logging(SERVICE_NAME)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     assert_production_posture(service_name=SERVICE_NAME)
-    app.state.pool = await create_pool(DB_URL)
-    deps.pool = app.state.pool
     # Connectivity-owned tables live in app/migrations (0000_baseline + 0001).
     # Shared holon_common helpers (audit/outbox) are included in 0000.
-    await run_migrations(app.state.pool, Path(__file__).parent / "migrations")
-
-    clear_durable_audit_hooks()
-    install_durable_audit(app.state.pool)
-
-    app.state.authz = PermissionClient(SPICEDB_URL, SPICEDB_PRESHARED_KEY, OPA_URL)
-    deps.authz = app.state.authz
+    await boot_postgres(
+        app, db_url=DB_URL, migrations_dir=Path(__file__).parent / "migrations", deps_module=deps
+    )
+    reset_durable_audit(app.state.pool)
+    wire_authz(
+        app,
+        spicedb_url=SPICEDB_URL,
+        spicedb_preshared_key=SPICEDB_PRESHARED_KEY,
+        opa_url=OPA_URL,
+        deps_module=deps,
+    )
     await retry_with_backoff(
         lambda: ensure_authz_seeded(app.state.authz, app.state.pool),
         what="connectivity authz seed",
     )
 
-    app.state.producer = EventProducer(KAFKA_BOOTSTRAP)
-    await app.state.producer.start()
-    relay_task = asyncio.create_task(outbox.relay_forever(app.state.pool, app.state.producer, dlq_producer=app.state.producer))
+    outbox_handle = await start_outbox_relay(app.state.pool, kafka_bootstrap=KAFKA_BOOTSTRAP)
+    app.state.producer = outbox_handle.producer
 
     deps.kafka_stream_tasks = {}
     for source in await kafka_stream_registry.list_all_active(app.state.pool):
@@ -90,23 +87,20 @@ async def lifespan(app: FastAPI):
 
     scheduler_task = asyncio.create_task(run_scheduler_forever(app.state.pool))
 
-    status_consumer = make_principal_status_consumer(
-        KAFKA_BOOTSTRAP, service_name=SERVICE_NAME, dlq_producer=app.state.producer
+    status_handle = await start_principal_status(
+        kafka_bootstrap=KAFKA_BOOTSTRAP,
+        service_name=SERVICE_NAME,
+        authz=app.state.authz,
+        dlq_producer=app.state.producer,
     )
-    status_task = asyncio.create_task(consume_identity_auth_events(status_consumer, authz=app.state.authz))
-    await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
-    revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
 
     yield
 
-    revocation_refresh_task.cancel()
-    status_task.cancel()
+    await stop_principal_status(status_handle)
     scheduler_task.cancel()
     for task in deps.kafka_stream_tasks.values():
         task.cancel()
-    relay_task.cancel()
-    await status_consumer.stop()
-    await app.state.producer.stop()
+    await stop_outbox(outbox_handle)
     await app.state.authz.aclose()
     await app.state.pool.close()
 

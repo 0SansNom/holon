@@ -51,6 +51,8 @@ WORKSPACE_URN = build_urn(TENANT_ID, "global", "workspace", WORKSPACE_ID)
 
 AGENT_URN = build_urn(TENANT_ID, "global", "agent", "ingest-bot")
 
+_TIMEOUT_SECONDS = 5.0
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Same objects as app.state.*; assigned in main.lifespan before serving.

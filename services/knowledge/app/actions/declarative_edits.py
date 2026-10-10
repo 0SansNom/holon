@@ -1,0 +1,374 @@
+"""Instance edit write / apply / compensate / revert for declarative actions."""
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+import asyncpg
+
+from holon_common import Principal, outbox
+
+from .declarative_criteria import _deep_set, _object_type_and_instance_id_from_instance_urn
+from .hardcoded import _event
+
+
+async def _write_instance_edits(
+    conn: asyncpg.Connection,
+    tenant_id: str,
+    object_type: str,
+    instance_id: str,
+    resolved: dict[str, Any],
+    *,
+    action_urn: str,
+    actor: Principal,
+    at: datetime,
+    base_instance: Optional[dict] = None,
+) -> tuple[dict, dict]:
+    """Upsert into ``object_instance_edit`` + prior-value capture.
+
+    Keys may be dotted paths (``address.city``) — the top-level property
+    is rewritten as a merged struct (P2d nested struct edit).
+    """
+    result: dict[str, Any] = {}
+    prior: dict[str, Any] = {}
+
+    top_level: dict[str, Any] = {}
+    for key, value in resolved.items():
+        if "." not in key:
+            top_level[key] = value
+            continue
+        top, *rest = key.split(".")
+        existing_val = top_level.get(top)
+        if existing_val is None:
+            existing_row = await conn.fetchrow(
+                "SELECT property_value FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 "
+                "AND instance_id = $3 AND property_name = $4",
+                tenant_id, object_type, instance_id, top,
+            )
+            if existing_row is not None:
+                existing_val = json.loads(existing_row["property_value"])
+            elif base_instance is not None:
+                existing_val = base_instance.get(top)
+            if not isinstance(existing_val, dict):
+                existing_val = {}
+            top_level[top] = existing_val
+        if not isinstance(top_level[top], dict):
+            top_level[top] = {}
+        top_level[top] = _deep_set(top_level[top], rest, value)
+
+    for property_name, value in top_level.items():
+        existing = await conn.fetchrow(
+            "SELECT property_value FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 "
+            "AND instance_id = $3 AND property_name = $4 FOR UPDATE",
+            tenant_id, object_type, instance_id, property_name,
+        )
+        prior[property_name] = {
+            "existed": existing is not None,
+            "value": json.loads(existing["property_value"]) if existing is not None else None,
+        }
+        await conn.execute(
+            """
+            INSERT INTO object_instance_edit
+                (tenant_id, object_type, instance_id, property_name, property_value, set_by_action_urn, set_by_urn, set_at)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+            ON CONFLICT (tenant_id, object_type, instance_id, property_name) DO UPDATE SET
+                property_value = EXCLUDED.property_value,
+                set_by_action_urn = EXCLUDED.set_by_action_urn,
+                set_by_urn = EXCLUDED.set_by_urn,
+                set_at = EXCLUDED.set_at
+            """,
+            tenant_id, object_type, instance_id, property_name, json.dumps(value), action_urn, actor.urn, at,
+        )
+        result[property_name] = value
+    return result, prior
+
+async def _apply_declarative_edits(
+    conn: asyncpg.Connection,
+    tenant_id: str,
+    object_type: str,
+    instance_id: str,
+    edits: list[dict],
+    parameters: dict[str, Any],
+    *,
+    action_urn: str,
+    actor: Principal,
+    at: datetime,
+    workspace_id: str = "global",
+    reason: str = "",
+) -> tuple[dict, dict]:
+    """Resolve a static `edits` declaration into property overlays plus
+    optional structural rules (create/delete object + link), then write
+    both in the same transaction. Property results stay flat
+    (`{property: value}`); structural ops are bagged under
+    `__structural__` so response splatting and writeback stay compatible.
+
+    An edit sourced from `parameter_name: "reason"` reads the
+    invocation's own top-level `reason` — always available, never a
+    declared parameter, so recording e.g. `credit_hold_reason` needs no
+    parameter of its own to duplicate what the caller already supplied.
+    """
+    from ..action_structural import (
+        STRUCTURAL_KEY,
+        apply_structural_edits,
+        is_property_edit,
+    )
+
+    resolved = {
+        edit["property"]: (
+            reason
+            if edit["source"] == "parameter" and edit["parameter_name"] == "reason"
+            else parameters.get(edit["parameter_name"]) if edit["source"] == "parameter" else edit["value"]
+        )
+        for edit in edits
+        if is_property_edit(edit)
+    }
+    result, prior = await _write_instance_edits(
+        conn, tenant_id, object_type, instance_id, resolved, action_urn=action_urn, actor=actor, at=at,
+    )
+    structural = await apply_structural_edits(
+        conn,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        target_object_type=object_type,
+        target_instance_id=instance_id,
+        edits=edits,
+        parameters=parameters,
+        action_urn=action_urn,
+        actor=actor,
+        at=at,
+    )
+    if structural.get("links") or structural.get("objects"):
+        result = {**result, STRUCTURAL_KEY: structural}
+        prior = {**prior, STRUCTURAL_KEY: structural}
+    return result, prior
+
+async def _compensate_declarative_action(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    approval_id: int,
+    action_name: str,
+    instance_urn: str,
+    decider: Principal,
+    error: str,
+) -> None:
+    """Reverts a declarative Action Type's writeback by deleting the
+    specific `object_instance_edit` rows this approval wrote. Which
+    properties those are is read from the `action_invocation` row
+    `approve_action` itself inserted (the most recent one matching this
+    `tenant_id`/`action_name`/`instance_urn`) rather than recomputed from
+    the Action Type's static `edits` declaration — that list is empty for
+    a function-backed Action Type (`edit_function`), whose actual written
+    properties are only known at invocation time, so reading them back
+    from what was *actually* written is correct for both kinds and
+    strictly more precise than recomputing from the definition. Not a
+    general undo-stack: `object_instance_edit` is last-write-wins with no
+    history, so this reverts to "no edit recorded for these properties,"
+    not a restore of whatever value was there before.
+    """
+    object_type, instance_id = _object_type_and_instance_id_from_instance_urn(instance_urn)
+    invocation = await pool.fetchrow(
+        "SELECT edits FROM action_invocation WHERE tenant_id = $1 AND action_name = $2 AND instance_urn = $3 "
+        "ORDER BY id DESC LIMIT 1",
+        tenant_id, action_name, instance_urn,
+    )
+    edits = json.loads(invocation["edits"]) if invocation and invocation["edits"] else {}
+    from ..action_structural import STRUCTURAL_KEY, property_edit_keys, revert_structural
+
+    property_names = property_edit_keys(edits)
+    structural = edits.get(STRUCTURAL_KEY) if isinstance(edits, dict) else None
+
+    at = datetime.now(timezone.utc)
+    event = _event(
+        event_type="knowledge.action.compensated",
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        instance_urn=instance_urn,
+        actor=decider,
+        payload={"action_name": action_name, "instance_urn": instance_urn, "approval_id": approval_id, "error": error},
+    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if property_names:
+                await conn.execute(
+                    "DELETE FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 AND instance_id = $3 "
+                    "AND property_name = ANY($4::text[])",
+                    tenant_id, object_type, instance_id, property_names,
+                )
+            if structural:
+                await revert_structural(
+                    conn,
+                    tenant_id=tenant_id,
+                    structural=structural,
+                    action_urn="compensate",
+                    actor=decider,
+                    at=at,
+                )
+            await conn.execute(
+                "UPDATE action_approval SET status = 'failed', decision_note = $1 WHERE id = $2",
+                f"compensated: {error}", approval_id,
+            )
+            await outbox.enqueue(conn, event)
+
+async def revert_declarative_action(
+    pool: asyncpg.Pool, *, invocation_id: int, tenant_id: str, workspace_id: str, actor: Principal
+) -> dict:
+    """User-initiated undo of a single already-applied declarative
+    invocation — a different concern from `_compensate_declarative_action`
+    above (that one reverses a *failed saga's* Step 1, triggered by
+    Automation, deletes the overlay rows outright). This restores the
+    exact prior state `_apply_declarative_edits` captured, and only ever
+    for the single most recent qualifying invocation — standard
+    stated rule, replicated exactly: "cannot be reverted if any
+    subsequent edit has been made to that object, even on a different
+    property."
+    """
+    row = await pool.fetchrow(
+        "SELECT * FROM action_invocation WHERE id = $1 AND tenant_id = $2", invocation_id, tenant_id
+    )
+    if row is None:
+        raise LookupError(f"action invocation {invocation_id} not found")
+    if row["edits"] is None:
+        raise ValueError("this invocation made no declarative edits and cannot be reverted")
+    if row["reverted_at"] is not None:
+        raise ValueError(f"invocation {invocation_id} was already reverted")
+    if row["actor_urn"] != actor.urn:
+        raise ValueError("only the user who applied this action can revert it")
+
+    from . import _get_action_definition
+
+    definition = await _get_action_definition(pool, tenant_id, row["action_name"])
+    if (definition or {}).get("writeback_dataset"):
+        raise ValueError("this Action writes back to an external dataset — the external write cannot be undone, so it cannot be reverted")
+
+    later = await pool.fetchval(
+        "SELECT 1 FROM action_invocation WHERE tenant_id = $1 AND instance_urn = $2 AND edits IS NOT NULL "
+        "AND reverted_at IS NULL AND id > $3 LIMIT 1",
+        tenant_id, row["instance_urn"], invocation_id,
+    )
+    if later:
+        raise ValueError("a later action has been applied to this object since — only the most recent edit can be reverted")
+
+    object_type, instance_id = _object_type_and_instance_id_from_instance_urn(row["instance_urn"])
+    prior_values = row["prior_values"]
+    if isinstance(prior_values, str):
+        prior_values = json.loads(prior_values)
+    edits_payload = row["edits"]
+    if isinstance(edits_payload, str):
+        edits_payload = json.loads(edits_payload)
+
+    from ..action_structural import STRUCTURAL_KEY, property_edit_keys, revert_structural
+
+    property_priors = {
+        key: prior_values[key]
+        for key in property_edit_keys(prior_values)
+        if isinstance(prior_values.get(key), dict) and "existed" in prior_values[key]
+    }
+    structural = None
+    if isinstance(edits_payload, dict):
+        structural = edits_payload.get(STRUCTURAL_KEY)
+    if structural is None and isinstance(prior_values, dict):
+        structural = prior_values.get(STRUCTURAL_KEY)
+
+    at = datetime.now(timezone.utc)
+    event = _event(
+        event_type="knowledge.action.reverted",
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        instance_urn=row["instance_urn"],
+        actor=actor,
+        payload={"action_name": row["action_name"], "instance_urn": row["instance_urn"], "invocation_id": invocation_id},
+    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for property_name, prior in property_priors.items():
+                if prior["existed"]:
+                    await conn.execute(
+                        "UPDATE object_instance_edit SET property_value = $1::jsonb, set_by_action_urn = $2, "
+                        "set_by_urn = $3, set_at = $4 WHERE tenant_id = $5 AND object_type = $6 "
+                        "AND instance_id = $7 AND property_name = $8",
+                        json.dumps(prior["value"]), "revert", actor.urn, at, tenant_id, object_type, instance_id, property_name,
+                    )
+                else:
+                    await conn.execute(
+                        "DELETE FROM object_instance_edit WHERE tenant_id = $1 AND object_type = $2 "
+                        "AND instance_id = $3 AND property_name = $4",
+                        tenant_id, object_type, instance_id, property_name,
+                    )
+            if structural:
+                await revert_structural(
+                    conn,
+                    tenant_id=tenant_id,
+                    structural=structural,
+                    action_urn="revert",
+                    actor=actor,
+                    at=at,
+                )
+            await conn.execute("UPDATE action_invocation SET reverted_at = $1 WHERE id = $2", at, invocation_id)
+            await outbox.enqueue(conn, event)
+
+    return {
+        "status": "reverted",
+        "invocationId": invocation_id,
+        "restoredProperties": list(property_priors.keys()),
+        "revertedStructural": bool(structural),
+    }
+
+def _apply_instance_edit_rows(row: dict, edit_rows: list) -> dict:
+    """Merge ``object_instance_edit`` rows onto an instance dict (criteria + reads)."""
+    merged = dict(row)
+    for edit in edit_rows:
+        value = edit["property_value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        merged[edit["property_name"]] = value
+    return merged
+
+async def _get_unmasked_instance(
+    pool: asyncpg.Pool, object_type: str, tenant_id: str, workspace_id: str, instance_id: str
+) -> Optional[dict]:
+    """Fetch raw unmasked object instance for submission criteria evaluation.
+
+    Includes ``object_instance_edit`` overlays so criteria see the same
+    world as public reads (Action-written props like ``cancelled`` /
+    ``account_closed`` before writeback).
+    """
+    import functools
+
+    from .. import core, ontology, resolver, serving_store
+    from pyiceberg.exceptions import NoSuchTableError
+
+    row = await serving_store.get_instance(pool, object_type, tenant_id, instance_id)
+    if row is None and await serving_store.is_tombstoned(pool, object_type, tenant_id, instance_id):
+        return None
+
+    if row is None:
+        object_type_urn = ontology.object_type_urn(tenant_id, workspace_id, object_type)
+        definition = await ontology.get_object_type(pool, object_type_urn)
+        if definition is None:
+            return None
+        dataset_name = definition["source_dataset_urn"].rsplit(":", 1)[-1]
+        try:
+            rows = await asyncio.to_thread(
+                functools.partial(resolver.fetch_generic, dataset_name),
+                id_value=instance_id,
+                **core.iceberg_kwargs(tenant_id),
+            )
+        except NoSuchTableError:
+            return None
+        if not rows:
+            return None
+        row = dict(rows[0])
+
+    edit_rows = await pool.fetch(
+        "SELECT property_name, property_value FROM object_instance_edit "
+        "WHERE tenant_id = $1 AND object_type = $2 AND instance_id = $3",
+        tenant_id,
+        object_type,
+        str(instance_id),
+    )
+    return _apply_instance_edit_rows(row, edit_rows)
+

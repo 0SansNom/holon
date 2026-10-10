@@ -82,8 +82,8 @@ def test_fetch_sync_key_prefix_skips_spark_success_marker_and_crc() -> None:
         return table
 
     with (
-        patch.object(osr, "_build_filesystem", return_value=fake_fs),
-        patch.object(osr, "_read_table", side_effect=_fake_read_table),
+        patch("app.object_source_fetch._build_filesystem", return_value=fake_fs),
+        patch("app.object_source_fetch._read_table", side_effect=_fake_read_table),
     ):
         rows, cursor = osr._fetch_sync(
             kind="s3",
@@ -125,8 +125,8 @@ def test_fetch_sync_key_prefix_incremental_still_filters_by_format() -> None:
         return table
 
     with (
-        patch.object(osr, "_build_filesystem", return_value=fake_fs),
-        patch.object(osr, "_read_table", side_effect=_fake_read_table),
+        patch("app.object_source_fetch._build_filesystem", return_value=fake_fs),
+        patch("app.object_source_fetch._read_table", side_effect=_fake_read_table),
     ):
         rows, cursor = osr._fetch_sync(
             kind="s3",

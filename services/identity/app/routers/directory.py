@@ -90,9 +90,11 @@ async def workspaces_list(
     # Callers see workspaces in their own tenant unless bootstrap admin lists all.
     try:
         await _authorize_bootstrap_governance(principal)
-        return await list_workspaces(deps.pool, tenant_id)
-    except HolonError:
+    except HolonError as exc:
+        if exc.status_code != 403:
+            raise
         return await list_workspaces(deps.pool, principal.tenant_id)
+    return await list_workspaces(deps.pool, tenant_id)
 
 
 
@@ -107,11 +109,7 @@ async def workspaces_create(
         raise HolonError.invalid_argument('TenantDisabled', "tenant is disabled")
     # Bootstrap admins may create the first workspace on a new filiale;
     # otherwise require approve on an existing workspace in that tenant.
-    existing = await list_workspaces(deps.pool, request.tenant_id)
-    if not existing:
-        await _authorize_bootstrap_governance(principal)
-    else:
-        await _authorize_workspace_governance(principal, request.tenant_id, existing[0]["workspace_id"])
+    await _authorize_principal_governance(principal, request.tenant_id)
     if await get_workspace(deps.pool, request.workspace_id) is not None:
         raise HolonError.conflict('WorkspaceAlreadyExists', f"workspace already exists: {request.workspace_id}")
 
@@ -173,11 +171,7 @@ async def principals_create(
     tenant = await get_tenant(deps.pool, request.tenant_id)
     if tenant is None:
         raise HolonError.not_found('TenantNotFound', f"unknown tenant: {request.tenant_id}")
-    workspaces = await list_workspaces(deps.pool, request.tenant_id)
-    if not workspaces:
-        await _authorize_bootstrap_governance(principal)
-    else:
-        await _authorize_workspace_governance(principal, request.tenant_id, workspaces[0]["workspace_id"])
+    await _authorize_principal_governance(principal, request.tenant_id)
     if request.type == "group" and request.on_behalf_of:
         raise HolonError.invalid_argument("GroupCannotDelegate", "a group cannot act on behalf of another principal")
     try:
@@ -223,11 +217,7 @@ async def principals_set_status(
     target = await _fetch_principal(deps.pool, principal_urn)
     if target is None:
         raise HolonError.not_found('PrincipalNotFound', f"unknown principal: {principal_urn}")
-    workspaces = await list_workspaces(deps.pool, target.tenant_id)
-    if not workspaces:
-        await _authorize_bootstrap_governance(principal)
-    else:
-        await _authorize_workspace_governance(principal, target.tenant_id, workspaces[0]["workspace_id"])
+    await _authorize_principal_governance(principal, target.tenant_id)
     updated = await _enqueue_principal_status_event(
         target_principal_urn=principal_urn,
         status=request.status,

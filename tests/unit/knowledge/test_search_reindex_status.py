@@ -62,7 +62,7 @@ def test_current_index_reports_ok_without_reindexing(catalog, monkeypatch) -> No
     async def reindex(*args, **kwargs):
         raise AssertionError("should not reindex")
 
-    monkeypatch.setattr(catalog, "reindex_object_type_search", reindex)
+    monkeypatch.setattr(catalog.catalog_reindex, "reindex_object_type_search", reindex)
 
     assert asyncio.run(catalog.reindex_search_from_serving_store(_Pool(), "http://os", "pw")) == 0
     assert catalog.search_reindex_status["state"] == "ok"
@@ -85,8 +85,8 @@ def test_failed_type_is_retried_and_reported_until_it_succeeds(catalog, monkeypa
         seen_while_degraded.append(dict(catalog.search_reindex_status))
         failed_gauge.append(catalog.SEARCH_REINDEX_FAILED_OBJECT_TYPES._value.get())
 
-    monkeypatch.setattr(catalog, "reindex_object_type_search", reindex)
-    monkeypatch.setattr(catalog.asyncio, "sleep", sleep)
+    monkeypatch.setattr(catalog.catalog_reindex, "reindex_object_type_search", reindex)
+    monkeypatch.setattr(catalog.catalog_reindex.asyncio, "sleep", sleep)
 
     done = asyncio.run(
         catalog.reindex_search_from_serving_store(_Pool(), "http://os", "pw", retry_seconds=(0.0,))
@@ -117,8 +117,8 @@ def test_type_deleted_during_reindex_is_not_retried(catalog, monkeypatch) -> Non
     async def sleep(delay):
         raise AssertionError("should not retry a deleted type")
 
-    monkeypatch.setattr(catalog, "reindex_object_type_search", reindex)
-    monkeypatch.setattr(catalog.asyncio, "sleep", sleep)
+    monkeypatch.setattr(catalog.catalog_reindex, "reindex_object_type_search", reindex)
+    monkeypatch.setattr(catalog.catalog_reindex.asyncio, "sleep", sleep)
 
     assert asyncio.run(catalog.reindex_search_from_serving_store(_Pool(), "http://os", "pw")) == 1
     assert catalog.search_reindex_status["state"] == "ok"

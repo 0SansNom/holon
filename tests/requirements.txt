@@ -2,6 +2,7 @@
 pytest>=8.3,<10
 pyjwt==2.15.0
 fastapi>=0.110
+python-multipart>=0.0.9
 pydantic>=2,<3
 aiokafka>=0.10
 asyncpg>=0.29

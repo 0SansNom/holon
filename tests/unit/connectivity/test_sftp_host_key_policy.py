@@ -37,16 +37,16 @@ sys.modules.setdefault("pyarrow.lib", MagicMock())
 sys.path.insert(0, str(REPO / "libs"))
 sys.path.insert(0, str(REPO / "services" / "connectivity"))
 
-from app import sftp_source_registry  # noqa: E402
+from app import sftp_source_fetch  # noqa: E402
 from app.sftp_source_registry import _configure_host_key_policy  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _stub_policies(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Patch the policy classes on whichever paramiko the module imported
+    # Patch the policy classes on whichever paramiko the fetch module imported
     # (real or stub), restored after each test.
-    monkeypatch.setattr(sftp_source_registry.paramiko, "RejectPolicy", _RejectPolicy)
-    monkeypatch.setattr(sftp_source_registry.paramiko, "AutoAddPolicy", _AutoAddPolicy)
+    monkeypatch.setattr(sftp_source_fetch.paramiko, "RejectPolicy", _RejectPolicy)
+    monkeypatch.setattr(sftp_source_fetch.paramiko, "AutoAddPolicy", _AutoAddPolicy)
 
 
 @pytest.fixture(autouse=True)

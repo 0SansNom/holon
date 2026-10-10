@@ -103,7 +103,7 @@ def test_source_update_requires_write_on_existing_source(monkeypatch) -> None:
     async def _authorize(principal, permission, *, name, workspace_id=None):
         checked.append((permission, name, workspace_id))
 
-    monkeypatch.setattr(sources, "_authorize_source", _authorize)
+    monkeypatch.setattr(sources._shared, "_authorize_source", _authorize)
     existing = asyncio.run(
         sources._authorize_source_update(
             _Registry({"name": "s", "workspace_id": "main"}), _Principal(), "s", "main"
@@ -117,7 +117,7 @@ def test_source_update_rejects_workspace_move(monkeypatch) -> None:
     async def _authorize(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(sources, "_authorize_source", _authorize)
+    monkeypatch.setattr(sources._shared, "_authorize_source", _authorize)
     with pytest.raises(HolonError) as exc:
         asyncio.run(
             sources._authorize_source_update(
@@ -131,7 +131,7 @@ def test_new_source_skips_source_authz(monkeypatch) -> None:
     async def _authorize(*args, **kwargs):
         raise AssertionError("no source row to authorize against")
 
-    monkeypatch.setattr(sources, "_authorize_source", _authorize)
+    monkeypatch.setattr(sources._shared, "_authorize_source", _authorize)
     assert asyncio.run(
         sources._authorize_source_update(_Registry(None), _Principal(), "s", "main")
     ) is None
