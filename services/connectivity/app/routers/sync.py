@@ -89,3 +89,16 @@ async def list_syncs(principal: Principal = Depends(current_principal)) -> list[
         "SELECT * FROM sync_run WHERE tenant_id = $1 ORDER BY id DESC", principal.tenant_id
     )
     return [dict(row) for row in rows]
+
+
+@router.get("/sync-failures")
+async def list_sync_failures(
+    principal: Principal = Depends(current_principal),
+    limit: int = Query(100, ge=1, le=1000),
+) -> list[dict]:
+    """Failed and timed-out syncs, newest first; `/syncs` lists only the successful ones."""
+    await _authorize_workspace(principal, "read")
+    rows = await deps.pool.fetch(
+        "SELECT * FROM sync_failure WHERE tenant_id = $1 ORDER BY id DESC LIMIT $2", principal.tenant_id, limit
+    )
+    return [dict(row) for row in rows]

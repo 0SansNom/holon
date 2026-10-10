@@ -1,4 +1,4 @@
-"""A scheduled sync gives up on a source that does not finish fetching in time."""
+"""A scheduled sync gives up on a source that does not finish fetching in time, and the failure is recorded."""
 
 from __future__ import annotations
 
@@ -36,11 +36,24 @@ from app import ingest_sync  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
+_AUDITS: list[dict] = []
+
 _ACTOR = EventActor(type="service_account", urn="hl:acme:global:service-account:test", on_behalf_of=None)
+
+
+class _FailurePool:
+    def __init__(self) -> None:
+        self.failures: list[tuple] = []
+
+    async def execute(self, sql: str, *args):
+        assert "INSERT INTO sync_failure" in sql
+        self.failures.append(args)
 
 
 def _source(monkeypatch, fetch) -> list:
     writes: list = []
+    monkeypatch.setattr(ingest_sync.deps, "pool", _FailurePool())
+    monkeypatch.setattr(ingest_sync, "emit_audit", lambda **kwargs: _AUDITS.append(kwargs))
 
     async def no_plugin(pool, dataset_name, tenant_id):
         return None
@@ -73,6 +86,18 @@ def test_a_source_slower_than_the_deadline_fails_without_writing(monkeypatch) ->
     assert caught.value.error_name == "SourceFetchTimeout"
     assert caught.value.status_code == 503
     assert writes == []
+    ((tenant_id, connector_urn, dataset_urn, error_name, error, timed_out, started_at, finished_at),) = (
+        ingest_sync.deps.pool.failures
+    )
+    assert (tenant_id, connector_urn, dataset_urn) == (
+        "acme",
+        "hl:acme:global:connector:sql-orders",
+        "hl:acme:main:dataset:orders",
+    )
+    assert (error_name, timed_out) == ("SourceFetchTimeout", True)
+    assert started_at <= finished_at
+    assert _AUDITS[-1]["action"] == "connectivity.sync.failed"
+    assert _AUDITS[-1]["outcome"] == "failure"
 
 
 def test_a_timeout_raised_by_the_source_itself_is_not_relabelled(monkeypatch) -> None:
@@ -85,3 +110,31 @@ def test_a_timeout_raised_by_the_source_itself_is_not_relabelled(monkeypatch) ->
         asyncio.run(
             ingest_sync._run_sync_for_dataset("orders", actor=_ACTOR, tenant_id="acme", fetch_timeout=30)
         )
+
+
+def test_a_source_error_is_recorded_as_a_failed_run(monkeypatch) -> None:
+    async def broken(pool, tenant_id, dataset_name):
+        raise ingest_sync.source_registry_base.SourceFetchError("relation \"orders\" does not exist")
+
+    _source(monkeypatch, broken)
+
+    with pytest.raises(HolonError):
+        asyncio.run(ingest_sync._run_sync_for_dataset("orders", actor=_ACTOR, tenant_id="acme"))
+
+    ((_, _, _, error_name, error, timed_out, _, _),) = ingest_sync.deps.pool.failures
+    assert (error_name, timed_out) == ("DatasetValidationFailed", False)
+    assert "does not exist" in error
+
+
+def test_an_unknown_dataset_is_not_recorded(monkeypatch) -> None:
+    _source(monkeypatch, None)
+
+    async def unknown(pool, tenant_id, dataset_name):
+        return None
+
+    monkeypatch.setattr(ingest_sync.source_kinds, "resolve_registered_source", unknown)
+
+    with pytest.raises(HolonError):
+        asyncio.run(ingest_sync._run_sync_for_dataset("typo", actor=_ACTOR, tenant_id="acme"))
+
+    assert ingest_sync.deps.pool.failures == []
