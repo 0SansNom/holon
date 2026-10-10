@@ -119,7 +119,12 @@ async def _finalize_sync(
     )
 
 async def _run_sync_for_dataset(
-    dataset_name: str, *, actor: EventActor, tenant_id: str = TENANT_ID, workspace_id: str = WORKSPACE_ID
+    dataset_name: str,
+    *,
+    actor: EventActor,
+    tenant_id: str = TENANT_ID,
+    workspace_id: str = WORKSPACE_ID,
+    fetch_timeout: Optional[float] = None,
 ) -> SyncResult:
     """Execute sync pipeline: fetch data from source, write Iceberg snapshot, and finalize."""
     write_mode: Literal["overwrite", "append"] = "overwrite"
@@ -156,8 +161,18 @@ async def _run_sync_for_dataset(
 
     started_at = datetime.now(timezone.utc)
     commit_cursor = None
+    fetch_deadline = asyncio.timeout(fetch_timeout)
     try:
-        rows, commit_cursor = await read()
+        async with fetch_deadline:
+            rows, commit_cursor = await read()
+    except TimeoutError as exc:
+        if not fetch_deadline.expired():
+            raise
+        raise HolonError.unavailable(
+            'SourceFetchTimeout',
+            f"source {dataset_name!r} was not fetched within {fetch_timeout:g}s",
+            dataset_name=dataset_name,
+        ) from exc
     except source_registry_base.SourceFetchError as exc:
         raise HolonError.invalid_argument('DatasetValidationFailed', str(exc)) from exc
     except ConnectorSafetyError as exc:
