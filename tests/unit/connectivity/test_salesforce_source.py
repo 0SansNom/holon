@@ -73,6 +73,14 @@ def test_apply_cursor_appends_where_or_and() -> None:
     )
 
 
+def test_apply_cursor_ignores_order_by_inside_a_string() -> None:
+    soql = "SELECT Id FROM Account WHERE Name = 'order by trick' ORDER BY Id"
+    assert _apply_cursor(soql, "SystemModstamp", "2024-01-01T00:00:00Z") == (
+        "SELECT Id FROM Account WHERE Name = 'order by trick' "
+        "AND SystemModstamp >= 2024-01-01T00:00:00Z ORDER BY Id"
+    )
+
+
 def test_apply_cursor_datetime_variants_are_unquoted() -> None:
     # Bare date stays a Date literal.
     assert (
@@ -242,11 +250,18 @@ def test_fetch_for_dataset_mints_token_and_paginates() -> None:
     client.post = AsyncMock(return_value=token_response)
     client.get = AsyncMock(side_effect=[page1, page2])
 
-    with (
-        patch("app.salesforce_source_fetch.assert_http_url"),
-        patch("app.salesforce_source_fetch.httpx.AsyncClient", return_value=client),
-    ):
-        rows, commit = asyncio.run(fetch_for_dataset(pool, "t1", "sf_accounts"))
+    async def scenario():
+        with (
+            patch("app.salesforce_source_fetch.assert_http_url"),
+            patch("app.salesforce_source_fetch.httpx.AsyncClient", return_value=client),
+        ):
+            batches, commit = await fetch_for_dataset(pool, "t1", "sf_accounts")
+            rows = []
+            async for batch in batches:
+                rows.extend(batch)
+        return rows, commit
+
+    rows, commit = asyncio.run(scenario())
 
     assert rows == [{"Id": "001A", "Name": "A"}, {"Id": "001B", "Name": "B"}]
     assert commit is None

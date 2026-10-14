@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import datetime
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import asyncpg
 import httpx
 
-from app.cursor_window import advance_cursor, lookback_value
+from app.cursor_window import CursorTracker, lookback_value
 from app.pinned_http import pinned_transport
 from app.source_registry_base import (
     SourceConfigError,
@@ -23,8 +23,6 @@ from holon_common.connector_safety import (
     same_origin,
 )
 
-# Maximum page count safety limit to prevent pagination infinite loops.
-_MAX_PAGES = 100
 
 def _extract_records(body: Any, record_path: Optional[str]) -> list[dict]:
     data = body
@@ -133,7 +131,7 @@ async def _oauth2_bearer_token(pool: asyncpg.Pool, tenant_id: str, connection_na
 
 async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
-) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
+) -> tuple[AsyncIterator[list[dict]], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT base_url, auth_header_name, auth_header_value, secret_ref, record_path, next_page_path, connection_name, "
         "cursor_property, incremental_param, last_cursor_value, cursor_boundary_keys "
@@ -181,7 +179,6 @@ async def fetch_for_dataset(
         if value:
             headers[row["auth_header_name"]] = value
 
-    records: list[dict] = []
     url: Optional[str] = row["base_url"]
     try:
         assert_http_url(url)
@@ -190,50 +187,56 @@ async def fetch_for_dataset(
     # Append incremental parameter only to the first page request.
     if row["incremental_param"] and row["last_cursor_value"] is not None:
         url = _add_query_param(url, row["incremental_param"], lookback_value(row["last_cursor_value"]))
-    pages_fetched = 0
-
-    async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
-        while url is not None:
-            pages_fetched += 1
-            if pages_fetched > _MAX_PAGES:
-                raise SourceFetchError(
-                    f"stopped after {_MAX_PAGES} pages without reaching the end — "
-                    "either this source has more pages than this connector supports, or next_page_path "
-                    "never resolves to null; a real connector plugin may be a better fit for this API"
-                )
-            # Auth header applied to every page, not just the first — the
-            # next-page URL needs the same credential. `_extract_next_url`
-            # pins the origin check to the *configured* `base_url`, not the
-            # previous page's URL, so a malicious page N can't widen the
-            # trusted origin for page N+1.
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            body = response.json()
-            records.extend(_extract_records(body, row["record_path"]))
-            url = (
-                _extract_next_url(body, row["next_page_path"], origin_url=row["base_url"])
-                if row["next_page_path"]
-                else None
-            )
-
-    commit: Optional[Callable[[], Awaitable[None]]] = None
-    if row["cursor_property"]:
-        advanced = advance_cursor(
-            records,
+    tracker = (
+        CursorTracker(
             cursor_property=row["cursor_property"],
             last_cursor=row["last_cursor_value"],
             boundary_keys=row["cursor_boundary_keys"],
         )
-        records = advanced.rows
-        if advanced.changed and advanced.cursor is not None:
+        if row["cursor_property"]
+        else None
+    )
 
-            commit = make_property_cursor_commit(
-                pool,
-                table="generic_rest_source",
-                tenant_id=tenant_id,
-                name=name,
-                cursor=advanced.cursor,
-                boundary_keys=advanced.boundary_keys,
-            )
+    async def batches() -> AsyncIterator[list[dict]]:
+        page_url = url
+        seen_urls: set[str] = set()
+        async with httpx.AsyncClient(transport=pinned_transport(), timeout=15.0) as client:
+            while page_url is not None:
+                if page_url in seen_urls:
+                    raise SourceFetchError(f"source {name!r} repeated page url {page_url!r}")
+                seen_urls.add(page_url)
+                # Auth header applied to every page, not just the first — the
+                # next-page URL needs the same credential. `_extract_next_url`
+                # pins the origin check to the *configured* `base_url`, not the
+                # previous page's URL, so a malicious page N can't widen the
+                # trusted origin for page N+1.
+                response = await client.get(page_url, headers=headers)
+                response.raise_for_status()
+                body = response.json()
+                page = _extract_records(body, row["record_path"])
+                if tracker is not None:
+                    page = tracker.keep(page)
+                if page:
+                    yield page
+                page_url = (
+                    _extract_next_url(body, row["next_page_path"], origin_url=row["base_url"])
+                    if row["next_page_path"]
+                    else None
+                )
 
-    return records, commit
+    commit: Optional[Callable[[], Awaitable[None]]] = None
+    if tracker is not None:
+
+        async def commit() -> None:
+            advanced = tracker.result()
+            if advanced.changed and advanced.cursor is not None:
+                await make_property_cursor_commit(
+                    pool,
+                    table="generic_rest_source",
+                    tenant_id=tenant_id,
+                    name=name,
+                    cursor=advanced.cursor,
+                    boundary_keys=advanced.boundary_keys,
+                )()
+
+    return batches(), commit
