@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import asyncpg
 import httpx
 
-from app.cursor_window import advance_cursor
+from app.cursor_window import CursorTracker
 from app.pinned_http import pinned_transport
 from app.source_registry_base import (
     SourceFetchError,
@@ -26,8 +26,6 @@ from holon_common.connector_safety import (
 _ISO_CURSOR_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?)?$"
 )
-
-_MAX_PAGES = 100
 
 _OAUTH2_REFRESH_MARGIN_SECONDS = 60
 
@@ -80,6 +78,26 @@ def _soql_date_literal(value: str) -> Optional[str]:
     return parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _outside_quotes(soql: str, keyword: str) -> int:
+    """Index of `keyword` outside single quotes, or -1."""
+    in_quote = False
+    i = 0
+    lower = soql.lower()
+    while i < len(soql):
+        ch = soql[i]
+        if in_quote and ch == "\\":
+            i += 2
+            continue
+        if ch == "'":
+            in_quote = not in_quote
+            i += 1
+            continue
+        if not in_quote and lower.startswith(keyword, i):
+            return i
+        i += 1
+    return -1
+
+
 def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> str:
     """Append an incremental filter without rewriting the user's SELECT list."""
     date_literal = _soql_date_literal(last_cursor_value)
@@ -90,16 +108,15 @@ def _apply_cursor(soql: str, cursor_property: str, last_cursor_value: str) -> st
     else:
         literal = last_cursor_value.replace("\\", "\\\\").replace("'", "\\'")
         clause = f"{cursor_property} >= '{literal}'"
-    lowered = soql.lower()
-    # Insert before ORDER BY / LIMIT / OFFSET when present.
+    # Insert before ORDER BY / LIMIT / OFFSET when they sit outside quotes.
+    split_at = -1
     for keyword in (" order by ", " limit ", " offset "):
-        idx = lowered.find(keyword)
-        if idx != -1:
-            head, tail = soql[:idx], soql[idx:]
-            joiner = " AND " if " where " in head.lower() else " WHERE "
-            return f"{head}{joiner}{clause}{tail}"
-    joiner = " AND " if " where " in lowered else " WHERE "
-    return f"{soql}{joiner}{clause}"
+        idx = _outside_quotes(soql, keyword)
+        if idx != -1 and (split_at == -1 or idx < split_at):
+            split_at = idx
+    head, tail = (soql[:split_at], soql[split_at:]) if split_at != -1 else (soql, "")
+    joiner = " AND " if _outside_quotes(head, " where ") != -1 else " WHERE "
+    return f"{head}{joiner}{clause}{tail}"
 
 
 def _strip_attributes(record: dict[str, Any]) -> dict[str, Any]:
@@ -190,7 +207,7 @@ def _next_page_url(*, instance_url: str, next_records_url: Optional[str]) -> Opt
 
 async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
-) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
+) -> tuple[AsyncIterator[list[dict]], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, soql, api_version, cursor_property, last_cursor_value, "
         "cursor_boundary_keys "
@@ -220,56 +237,61 @@ async def fetch_for_dataset(
         f"{instance_url}/services/data/{row['api_version']}/query?{urlencode({'q': soql})}"
     )
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    records: list[dict] = []
-    pages_fetched = 0
-    next_url: Optional[str] = query_url
-
-    async with httpx.AsyncClient(transport=pinned_transport(), timeout=30.0) as client:
-        while next_url:
-            pages_fetched += 1
-            if pages_fetched > _MAX_PAGES:
-                raise SourceFetchError(
-                    f"stopped after {_MAX_PAGES} pages without reaching the end — "
-                    "narrow the SOQL or raise the page limit"
-                )
-            try:
-                assert_http_url(next_url)
-            except ConnectorSafetyError as exc:
-                raise SourceFetchError(str(exc)) from exc
-            response = await client.get(next_url, headers=headers)
-            if response.status_code >= 400:
-                raise SourceFetchError(
-                    f"Salesforce query failed ({response.status_code}): {response.text[:300]}"
-                )
-            body = response.json()
-            page_records = body.get("records")
-            if not isinstance(page_records, list):
-                raise SourceFetchError("Salesforce query response missing records array")
-            records.extend(_strip_attributes(r) for r in page_records if isinstance(r, dict))
-            if body.get("done", True):
-                break
-            next_url = _next_page_url(
-                instance_url=instance_url, next_records_url=body.get("nextRecordsUrl")
-            )
-
-    commit: Optional[Callable[[], Awaitable[None]]] = None
-    if row["cursor_property"]:
-        advanced = advance_cursor(
-            records,
+    tracker = (
+        CursorTracker(
             cursor_property=row["cursor_property"],
             last_cursor=row["last_cursor_value"],
             boundary_keys=row["cursor_boundary_keys"],
         )
-        records = advanced.rows
-        if advanced.changed and advanced.cursor is not None:
+        if row["cursor_property"]
+        else None
+    )
 
-            commit = make_property_cursor_commit(
-                pool,
-                table="salesforce_source",
-                tenant_id=tenant_id,
-                name=name,
-                cursor=advanced.cursor,
-                boundary_keys=advanced.boundary_keys,
-            )
+    async def batches() -> AsyncIterator[list[dict]]:
+        next_url: Optional[str] = query_url
+        seen_urls: set[str] = set()
+        async with httpx.AsyncClient(transport=pinned_transport(), timeout=30.0) as client:
+            while next_url:
+                if next_url in seen_urls:
+                    raise SourceFetchError(f"source {name!r} repeated page url {next_url!r}")
+                seen_urls.add(next_url)
+                try:
+                    assert_http_url(next_url)
+                except ConnectorSafetyError as exc:
+                    raise SourceFetchError(str(exc)) from exc
+                response = await client.get(next_url, headers=headers)
+                if response.status_code >= 400:
+                    raise SourceFetchError(
+                        f"Salesforce query failed ({response.status_code}): {response.text[:300]}"
+                    )
+                body = response.json()
+                page_records = body.get("records")
+                if not isinstance(page_records, list):
+                    raise SourceFetchError("Salesforce query response missing records array")
+                page = [_strip_attributes(record) for record in page_records if isinstance(record, dict)]
+                if tracker is not None:
+                    page = tracker.keep(page)
+                if page:
+                    yield page
+                if body.get("done", True):
+                    return
+                next_url = _next_page_url(
+                    instance_url=instance_url, next_records_url=body.get("nextRecordsUrl")
+                )
 
-    return records, commit
+    commit: Optional[Callable[[], Awaitable[None]]] = None
+    if tracker is not None:
+
+        async def commit() -> None:
+            advanced = tracker.result()
+            if advanced.changed and advanced.cursor is not None:
+                await make_property_cursor_commit(
+                    pool,
+                    table="salesforce_source",
+                    tenant_id=tenant_id,
+                    name=name,
+                    cursor=advanced.cursor,
+                    boundary_keys=advanced.boundary_keys,
+                )()
+
+    return batches(), commit

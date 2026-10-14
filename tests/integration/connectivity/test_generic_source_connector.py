@@ -256,8 +256,7 @@ def test_a_source_that_never_terminates_its_next_page_chain_is_stopped_not_hung(
 
     status, result = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": name})
     assert status == 400, result
-    assert "stopped after" in result["detail"], result
-    assert "pages" in result["detail"], result
+    assert "repeated page url" in result["detail"], result
 
 
 # --- Reusable connections -------------------------------------------------
