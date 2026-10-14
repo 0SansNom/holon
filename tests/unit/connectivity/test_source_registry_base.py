@@ -195,9 +195,25 @@ def test_assert_dataset_available_peer_conflict() -> None:
         )
 
 
-def test_make_property_cursor_commit() -> None:
+def _locking_pool(current):
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=current)
+    conn.fetchval = AsyncMock(return_value=None if current is None else current.get("last_cursor_value"))
+    conn.execute = AsyncMock()
+    txn = MagicMock()
+    txn.__aenter__ = AsyncMock(return_value=None)
+    txn.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=txn)
+    acquire = MagicMock()
+    acquire.__aenter__ = AsyncMock(return_value=conn)
+    acquire.__aexit__ = AsyncMock(return_value=None)
     pool = MagicMock()
-    pool.execute = AsyncMock()
+    pool.acquire = MagicMock(return_value=acquire)
+    return pool, conn
+
+
+def test_make_property_cursor_commit() -> None:
+    pool, conn = _locking_pool({"last_cursor_value": None, "cursor_boundary_keys": None})
     commit = make_property_cursor_commit(
         pool,
         table="sql_source",
@@ -207,14 +223,23 @@ def test_make_property_cursor_commit() -> None:
         boundary_keys='["a"]',
     )
     asyncio.run(commit())
-    pool.execute.assert_awaited_once()
-    sql, cursor, boundary, tenant_id, name = pool.execute.await_args.args
+    conn.execute.assert_awaited_once()
+    sql, cursor, boundary, tenant_id, name = conn.execute.await_args.args
     assert "sql_source" in sql
     assert "last_cursor_value" in sql
     assert cursor == "2024-01-01"
     assert boundary == '["a"]'
     assert tenant_id == "t1"
     assert name == "orders"
+
+
+def test_property_cursor_does_not_move_backwards() -> None:
+    pool, conn = _locking_pool({"last_cursor_value": "9", "cursor_boundary_keys": "[]"})
+    commit = make_property_cursor_commit(
+        pool, table="sql_source", tenant_id="t1", name="orders", cursor="8", boundary_keys="[]",
+    )
+    asyncio.run(commit())
+    conn.execute.assert_not_awaited()
 
 
 def test_make_column_cursor_commit_rejects_unknown_column() -> None:
@@ -231,8 +256,8 @@ def test_make_column_cursor_commit_rejects_unknown_column() -> None:
 
 
 def test_make_column_cursor_commit() -> None:
-    pool = MagicMock()
-    pool.execute = AsyncMock()
+    pool, conn = _locking_pool(None)
+    conn.fetchval = AsyncMock(return_value=None)
     commit = make_column_cursor_commit(
         pool,
         table="object_source",
@@ -242,7 +267,7 @@ def test_make_column_cursor_commit() -> None:
         value="key/1",
     )
     asyncio.run(commit())
-    sql, value, tenant_id, name = pool.execute.await_args.args
+    sql, value, tenant_id, name = conn.execute.await_args.args
     assert "last_synced_key" in sql
     assert value == "key/1"
     assert tenant_id == "t1"
