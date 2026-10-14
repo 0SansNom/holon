@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from holon_common import Principal
 
-from . import core, function_registry, ontology
+from . import core, function_registry, ontology, serving_store
 
 logger = logging.getLogger("knowledge")
 
@@ -102,13 +103,25 @@ async def _compute_link_aggregate(
             return unique
         return values[:limit]
 
-    numeric = [float(v) for v in values]
+    return _reduce_numeric(values, aggregate)
+
+
+def _decimal(value: Any) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise InvalidOperation
+    return Decimal(str(value))
+
+
+def _reduce_numeric(values: list, aggregate: str) -> Optional[Decimal]:
+    numeric = [_decimal(v) for v in values]
     if not numeric:
         return None
     if aggregate == "sum":
-        return sum(numeric)
+        return sum(numeric, Decimal(0))
     if aggregate == "avg":
-        return sum(numeric) / len(numeric)
+        return sum(numeric, Decimal(0)) / Decimal(len(numeric))
     if aggregate == "min":
         return min(numeric)
     if aggregate == "max":
@@ -169,6 +182,123 @@ def _skip_derived_property(property_name: str, exc: BaseException) -> None:
     )
 
 
+_AGGREGATE_FAILED = object()
+
+
+def _combine_fk_aggregate(aggregate: str, parent_ids: list[str], grouped: list, marked_rows: list, allowed_ids: set[str]) -> dict:
+    by_parent: dict[str, dict] = {}
+    for row in grouped:
+        by_parent[str(row["parent_id"])] = {
+            "n": row["n"],
+            "total": row["total"],
+            "min_v": row["min_v"],
+            "max_v": row["max_v"],
+            "numeric_n": row["numeric_n"],
+            "bad": row["bad"],
+        }
+    for row in marked_rows:
+        if str(row["instance_id"]) not in allowed_ids:
+            continue
+        slot = by_parent.setdefault(
+            str(row["parent_id"]),
+            {"n": 0, "total": None, "min_v": None, "max_v": None, "numeric_n": 0, "bad": 0},
+        )
+        slot["n"] += 1
+        if aggregate == "count" or row["value"] is None:
+            continue
+        try:
+            number = _decimal(row["value"])
+        except (InvalidOperation, ValueError):
+            slot["bad"] += 1
+            continue
+        slot["numeric_n"] += 1
+        slot["total"] = (slot["total"] or Decimal(0)) + number
+        slot["min_v"] = number if slot["min_v"] is None else min(slot["min_v"], number)
+        slot["max_v"] = number if slot["max_v"] is None else max(slot["max_v"], number)
+
+    result: dict[str, Any] = {}
+    for parent_id in parent_ids:
+        slot = by_parent.get(parent_id)
+        if aggregate == "count":
+            result[parent_id] = 0 if slot is None else slot["n"]
+            continue
+        if slot is None:
+            continue
+        if slot["bad"]:
+            result[parent_id] = _AGGREGATE_FAILED
+            continue
+        if not slot["numeric_n"]:
+            continue
+        if aggregate == "sum":
+            result[parent_id] = slot["total"]
+        elif aggregate == "avg":
+            result[parent_id] = slot["total"] / Decimal(slot["numeric_n"])
+        elif aggregate == "min":
+            result[parent_id] = slot["min_v"]
+        elif aggregate == "max":
+            result[parent_id] = slot["max_v"]
+    return result
+
+
+async def _precompute_fk_aggregates(
+    entries: dict, object_type_name: str, rows: list[dict], principal: Principal, *,
+    relation_types: list[dict], property_mapping_cache: dict[str, dict],
+) -> dict[str, dict]:
+    """Single-hop foreign-key aggregates for the whole page, one query per property."""
+    parent_ids = [str(row["id"]) for row in rows if row.get("id") is not None]
+    if not parent_ids:
+        return {}
+    out: dict[str, dict] = {}
+    for property_name, rule in entries.items():
+        aggregate = rule.get("aggregate")
+        if aggregate not in {"count", "sum", "avg", "min", "max"}:
+            continue
+        path = _link_aggregate_path(rule)
+        if len(path) != 1:
+            continue
+        relation = core._find_relation_by_link_name(relation_types, object_type_name, path[0])
+        if relation is None or (relation.get("storage_kind") or "foreign_key") != "foreign_key":
+            continue
+        source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
+        target_name = relation["target_object_type_urn"].rsplit(":", 1)[-1]
+        if object_type_name != target_name or source_name == object_type_name:
+            continue
+        source_urn = relation["source_object_type_urn"]
+        mapping = property_mapping_cache.get(source_urn)
+        if mapping is None:
+            definition = await ontology.get_object_type(core.pool, source_urn)
+            if definition is None:
+                continue
+            mapping = definition["property_mapping"]
+            property_mapping_cache[source_urn] = mapping
+        fk_column = mapping.get(relation.get("source_property"))
+        if not fk_column:
+            continue
+        value_column = None
+        if aggregate != "count":
+            value_column = mapping.get(rule.get("property"))
+            if not value_column:
+                continue
+        grouped, marked = await serving_store.aggregate_fk_children(
+            core.pool,
+            child_object_type=source_name,
+            tenant_id=principal.tenant_id,
+            child_object_type_urn=await core._object_type_urn_for(source_name, principal.tenant_id),
+            fk_column=fk_column,
+            parent_ids=parent_ids,
+            value_column=value_column,
+        )
+        allowed: set[str] = set()
+        for row in marked:
+            markings = row["markings"]
+            if isinstance(markings, str):
+                markings = json.loads(markings)
+            if markings and await core._authorize_markings(principal, markings):
+                allowed.add(str(row["instance_id"]))
+        out[property_name] = _combine_fk_aggregate(aggregate, parent_ids, grouped, marked, allowed)
+    return out
+
+
 async def _apply_derived_properties(object_type_urn: str, rows: list[dict], principal: Principal) -> list[dict]:
     """Read-time computation of every `derived_properties` entry — a
     plain string is a Function plugin invocation (the original,
@@ -227,6 +357,10 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
     authorized_types = {object_type_name}
     property_mapping_cache: dict[str, dict] = {}
     neighbor_property_mapping_cache: dict[str, dict] = {}
+    precomputed = await _precompute_fk_aggregates(
+        link_aggregate_entries, object_type_name, rows, principal, relation_types=relation_types,
+        property_mapping_cache=property_mapping_cache,
+    )
 
     result_rows = []
     for row in rows:
@@ -248,6 +382,13 @@ async def _apply_derived_properties(object_type_urn: str, rows: list[dict], prin
         # Through core: replacing core._compute_link_aggregate or
         # core._compute_struct_reducer replaces what runs for the row.
         for property_name, rule in link_aggregate_entries.items():
+            if property_name in precomputed:
+                value = precomputed[property_name].get(str(row.get("id")))
+                if value is _AGGREGATE_FAILED:
+                    failed.append(property_name)
+                elif value is not None:
+                    row[property_name] = value
+                continue
             try:
                 value = await core._compute_link_aggregate(
                     rule, object_type_name, row, principal,
