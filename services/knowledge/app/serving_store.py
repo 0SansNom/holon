@@ -294,3 +294,78 @@ async def list_instances(
         *params,
     )
     return [_with_freshness(json.loads(row["data"]), row["materialized_at"]) for row in rows]
+
+
+_NUMERIC_TEXT = r"^-?[0-9]+(\.[0-9]+)?$"
+
+
+async def aggregate_fk_children(
+    pool: asyncpg.Pool,
+    *,
+    child_object_type: str,
+    tenant_id: str,
+    child_object_type_urn: str,
+    fk_column: str,
+    parent_ids: list[str],
+    value_column: Optional[str],
+) -> tuple[list, list]:
+    """One grouped aggregate of unmarked children, plus the marked children to filter.
+
+    Marked rows stay out of the aggregate: a marking the caller does not hold
+    must not change the count. The caller adds back the ones they may see.
+    """
+    if not parent_ids:
+        return [], []
+    grouped = await pool.fetch(
+        """
+        SELECT oi.data->>$3 AS parent_id,
+               count(*)::int AS n,
+               sum(CASE WHEN $4::text IS NOT NULL AND (oi.data->>$4) ~ $7 THEN (oi.data->>$4)::numeric END) AS total,
+               min(CASE WHEN $4::text IS NOT NULL AND (oi.data->>$4) ~ $7 THEN (oi.data->>$4)::numeric END) AS min_v,
+               max(CASE WHEN $4::text IS NOT NULL AND (oi.data->>$4) ~ $7 THEN (oi.data->>$4)::numeric END) AS max_v,
+               count(CASE WHEN $4::text IS NOT NULL AND (oi.data->>$4) ~ $7 THEN 1 END)::int AS numeric_n,
+               count(CASE
+                   WHEN $4::text IS NOT NULL AND oi.data->>$4 IS NOT NULL AND (oi.data->>$4) !~ $7 THEN 1
+               END)::int AS bad
+        FROM object_instance oi
+        WHERE oi.object_type = $1 AND oi.tenant_id = $2
+          AND oi.data->>$3 = ANY($5::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM object_instance_tombstone t
+            WHERE t.tenant_id = oi.tenant_id AND t.object_type = oi.object_type AND t.instance_id = oi.instance_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM instance_marking m
+            WHERE m.object_type_urn = $6 AND m.tenant_id = oi.tenant_id AND m.instance_id = oi.instance_id
+          )
+        GROUP BY 1
+        """,
+        child_object_type,
+        tenant_id,
+        fk_column,
+        value_column,
+        parent_ids,
+        child_object_type_urn,
+        _NUMERIC_TEXT,
+    )
+    marked = await pool.fetch(
+        """
+        SELECT oi.instance_id, oi.data->>$3 AS parent_id, oi.data->>$4 AS value, m.markings
+        FROM object_instance oi
+        JOIN instance_marking m
+          ON m.object_type_urn = $6 AND m.tenant_id = oi.tenant_id AND m.instance_id = oi.instance_id
+        WHERE oi.object_type = $1 AND oi.tenant_id = $2
+          AND oi.data->>$3 = ANY($5::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM object_instance_tombstone t
+            WHERE t.tenant_id = oi.tenant_id AND t.object_type = oi.object_type AND t.instance_id = oi.instance_id
+          )
+        """,
+        child_object_type,
+        tenant_id,
+        fk_column,
+        value_column,
+        parent_ids,
+        child_object_type_urn,
+    )
+    return list(grouped), list(marked)
