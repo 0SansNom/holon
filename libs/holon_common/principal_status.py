@@ -1,13 +1,16 @@
 """Process-local JWT denylist fed by Identity events and boot snapshot.
 
 The denylist is in-memory, so every replica must receive every event.
-`principal_status_group_id` is unique per process so Kafka does not
-share a consumer group across replicas (which would deliver each
-message to only one pod).
+`principal_status_group_id` is unique per host so Kafka does not share
+a consumer group across replicas (which would deliver each message to
+only one pod). It does not include the process id: a restart reuses
+the group instead of leaving a dead one behind.
 
 Kafka `auto_offset_reset=latest` means a restarted pod would miss past
 disable/revoke events. `hydrate_revocation_snapshot` pulls the current
-sets from Identity before the process serves traffic.
+sets from Identity before the process serves traffic. A revoke that
+lands while that request is in flight is applied again after the
+snapshot replace, so the replace cannot drop it.
 """
 
 from __future__ import annotations
@@ -23,7 +26,9 @@ from .auth import (
     active_jwt,
     apply_principal_status_payload,
     apply_token_revoked_payload,
+    capture_revocation_events,
     issue_token,
+    replay_revocation_events,
     replace_disabled_principal_urns,
     replace_revoked_jtis,
 )
@@ -34,7 +39,7 @@ logger = logging.getLogger("holon_common.principal_status")
 
 
 def principal_status_group_id(service_name: str) -> str:
-    return f"{service_name}-principal-status-{socket.gethostname()}-{os.getpid()}"
+    return f"{service_name}-principal-status-{socket.gethostname()}"
 
 
 def make_principal_status_consumer(
@@ -115,15 +120,17 @@ async def hydrate_revocation_snapshot(*, identity_url: Optional[str] = None) -> 
         return
     import httpx
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            f"{url}/internal/revocation-snapshot",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        response.raise_for_status()
-        data = response.json()
-    replace_disabled_principal_urns(data.get("disabled_principal_urns") or [])
-    replace_revoked_jtis(data.get("revoked_jtis") or [])
+    with capture_revocation_events() as during:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{url}/internal/revocation-snapshot",
+                headers={"Authorization": f"Bearer {bearer}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        replace_disabled_principal_urns(data.get("disabled_principal_urns") or [])
+        replace_revoked_jtis(data.get("revoked_jtis") or [])
+    replay_revocation_events(during)
     logger.info(
         "hydrated revocation snapshot (%s disabled principals, %s revoked jtis)",
         len(data.get("disabled_principal_urns") or []),
