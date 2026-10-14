@@ -56,9 +56,10 @@ def test_mssql_fetch_dicts_uses_freetds_dsn() -> None:
         assert rows == [{"id": 1, "name": "acme"}]
         dsn = fake_aioodbc.connect.await_args.kwargs["dsn"]
         assert "DRIVER={FreeTDS}" in dsn
-        assert "SERVER=sqlserver" in dsn
+        assert "SERVER={sqlserver}" in dsn
         assert "PORT=1433" in dsn
-        assert "DATABASE=erp" in dsn
+        assert "DATABASE={erp}" in dsn
+        assert "PWD={secret}" in dsn
         assert "Encryption=" not in dsn
         cursor.execute.assert_awaited_once_with(
             "SELECT id, name FROM orders WHERE id > ?", ["0"]
