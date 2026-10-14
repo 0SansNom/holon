@@ -59,6 +59,26 @@ def test_older_lookback_rows_are_dropped() -> None:
     assert again.cursor == "9"
 
 
+def test_fractional_timestamp_is_newer_than_a_whole_second() -> None:
+    advanced = advance_cursor(
+        [{"id": 2, "updated_at": "2024-06-01T10:00:00.001Z"}],
+        cursor_property="updated_at",
+        last_cursor="2024-06-01T10:00:00Z",
+        boundary_keys=None,
+    )
+    assert [row["id"] for row in advanced.rows] == [2]
+    assert advanced.cursor == "2024-06-01T10:00:00.001Z"
+
+
+def test_boundary_keys_are_capped() -> None:
+    from app.cursor_window import _MAX_BOUNDARY_KEYS
+
+    rows = [{"id": i, "updated_at": "2024-06-01T10:00:00Z"} for i in range(_MAX_BOUNDARY_KEYS + 10)]
+    advanced = advance_cursor(rows, cursor_property="updated_at", last_cursor=None, boundary_keys=None)
+    import json
+    assert len(json.loads(advanced.boundary_keys)) == _MAX_BOUNDARY_KEYS
+
+
 def test_lookback_steps_behind_int_and_timestamp() -> None:
     assert lookback_value("8") == "7"
     assert lookback_value("2024-01-01T00:00:01Z") == "2024-01-01T00:00:00Z"
