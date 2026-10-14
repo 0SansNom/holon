@@ -31,13 +31,20 @@ async def _is_due(pool: asyncpg.Pool, sql: str, tenant_id: str, key: str, interv
     return last_finished_at is None or (datetime.now(timezone.utc) - last_finished_at) >= interval
 
 
-_LAST_SYNC_SQL = (
-    "SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2 "
-    "ORDER BY finished_at DESC LIMIT 1"
-)
+# Latest finish wins, success or failure. A broken source then waits out its
+# interval instead of being submitted again on the next poll.
+_LAST_SYNC_SQL = """
+SELECT finished_at FROM (
+    SELECT finished_at FROM sync_run WHERE tenant_id = $1 AND dataset_urn = $2
+    UNION ALL
+    SELECT finished_at FROM sync_failure WHERE tenant_id = $1 AND dataset_urn = $2
+) recent
+ORDER BY finished_at DESC
+LIMIT 1
+"""
 _LAST_PIPELINE_SQL = (
     "SELECT finished_at FROM pipeline_run WHERE tenant_id = $1 AND pipeline_name = $2 "
-    "AND status = 'succeeded' ORDER BY id DESC LIMIT 1"
+    "ORDER BY id DESC LIMIT 1"
 )
 
 
