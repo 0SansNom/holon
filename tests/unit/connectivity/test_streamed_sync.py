@@ -217,6 +217,35 @@ def test_a_source_failing_mid_stream_leaves_the_table_and_cursor_untouched(catal
     assert _rows(catalog) == [{"id": 100}]
 
 
+class _Locked:
+    def __init__(self, pool: "_SourcePool") -> None:
+        self._pool = pool
+
+    async def __aenter__(self) -> "_Locked":
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    def transaction(self) -> "_Locked":
+        return self
+
+    async def fetchrow(self, sql: str, *args):
+        return {
+            "last_cursor_value": self._pool.source["last_cursor_value"],
+            "cursor_boundary_keys": self._pool.source["cursor_boundary_keys"],
+        }
+
+    async def fetchval(self, sql: str, *args):
+        return self._pool.source["last_cursor_value"]
+
+    async def execute(self, sql: str, *args):
+        self._pool.updates.append((sql, args))
+        self._pool.source["last_cursor_value"] = args[0]
+        if "cursor_boundary_keys" in sql:
+            self._pool.source["cursor_boundary_keys"] = args[1]
+
+
 class _SourcePool:
     def __init__(self, *, table_name, query, cursor_property, last_cursor_value, boundary_keys=None) -> None:
         self.source = {
@@ -228,6 +257,9 @@ class _SourcePool:
             "cursor_boundary_keys": boundary_keys,
         }
         self.updates: list[tuple] = []
+
+    def acquire(self) -> _Locked:
+        return _Locked(self)
 
     async def fetchrow(self, sql: str, *args):
         if "FROM sql_source" in sql:
