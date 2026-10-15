@@ -1,13 +1,12 @@
 """SFTP fetch / host-key policy for no-code SFTP sources."""
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 import os
 import stat
 import threading
-from typing import Awaitable, Callable, Optional
+from typing import AsyncIterator, Awaitable, Callable, Iterator, Optional
 
 import asyncpg
 import paramiko
@@ -16,9 +15,11 @@ import pyarrow.json as pajson
 import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
+from app.file_batches import iter_file_batches, iter_in_thread
 from app.file_cursor import mtime_ns_from_stamp, select_files
 from app.source_registry_base import (
     SourceFetchError,
+    attach_resume,
     make_column_cursor_commit,
     resolve_source_secret,
 )
@@ -98,7 +99,30 @@ def _configure_host_key_policy(client: paramiko.SSHClient) -> None:
 
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
-def _fetch_sync(
+class _SftpStream(io.RawIOBase):
+    """Paramiko's file object is not a real IOBase. PyArrow needs readinto and seek."""
+
+    def __init__(self, handle) -> None:
+        self._handle = handle
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        data = self._handle.read(len(buffer))
+        size = len(data)
+        buffer[:size] = data
+        return size
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        self._handle.seek(offset, whence)
+        return self._handle.tell()
+
+
+def _iter_sftp_batches(
     *,
     host: str,
     port: int,
@@ -109,7 +133,8 @@ def _fetch_sync(
     format: str,
     incremental: bool,
     last_synced_path: Optional[str],
-) -> tuple[list[dict], Optional[str]]:
+    holder: dict,
+) -> Iterator[list[dict]]:
     client = paramiko.SSHClient()
     _configure_host_key_policy(client)
     try:
@@ -125,8 +150,10 @@ def _fetch_sync(
         sftp = client.open_sftp()
         try:
             if remote_path:
+                holder["cursor"] = None
                 with sftp.open(remote_path, "rb") as handle:
-                    return _read_bytes(handle.read(), format), None
+                    yield from iter_file_batches(_SftpStream(handle), format)
+                return
 
             prefix = remote_prefix or ""
             # List one directory level when prefix has no trailing slash file match;
@@ -176,19 +203,48 @@ def _fetch_sync(
                 paths = sorted(key for _, key in listed)
                 new_cursor = None
 
-            rows: list[dict] = []
+            holder["cursor"] = new_cursor if incremental else None
             for path in paths:
                 with sftp.open(path, "rb") as handle:
-                    rows.extend(_read_bytes(handle.read(), format))
-            return rows, (new_cursor if incremental else None)
+                    yield from iter_file_batches(_SftpStream(handle), format)
         finally:
             sftp.close()
     finally:
         client.close()
 
+
+def _fetch_sync(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    remote_path: Optional[str],
+    remote_prefix: Optional[str],
+    format: str,
+    incremental: bool,
+    last_synced_path: Optional[str],
+) -> tuple[list[dict], Optional[str]]:
+    holder: dict = {"cursor": None}
+    rows: list[dict] = []
+    for batch in _iter_sftp_batches(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        remote_path=remote_path,
+        remote_prefix=remote_prefix,
+        format=format,
+        incremental=incremental,
+        last_synced_path=last_synced_path,
+        holder=holder,
+    ):
+        rows.extend(batch)
+    return rows, holder["cursor"]
+
 async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
-) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
+) -> tuple[AsyncIterator[list[dict]], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, remote_path, remote_prefix, format, incremental, last_synced_path "
         "FROM sftp_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -216,35 +272,49 @@ async def fetch_for_dataset(
         resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
     ) or ""
 
-    try:
-        rows, new_cursor = await asyncio.to_thread(
-            _fetch_sync,
-            host=pinned_host,
-            port=connection["port"],
-            username=connection["username"],
-            password=password,
-            remote_path=row["remote_path"],
-            remote_prefix=row["remote_prefix"],
-            format=row["format"],
-            incremental=row["incremental"],
-            last_synced_path=row["last_synced_path"],
-        )
-    except SourceFetchError:
-        raise
-    except (OSError, ValueError, ArrowException, paramiko.SSHException) as exc:
-        raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
+    kwargs = dict(
+        host=pinned_host,
+        port=connection["port"],
+        username=connection["username"],
+        password=password,
+        remote_path=row["remote_path"],
+        remote_prefix=row["remote_prefix"],
+        format=row["format"],
+        incremental=row["incremental"],
+        last_synced_path=row["last_synced_path"],
+    )
+    holder: dict = {"cursor": None}
 
-    commit: Optional[Callable[[], Awaitable[None]]] = None
-    if new_cursor is not None and new_cursor != row["last_synced_path"]:
+    def factory() -> Iterator[list[dict]]:
+        try:
+            yield from _iter_sftp_batches(holder=holder, **kwargs)
+        except SourceFetchError:
+            raise
+        except (OSError, ValueError, ArrowException, paramiko.SSHException) as exc:
+            raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
 
-        commit = make_column_cursor_commit(
+    async def batches() -> AsyncIterator[list[dict]]:
+        async for batch in iter_in_thread(factory):
+            yield batch
+
+    async def commit() -> None:
+        new_cursor = holder["cursor"]
+        if new_cursor is None or new_cursor == row["last_synced_path"]:
+            return
+        await make_column_cursor_commit(
             pool,
             table="sftp_source",
             tenant_id=tenant_id,
             name=name,
             column="last_synced_path",
             value=new_cursor,
-        )
+        )()
 
-    return rows, commit
+    def resume() -> Optional[tuple[str, str]]:
+        new_cursor = holder["cursor"]
+        if new_cursor is None or new_cursor == row["last_synced_path"]:
+            return None
+        return new_cursor, ""
+
+    return batches(), attach_resume(commit, resume)
 
