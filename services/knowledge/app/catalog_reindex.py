@@ -18,6 +18,7 @@ logger = logging.getLogger("knowledge.catalog")
 
 
 _INDEX_METADATA_KEYS = frozenset({"materializedAt", "sourceLagSeconds", "degraded", "_maskedFields", "asOf"})
+_REINDEX_PAGE = 500
 
 async def reindex_object_type_search(
     pool: asyncpg.Pool,
@@ -48,47 +49,61 @@ async def reindex_object_type_search(
 
     property_mapping = object_type["property_mapping"]
     property_types = object_type.get("property_types") or {}
-    materialized = await serving_store.list_instances(pool, object_type_name, tenant_id)
-    rows = [{k: v for k, v in row.items() if k not in _INDEX_METADATA_KEYS} for row in materialized]
-
-    skipped = 0
-    index_rows = rows
-    if property_types:
-        index_rows, invalid = await ontology.partition_rows_by_property_types(
-            pool,
-            tenant_id,
-            property_mapping=property_mapping,
-            property_types=property_types,
-            rows=rows,
-        )
-        skipped = len(invalid)
-    _record_skipped_invalid(tenant_id, object_type_urn, object_type_name, skipped)
-
     shared_rows = await ontology.list_shared_property_types(pool, tenant_id)
     shared_by_name = {row["api_name"]: row for row in shared_rows}
-    instance_markings = await ontology.get_instance_markings_bulk(
-        pool,
-        object_type_urn=object_type_urn,
-        tenant_id=tenant_id,
-        instance_ids=[str(row["id"]) for row in index_rows],
-    )
-    if index_rows:
-        classifications = await ontology.get_property_classifications(pool, object_type_urn)
-        await search.index_rows(
-            opensearch_url,
-            opensearch_password,
-            object_type_name=object_type_name,
-            tenant_id=tenant_id,
-            classification=object_type["classification"],
-            property_mapping=property_mapping,
-            rows=index_rows,
-            property_types=property_types,
-            shared_property_types=shared_by_name,
-            property_classifications=classifications,
-            instance_markings=instance_markings,
-            index_generation=generation,
-            indexed_at=time.time(),
+    classifications = await ontology.get_property_classifications(pool, object_type_urn)
+
+    indexed = 0
+    skipped = 0
+    total = 0
+    after_id = None
+    while True:
+        batch = await serving_store.list_instances(
+            pool, object_type_name, tenant_id, after_id=after_id, limit=_REINDEX_PAGE
         )
+        if not batch:
+            break
+        total += len(batch)
+        rows = [{k: v for k, v in row.items() if k not in _INDEX_METADATA_KEYS} for row in batch]
+        index_rows = rows
+        if property_types:
+            index_rows, invalid = await ontology.partition_rows_by_property_types(
+                pool,
+                tenant_id,
+                property_mapping=property_mapping,
+                property_types=property_types,
+                rows=rows,
+            )
+            skipped += len(invalid)
+        if index_rows:
+            instance_markings = await ontology.get_instance_markings_bulk(
+                pool,
+                object_type_urn=object_type_urn,
+                tenant_id=tenant_id,
+                instance_ids=[str(row["id"]) for row in index_rows],
+            )
+            await search.index_rows(
+                opensearch_url,
+                opensearch_password,
+                object_type_name=object_type_name,
+                tenant_id=tenant_id,
+                classification=object_type["classification"],
+                property_mapping=property_mapping,
+                rows=index_rows,
+                property_types=property_types,
+                shared_property_types=shared_by_name,
+                property_classifications=classifications,
+                instance_markings=instance_markings,
+                index_generation=generation,
+                indexed_at=started,
+            )
+            indexed += len(index_rows)
+        last_id = batch[-1].get("id")
+        if last_id is None or len(batch) < _REINDEX_PAGE:
+            break
+        after_id = str(last_id)
+
+    _record_skipped_invalid(tenant_id, object_type_urn, object_type_name, skipped)
     if purge_missing:
         await search.delete_object_type_documents(
             opensearch_url,
@@ -101,9 +116,9 @@ async def reindex_object_type_search(
 
     return {
         "object_type": object_type_name,
-        "indexed": len(index_rows),
+        "indexed": indexed,
         "skipped_invalid": skipped,
-        "materialized_total": len(rows),
+        "materialized_total": total,
     }
 
 async def reindex_search_from_serving_store(

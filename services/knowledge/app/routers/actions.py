@@ -6,6 +6,7 @@ generic over any ObjectType (`routers/objects/generic.py`).
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -17,12 +18,19 @@ from .. import actions
 from .. import core
 
 router = APIRouter()
+logger = logging.getLogger("knowledge.approvals")
 
 
-async def _approval_object_type_urn(approval: dict) -> str:
-    """Get the target ObjectType URN for an approval request."""
+async def _approval_object_type_urn(approval: dict) -> Optional[str]:
+    """Target ObjectType URN, or None when the action type is gone."""
     definition = await actions._get_action_definition(core.pool, approval["tenant_id"], approval["action_name"])
+    if definition is None:
+        return None
     return await core._object_type_urn_for(definition["target_object_type"], tenant_id=approval["tenant_id"])
+
+
+def _orphan(approval: dict) -> dict:
+    return {**approval, "orphaned": True}
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -100,7 +108,14 @@ async def get_approval_by_id(approval_id: int, principal: Principal = Depends(co
     approval = await actions.get_approval(core.pool, approval_id)
     if approval is None:
         raise HolonError.not_found('ApprovalNotFound', f"approval {approval_id} not found", approval_id=approval_id)
-    await core._authorize_object_type(principal, await _approval_object_type_urn(approval), "read")
+    try:
+        ot_urn = await _approval_object_type_urn(approval)
+    except Exception:
+        logger.exception("approval %s: could not resolve its object type", approval_id)
+        return _orphan(approval)
+    if ot_urn is None:
+        return _orphan(approval)
+    await core._authorize_object_type(principal, ot_urn, "read")
     return approval
 
 
@@ -115,6 +130,11 @@ async def list_pending_approvals(
         try:
             ot_urn = await _approval_object_type_urn(row)
         except Exception:
+            logger.exception("approval %s: could not resolve its object type", row.get("id"))
+            visible.append(_orphan(row))
+            continue
+        if ot_urn is None:
+            visible.append(_orphan(row))
             continue
         if await core._is_authorized_read(principal, ot_urn):
             visible.append(row)

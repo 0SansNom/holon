@@ -44,6 +44,7 @@ async def register_sql_connection(
             username=body.username,
             password=body.password,
             secret_ref=body.secret_ref,
+            use_tls=body.use_tls,
             created_by_urn=principal.urn,
         )
     except sql_source_registry.SourceConfigError as exc:

@@ -11,10 +11,39 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
+
+# One hot timestamp must not store an unbounded identity list.
+_MAX_BOUNDARY_KEYS = 4096
+_ISO_START = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])")
+
+
+def _time_key(text: str) -> Optional[datetime]:
+    """UTC datetime for an ISO date or timestamp, else None.
+
+    `Z` and `+0000` are the same instant, so a fractional suffix is not
+    ordered as text against a cursor that has none.
+    """
+    raw = text.strip()
+    if not _ISO_START.match(raw):
+        return None
+    iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    matched = re.fullmatch(r"(.*[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)([+-]\d{2})(\d{2})", iso)
+    if matched:
+        iso = f"{matched.group(1)}{matched.group(2)}:{matched.group(3)}"
+    if len(iso) > 10 and iso[10] == " ":
+        iso = iso[:10] + "T" + iso[11:]
+    try:
+        parsed = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _cursor_key(value: Any) -> Any:
@@ -27,11 +56,26 @@ def _cursor_key(value: Any) -> Any:
     if isinstance(value, float):
         return value
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
     text = str(value).strip()
     if text.isdigit() or (text.startswith("-") and len(text) > 1 and text[1:].isdigit()):
         return int(text)
-    return text
+    parsed = _time_key(text)
+    return parsed if parsed is not None else text
+
+
+def _store_cursor(raw: Any) -> str:
+    if isinstance(raw, datetime):
+        return raw.isoformat()
+    return str(raw).strip()
+
+
+def _cap_boundary(keys: set[str]) -> set[str]:
+    if len(keys) <= _MAX_BOUNDARY_KEYS:
+        return keys
+    return set(sorted(keys)[:_MAX_BOUNDARY_KEYS])
 
 
 def _cmp(left: Any, right: Any) -> int:
@@ -102,6 +146,7 @@ class CursorTracker:
         self._seen = parse_boundary_keys(boundary_keys)
         self._last_key = _cursor_key(last_cursor) if last_cursor is not None else None
         self._newest: Any = None
+        self._newest_raw: Any = None
         self._boundary_ids: set[str] = set()
 
     def keep(self, records: list[dict]) -> list[dict]:
@@ -124,6 +169,7 @@ class CursorTracker:
             kept.append(record)
             if self._newest is None or _cmp(key, self._newest) > 0:
                 self._newest = key
+                self._newest_raw = raw
                 self._boundary_ids = {ident}
             elif _cmp(key, self._newest) == 0:
                 self._boundary_ids.add(ident)
@@ -133,14 +179,18 @@ class CursorTracker:
         """The cursor to store once every kept row is written (`rows` is left empty)."""
         if self._newest is None:
             return CursorAdvance(
-                rows=[], cursor=self._last_cursor, boundary_keys=dump_boundary_keys(self._seen), changed=False
+                rows=[],
+                cursor=self._last_cursor,
+                boundary_keys=dump_boundary_keys(_cap_boundary(self._seen)),
+                changed=False,
             )
         if self._last_key is not None and _cmp(self._newest, self._last_key) == 0:
             new_cursor = self._last_cursor
             merged = self._seen | self._boundary_ids
         else:
-            new_cursor = str(self._newest)
+            new_cursor = _store_cursor(self._newest_raw)
             merged = self._boundary_ids
+        merged = _cap_boundary(merged)
         encoded = dump_boundary_keys(merged)
         changed = new_cursor != self._last_cursor or encoded != dump_boundary_keys(self._seen)
         return CursorAdvance(rows=[], cursor=new_cursor, boundary_keys=encoded, changed=changed)

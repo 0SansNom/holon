@@ -106,7 +106,7 @@ async def fetch_for_dataset(
         raise SourceFetchError(f"no active SQL source registered as {name!r}")
 
     connection = await pool.fetchrow(
-        "SELECT dialect, host, port, database, warehouse, username, password, secret_ref "
+        "SELECT dialect, host, port, database, warehouse, username, password, secret_ref, use_tls "
         "FROM sql_connection WHERE tenant_id = $1 AND name = $2",
         tenant_id, row["connection_name"],
     )
@@ -170,6 +170,7 @@ async def fetch_for_dataset(
             args=args,
             batch_size=batch_size,
             warehouse=connection["warehouse"],
+            use_tls=bool(connection["use_tls"]),
         )
         while True:
             try:

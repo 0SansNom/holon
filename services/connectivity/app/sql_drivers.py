@@ -312,18 +312,25 @@ async def _stream_mysql(host, port, database, username, password, sql, args, bat
         conn.close()
 
 
+def _odbc_brace(value: object) -> str:
+    """Wrap one connection-string value so `;` and `}` stay inside it."""
+    text = "" if value is None else str(value)
+    return "{" + text.replace("}", "}}") + "}"
+
+
 async def _connect_mssql(host, port, database, username, password, use_tls):
     import aioodbc
 
     # FreeTDS is registered in the Connectivity image (see Dockerfile).
+    # Braces keep `;` and `}` inside a password or host from becoming another setting.
     encryption = "Encryption=require;" if use_tls else ""
     dsn = (
-        f"DRIVER={{FreeTDS}};"
-        f"SERVER={host};"
+        "DRIVER={FreeTDS};"
+        f"SERVER={_odbc_brace(host)};"
         f"PORT={port};"
-        f"DATABASE={database};"
-        f"UID={username};"
-        f"PWD={password or ''};"
+        f"DATABASE={_odbc_brace(database)};"
+        f"UID={_odbc_brace(username)};"
+        f"PWD={_odbc_brace(password or '')};"
         "TDS_Version=7.4;"
         f"{encryption}"
     )
