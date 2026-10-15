@@ -14,6 +14,8 @@ import asyncpg
 
 from holon_common.connector_safety import ConnectorSafetyError, resolve_connector_secret
 
+from .cursor_window import _cmp, dump_boundary_keys, parse_boundary_keys
+
 CommitCursor = Callable[[], Awaitable[None]]
 
 # Whitelisted peer tables and the label used in conflict messages.
@@ -191,14 +193,31 @@ def make_property_cursor_commit(
         cursor_value: str = cursor,
         boundary: str = boundary_keys,
     ) -> None:
-        await pool.execute(
-            f"UPDATE {table} SET last_cursor_value = $1, cursor_boundary_keys = $2 "
-            "WHERE tenant_id = $3 AND name = $4",
-            cursor_value,
-            boundary,
-            tenant_id,
-            name,
-        )
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                current = await conn.fetchrow(
+                    f"SELECT last_cursor_value, cursor_boundary_keys FROM {table} "
+                    "WHERE tenant_id = $1 AND name = $2 FOR UPDATE",
+                    tenant_id,
+                    name,
+                )
+                if current is None:
+                    return
+                stored = current["last_cursor_value"]
+                if stored is not None and _cmp(cursor_value, stored) < 0:
+                    return
+                boundary_out = boundary
+                if stored is not None and _cmp(cursor_value, stored) == 0:
+                    merged = parse_boundary_keys(current["cursor_boundary_keys"]) | parse_boundary_keys(boundary)
+                    boundary_out = dump_boundary_keys(merged)
+                await conn.execute(
+                    f"UPDATE {table} SET last_cursor_value = $1, cursor_boundary_keys = $2 "
+                    "WHERE tenant_id = $3 AND name = $4",
+                    cursor_value,
+                    boundary_out,
+                    tenant_id,
+                    name,
+                )
 
     return _commit
 
@@ -219,12 +238,21 @@ def make_column_cursor_commit(
         raise ValueError(f"unknown cursor column {column!r}")
 
     async def _commit(cursor_value: str = value) -> None:
-        await pool.execute(
-            f"UPDATE {table} SET {column} = $1 WHERE tenant_id = $2 AND name = $3",
-            cursor_value,
-            tenant_id,
-            name,
-        )
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                stored = await conn.fetchval(
+                    f"SELECT {column} FROM {table} WHERE tenant_id = $1 AND name = $2 FOR UPDATE",
+                    tenant_id,
+                    name,
+                )
+                if stored is not None and _cmp(cursor_value, stored) < 0:
+                    return
+                await conn.execute(
+                    f"UPDATE {table} SET {column} = $1 WHERE tenant_id = $2 AND name = $3",
+                    cursor_value,
+                    tenant_id,
+                    name,
+                )
 
     return _commit
 
