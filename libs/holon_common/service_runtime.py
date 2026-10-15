@@ -101,12 +101,12 @@ async def start_principal_status(
     dlq_producer: Any | None = None,
     hydrate: bool = True,
 ) -> PrincipalStatusHandle:
+    if hydrate:
+        await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
     consumer = make_principal_status_consumer(
         kafka_bootstrap, service_name=service_name, dlq_producer=dlq_producer
     )
     status_task = asyncio.create_task(consume_identity_auth_events(consumer, authz=authz))
-    if hydrate:
-        await retry_with_backoff(hydrate_revocation_snapshot, what="identity revocation snapshot")
     revocation_refresh_task = asyncio.create_task(refresh_revocation_snapshot_forever())
     return PrincipalStatusHandle(
         consumer=consumer,

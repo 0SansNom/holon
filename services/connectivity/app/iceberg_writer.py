@@ -11,7 +11,7 @@ from typing import Literal
 
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog
-from pyiceberg.exceptions import CommitStateUnknownException, NamespaceAlreadyExistsError, NoSuchTableError
+from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
 
 from holon_common.iceberg_ident import NAMESPACE, iceberg_legacy_identifier, iceberg_table_identifier
 _OVERWRITE_RETRIES = 4
@@ -43,6 +43,39 @@ def _load_catalog(catalog_uri: str, warehouse: str, s3_endpoint: str, access_key
     )
 
 
+def _table_from_rows(rows: list[dict]) -> pa.Table:
+    """Arrow table Iceberg can store.
+
+    A column that is null on every row is typed as null, which Iceberg
+    rejects. Keep it as an optional string until a real value shows up.
+    """
+    table = pa.Table.from_pylist(rows)
+    arrays = []
+    fields = []
+    for column, field in zip(table.columns, table.schema):
+        if pa.types.is_null(field.type):
+            arrays.append(pa.nulls(len(table), type=pa.string()))
+            fields.append(pa.field(field.name, pa.string(), nullable=True))
+        else:
+            arrays.append(column)
+            fields.append(field)
+    if not fields:
+        raise ValueError("snapshot has no columns")
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
+def _result(table_name: str, table, snapshot, *, row_count: int) -> IcebergWriteResult:
+    snapshot_id = snapshot.snapshot_id if snapshot is not None else 0
+    location = table.location() if table is not None else ""
+    return IcebergWriteResult(
+        namespace=NAMESPACE,
+        table=table_name,
+        snapshot_id=snapshot_id,
+        row_count=row_count,
+        location=location,
+    )
+
+
 def write_snapshot(
     rows: list[dict],
     table_name: str,
@@ -65,22 +98,28 @@ def write_snapshot(
 
     identifier = _ensure_prefixed_identifier(catalog, tenant_id, table_name)
 
-    if not rows and mode == "append":
-        # Empty batch with append mode: return current table snapshot state unchanged
+    if not rows:
         try:
             table = catalog.load_table(identifier)
         except NoSuchTableError:
-            raise ValueError(
-                f"table {table_name!r} doesn't exist yet and this incremental batch is empty — "
-                "nothing to create it from"
-            ) from None
-        snapshot = table.current_snapshot()
-        return IcebergWriteResult(
-            namespace=NAMESPACE, table=table_name, snapshot_id=snapshot.snapshot_id,
-            row_count=_total_records(snapshot, fallback=0), location=table.location(),
-        )
+            if mode == "append":
+                raise ValueError(
+                    f"table {table_name!r} doesn't exist yet and this incremental batch is empty — "
+                    "nothing to create it from"
+                ) from None
+            # Nothing was ever written. Record a successful empty sync.
+            return _result(table_name, None, None, row_count=0)
+        if mode == "append":
+            snapshot = table.current_snapshot()
+            return _result(
+                table_name, table, snapshot, row_count=_total_records(snapshot, fallback=0) if snapshot is not None else 0
+            )
+        empty = pa.Table.from_pylist([], schema=table.schema().as_arrow())
+        table.overwrite(empty)
+        table.refresh()
+        return _result(table_name, table, table.current_snapshot(), row_count=0)
 
-    arrow_table = pa.Table.from_pylist(rows)
+    arrow_table = _table_from_rows(rows)
     table = catalog.create_table_if_not_exists(identifier, schema=arrow_table.schema)
     commit = table.overwrite if mode == "overwrite" else table.append
 
@@ -88,15 +127,9 @@ def write_snapshot(
         try:
             commit(arrow_table)
             break
-        except CommitStateUnknownException:
-            # Append mode: do not retry CommitStateUnknownException to avoid duplicate rows
-            if mode == "append":
-                raise
-            if attempt == _OVERWRITE_RETRIES:
-                raise
-            time.sleep(_OVERWRITE_RETRY_DELAY_SECONDS)
         except Exception:
-            if attempt == _OVERWRITE_RETRIES:
+            # An append that timed out may already have landed. Retrying it writes the rows twice.
+            if mode == "append" or attempt == _OVERWRITE_RETRIES:
                 raise
             time.sleep(_OVERWRITE_RETRY_DELAY_SECONDS)
     table.refresh()
@@ -133,5 +166,7 @@ def _ensure_prefixed_identifier(catalog, tenant_id: str, table_name: str) -> tup
 
 
 def _total_records(snapshot, *, fallback: int) -> int:
-    total = snapshot.summary.get("total-records") if snapshot.summary is not None else None
+    if snapshot is None or snapshot.summary is None:
+        return fallback
+    total = snapshot.summary.get("total-records")
     return int(total) if total is not None else fallback

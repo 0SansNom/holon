@@ -42,15 +42,52 @@ SUPPORTED_JWT_ALGS = frozenset({"HS256", "RS256"})
 # restart does not revive revoked tokens. Identity also re-reads Postgres.
 _disabled_principal_urns: set[str] = set()
 _revoked_jtis: set[str] = set()
+# Events recorded while a snapshot replace is in flight, so the replace cannot drop them.
+_revocation_captures: list[list[tuple[str, str]]] = []
+
+
+def _note_revocation(kind: str, value: str) -> None:
+    if _revocation_captures and value:
+        _revocation_captures[-1].append((kind, value))
+
+
+class capture_revocation_events:
+    """Collect denylist changes until the snapshot replace has finished."""
+
+    def __enter__(self) -> list[tuple[str, str]]:
+        events: list[tuple[str, str]] = []
+        _revocation_captures.append(events)
+        return events
+
+    def __exit__(self, *exc: object) -> None:
+        _revocation_captures.pop()
+
+
+def replay_revocation_events(events: list[tuple[str, str]]) -> None:
+    """Re-apply events captured during a snapshot replace. Idempotent."""
+    held = list(_revocation_captures)
+    _revocation_captures.clear()
+    try:
+        for kind, value in events:
+            if kind == "jti":
+                mark_jti_revoked(value)
+            elif kind == "disabled":
+                mark_principal_disabled(value)
+            elif kind == "enabled":
+                mark_principal_enabled(value)
+    finally:
+        _revocation_captures.extend(held)
 
 
 def mark_principal_disabled(urn: str) -> None:
     if urn:
         _disabled_principal_urns.add(urn)
+        _note_revocation("disabled", urn)
 
 
 def mark_principal_enabled(urn: str) -> None:
     _disabled_principal_urns.discard(urn)
+    _note_revocation("enabled", urn)
 
 
 def is_principal_disabled(urn: str) -> bool:
@@ -60,6 +97,7 @@ def is_principal_disabled(urn: str) -> bool:
 def mark_jti_revoked(jti: str) -> None:
     if jti:
         _revoked_jtis.add(jti)
+        _note_revocation("jti", jti)
 
 
 def is_jti_revoked(jti: str) -> bool:
@@ -80,6 +118,7 @@ def reset_revocation_state() -> None:
     """Test helper — empty both in-memory denylists."""
     _disabled_principal_urns.clear()
     _revoked_jtis.clear()
+    _revocation_captures.clear()
 
 
 def apply_principal_status_payload(payload: Mapping[str, Any]) -> None:
