@@ -12,7 +12,7 @@ from app.cursor_window import CursorTracker
 from app.source_registry_base import (
     SourceConfigError,
     SourceFetchError,
-    make_column_cursor_commit,
+    attach_resume,
     make_property_cursor_commit,
     resolve_source_secret,
 )
@@ -77,6 +77,29 @@ def _bind_cursor_value(value: str) -> Any:
     parsed = _parse_iso_cursor(value)
     return parsed if parsed is not None else value
 
+def _source_sql(row, *, wire: str, dialect: str) -> tuple[str, list[Any]]:
+    """Table scan, or a saved query wrapped so its cursor is actually applied."""
+    if row["table_name"]:
+        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=wire)}"
+    else:
+        try:
+            _require_select_only(row["query"], dialect)
+        except SourceConfigError as exc:
+            raise SourceFetchError(str(exc)) from exc
+        sql = row["query"].strip().rstrip(";").strip()
+    args: list[Any] = []
+    if row["cursor_property"] and row["last_cursor_value"] is not None:
+        col = quote_identifier(row["cursor_property"], dialect=wire)
+        mark = sql_drivers.cursor_placeholder(dialect)
+        predicate = f"{col} >= {mark}"
+        if row["table_name"]:
+            sql += f" WHERE {predicate}"
+        else:
+            sql = f"SELECT * FROM ({sql}) AS holon_q WHERE {predicate}"
+        args.append(_bind_cursor_value(row["last_cursor_value"]))
+    return sql, args
+
+
 def _row_get(row: dict, key: str, *, dialect: str) -> Any:
     """Read a column from a driver row dict.
 
@@ -128,37 +151,18 @@ async def fetch_for_dataset(
         raise SourceFetchError(str(exc)) from exc
     wire = sql_drivers.wire_dialect(dialect)
 
-    if row["table_name"]:
-        sql = f"SELECT * FROM {quote_identifier(row['table_name'], dialect=wire)}"
-        args: list[Any] = []
-        if row["cursor_property"] and row["last_cursor_value"] is not None:
-            # Uniform bind across dialects (no pg_attribute type cast).
-            col = quote_identifier(row["cursor_property"], dialect=wire)
-            sql += f" WHERE {col} >= {sql_drivers.cursor_placeholder(dialect)}"
-            args.append(_bind_cursor_value(row["last_cursor_value"]))
-    else:
-        sql = row["query"]
-        args = []
-        try:
-            _require_select_only(sql, dialect)
-        except SourceConfigError as exc:
-            raise SourceFetchError(str(exc)) from exc
-
-    incremental_table = bool(row["table_name"] and row["cursor_property"])
+    sql, args = _source_sql(row, wire=wire, dialect=dialect)
     tracker = (
         CursorTracker(
             cursor_property=row["cursor_property"],
             last_cursor=row["last_cursor_value"],
             boundary_keys=row["cursor_boundary_keys"],
         )
-        if incremental_table
+        if row["cursor_property"]
         else None
     )
-    query_cursor_key = row["cursor_property"] if not incremental_table else None
-    newest: Any = None
 
     async def batches() -> AsyncIterator[list[dict]]:
-        nonlocal newest
         stream = sql_drivers.stream_dicts(
             dialect=dialect,
             host=pinned_host,
@@ -182,40 +186,29 @@ async def fetch_for_dataset(
                 raise SourceFetchError(f"could not fetch source {name!r}: {exc}") from exc
             if tracker is not None:
                 rows = tracker.keep(rows)
-            elif query_cursor_key:
-                candidates = [
-                    value
-                    for r in rows
-                    if (value := _row_get(r, query_cursor_key, dialect=wire)) is not None
-                ]
-                if candidates:
-                    batch_max = max(candidates)
-                    newest = batch_max if newest is None else max(newest, batch_max)
             if rows:
                 yield rows
 
     async def commit() -> None:
-        if tracker is not None:
-            advanced = tracker.result()
-            if advanced.changed and advanced.cursor is not None:
-                await make_property_cursor_commit(
-                    pool,
-                    table="sql_source",
-                    tenant_id=tenant_id,
-                    name=name,
-                    cursor=advanced.cursor,
-                    boundary_keys=advanced.boundary_keys,
-                )()
-        elif newest is not None:
-            new_cursor = _cursor_to_str(newest)
-            if new_cursor != row["last_cursor_value"]:
-                await make_column_cursor_commit(
-                    pool,
-                    table="sql_source",
-                    tenant_id=tenant_id,
-                    name=name,
-                    column="last_cursor_value",
-                    value=new_cursor,
-                )()
+        if tracker is None:
+            return
+        advanced = tracker.result()
+        if advanced.changed and advanced.cursor is not None:
+            await make_property_cursor_commit(
+                pool,
+                table="sql_source",
+                tenant_id=tenant_id,
+                name=name,
+                cursor=advanced.cursor,
+                boundary_keys=advanced.boundary_keys,
+            )()
 
-    return batches(), commit
+    def resume() -> Optional[tuple[str, str]]:
+        if tracker is None:
+            return None
+        advanced = tracker.result()
+        if not advanced.changed or advanced.cursor is None:
+            return None
+        return advanced.cursor, advanced.boundary_keys
+
+    return batches(), attach_resume(commit, resume)

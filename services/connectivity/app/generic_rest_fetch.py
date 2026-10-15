@@ -13,6 +13,7 @@ from app.pinned_http import pinned_transport
 from app.source_registry_base import (
     SourceConfigError,
     SourceFetchError,
+    attach_resume,
     make_property_cursor_commit,
     resolve_source_secret,
 )
@@ -238,5 +239,13 @@ async def fetch_for_dataset(
                     cursor=advanced.cursor,
                     boundary_keys=advanced.boundary_keys,
                 )()
+
+        def resume() -> Optional[tuple[str, str]]:
+            advanced = tracker.result()
+            if not advanced.changed or advanced.cursor is None:
+                return None
+            return advanced.cursor, advanced.boundary_keys
+
+        commit = attach_resume(commit, resume)
 
     return batches(), commit

@@ -115,6 +115,16 @@ def test_overwrite_replaces_and_append_adds(catalog) -> None:
     assert [row["id"] for row in _rows(catalog)] == [9, 10, 11]
 
 
+def test_committed_snapshot_keeps_the_cursor_the_database_write_might_lose(catalog) -> None:
+    writer = iceberg_writer.SnapshotWriter("orders", tenant_id="acme", mode="append", **_CONFIG)
+    writer.add([{"id": 1}])
+    writer.note_resume("9", '["row-2"]')
+
+    writer.commit()
+
+    assert iceberg_writer.read_snapshot_resume("orders", tenant_id="acme", **_CONFIG) == ("9", '["row-2"]')
+
+
 def test_an_ambiguous_commit_that_landed_is_not_retried(catalog, monkeypatch) -> None:
     writer = iceberg_writer.SnapshotWriter("orders", tenant_id="acme", mode="append", **_CONFIG)
     writer.add([{"id": 1}])
@@ -310,6 +320,8 @@ def test_incremental_table_cursor_spans_batches(monkeypatch) -> None:
 
     assert [row["id"] for row in rows] == [1, 2, 3]
     assert calls[0]["batch_size"] == 2
+    assert 'WHERE "ts" >= $1' in calls[0]["sql"]
+    assert calls[0]["args"] == [4]
     ((sql, args),) = pool.updates
     assert "last_cursor_value" in sql and args[0] == "9"
 
@@ -329,14 +341,36 @@ def test_incremental_table_skips_rows_already_stored_at_the_boundary(monkeypatch
     assert [row["id"] for row in asyncio.run(_drain(resumed))] == [4]
 
 
-def test_query_cursor_keeps_the_max_across_batches(monkeypatch) -> None:
-    _stream(monkeypatch, [[{"ts": 3}, {"ts": 8}], [{"ts": 6}]])
+def test_query_cursor_is_applied_in_sql_and_tracked(monkeypatch) -> None:
+    calls = _stream(monkeypatch, [[{"ts": 3}, {"ts": 8}], [{"ts": 6}]])
     pool = _SourcePool(table_name=None, query="SELECT * FROM orders", cursor_property="ts", last_cursor_value="1")
 
     asyncio.run(_drain(pool))
 
+    assert "holon_q" in calls[0]["sql"]
+    assert 'WHERE "ts" >= $1' in calls[0]["sql"]
+    assert calls[0]["args"] == [1]
     ((sql, args),) = pool.updates
     assert args[0] == "8"
+
+
+def test_query_cursor_drops_rows_already_stored_at_the_boundary(monkeypatch) -> None:
+    stored = {"id": 2, "ts": 9}
+    first = _SourcePool(table_name=None, query="SELECT * FROM orders", cursor_property="ts", last_cursor_value=None)
+    _stream(monkeypatch, [[stored]])
+    asyncio.run(_drain(first))
+    boundary = first.updates[0][1][1]
+
+    _stream(monkeypatch, [[stored], [{"id": 4, "ts": 9}]])
+    resumed = _SourcePool(
+        table_name=None,
+        query="SELECT * FROM orders",
+        cursor_property="ts",
+        last_cursor_value="9",
+        boundary_keys=boundary,
+    )
+
+    assert [row["id"] for row in asyncio.run(_drain(resumed))] == [4]
 
 
 def test_unchanged_cursor_is_not_rewritten(monkeypatch) -> None:

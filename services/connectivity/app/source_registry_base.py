@@ -14,9 +14,15 @@ import asyncpg
 
 from holon_common.connector_safety import ConnectorSafetyError, resolve_connector_secret
 
-from .cursor_window import _cmp, dump_boundary_keys, parse_boundary_keys
+from .cursor_window import _cmp, dump_boundary_keys, parse_boundary_keys, resume_is_newer
 
 CommitCursor = Callable[[], Awaitable[None]]
+
+
+def attach_resume(commit: CommitCursor, provider: Callable[[], Optional[tuple[str, str]]]) -> CommitCursor:
+    """Expose the cursor this commit will store, so it can be stamped before the commit runs."""
+    commit.resume = provider  # type: ignore[attr-defined]
+    return commit
 
 # Whitelisted peer tables and the label used in conflict messages.
 SOURCE_DATASET_TABLES: tuple[tuple[str, str], ...] = (
@@ -204,10 +210,13 @@ def make_property_cursor_commit(
                 if current is None:
                     return
                 stored = current["last_cursor_value"]
-                if stored is not None and _cmp(cursor_value, stored) < 0:
+                same_position = stored is not None and (
+                    stored == cursor_value or _cmp(cursor_value, stored) == 0
+                )
+                if stored is not None and not resume_is_newer(cursor_value, stored) and not same_position:
                     return
                 boundary_out = boundary
-                if stored is not None and _cmp(cursor_value, stored) == 0:
+                if same_position:
                     merged = parse_boundary_keys(current["cursor_boundary_keys"]) | parse_boundary_keys(boundary)
                     boundary_out = dump_boundary_keys(merged)
                 await conn.execute(
@@ -245,7 +254,7 @@ def make_column_cursor_commit(
                     tenant_id,
                     name,
                 )
-                if stored is not None and _cmp(cursor_value, stored) < 0:
+                if stored is not None and stored != cursor_value and not resume_is_newer(cursor_value, stored):
                     return
                 await conn.execute(
                     f"UPDATE {table} SET {column} = $1 WHERE tenant_id = $2 AND name = $3",
