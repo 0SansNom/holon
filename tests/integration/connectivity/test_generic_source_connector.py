@@ -85,6 +85,17 @@ def test_bad_record_path_surfaces_a_clear_400_not_a_500(jdoe_token: str) -> None
     assert status == 400, result
     assert "record_path" in result["detail"], result
 
+    status, failures = _request("GET", f"{CONNECTIVITY}/sync-failures", token=jdoe_token)
+    assert status == 200, failures
+    recorded = [f for f in failures if f["dataset_urn"].endswith(f":dataset:{name}")]
+    assert len(recorded) == 1, failures
+    assert recorded[0]["error_name"] == "DatasetValidationFailed"
+    assert recorded[0]["timed_out"] is False
+
+    status, runs = _request("GET", f"{CONNECTIVITY}/syncs", token=jdoe_token)
+    assert status == 200, runs
+    assert not [run for run in runs if run["dataset_urn"].endswith(f":dataset:{name}")], runs
+
 
 def test_unreachable_url_surfaces_a_clear_400_not_a_500(jdoe_token: str) -> None:
     name = _unique_name("unreachable")
