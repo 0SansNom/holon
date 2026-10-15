@@ -89,15 +89,21 @@ class _FetchPool:
 def test_fetch_passes_the_stored_tls_choice_to_the_driver(monkeypatch) -> None:
     calls: list[dict] = []
 
-    async def fetch_dicts(**kwargs):
+    async def stream_dicts(**kwargs):
         calls.append(kwargs)
-        return []
+        if False:
+            yield []
+
+    async def run() -> None:
+        batches, _commit = await sql_source_fetch.fetch_for_dataset(_FetchPool(), "acme", "orders")
+        async for _batch in batches:
+            pass
 
     monkeypatch.setattr(sql_source_fetch, "pin_connector_host", lambda host: host)
     monkeypatch.setattr(sql_source_fetch, "resolve_source_secret", lambda ref, tenant_id: "s3cret")
     monkeypatch.setattr(sql_source_fetch, "connector_secret", lambda **kwargs: "s3cret")
-    monkeypatch.setattr(sql_drivers, "fetch_dicts", fetch_dicts)
+    monkeypatch.setattr(sql_drivers, "stream_dicts", stream_dicts)
 
-    asyncio.run(sql_source_fetch.fetch_for_dataset(_FetchPool(), "acme", "orders"))
+    asyncio.run(run())
 
     assert calls[0]["use_tls"] is True

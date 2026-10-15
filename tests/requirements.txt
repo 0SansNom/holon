@@ -6,7 +6,7 @@ python-multipart>=0.0.9
 pydantic>=2,<3
 aiokafka>=0.10
 asyncpg>=0.29
-pyiceberg[pyarrow,s3fs]==0.7.1
+pyiceberg[pyarrow,s3fs,sql-sqlite]==0.10.0
 prometheus-client>=0.20
 cryptography>=42
 httpx>=0.27

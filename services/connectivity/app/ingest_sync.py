@@ -6,7 +6,7 @@ import functools
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import AsyncIterator, Literal, Optional
 
 import asyncpg
 import httpx
@@ -17,7 +17,7 @@ from holon_common.connector_safety import ConnectorSafetyError
 from holon_common.correlation import current_correlation_id
 
 from . import deps, iceberg_writer, plugin_registry, source_kinds, source_registry_base
-from .deps import ICEBERG_CONFIG, TENANT_ID, WORKSPACE_ID, SyncResult
+from .deps import ICEBERG_CONFIG, INGEST_BATCH_ROWS, TENANT_ID, WORKSPACE_ID, SyncResult
 
 logger = logging.getLogger("connectivity.scheduler")
 
@@ -120,6 +120,22 @@ async def _finalize_sync(
         location=result.location,
     )
 
+async def _row_batches(source: list[dict] | AsyncIterator[list[dict]], size: int) -> AsyncIterator[list[dict]]:
+    """Regroup a source's rows (a list, or batches of any size) into batches of `size`."""
+    if isinstance(source, list):
+        for start in range(0, len(source), size):
+            yield source[start:start + size]
+        return
+    pending: list[dict] = []
+    async for rows in source:
+        pending.extend(rows)
+        while len(pending) >= size:
+            yield pending[:size]
+            pending = pending[size:]
+    if pending:
+        yield pending
+
+
 async def _record_sync_failure(
     *,
     tenant_id: str,
@@ -208,16 +224,20 @@ async def _run_sync_for_dataset(
     started_at = datetime.now(timezone.utc)
     try:
         commit_cursor = None
+        writer = iceberg_writer.SnapshotWriter(dataset_name, mode=write_mode, tenant_id=tenant_id, **ICEBERG_CONFIG)
         fetch_deadline = asyncio.timeout(fetch_timeout)
         try:
+            # The deadline covers fetching and staging; nothing is visible until the commit below.
             async with fetch_deadline:
-                rows, commit_cursor = await read()
+                source_rows, commit_cursor = await read()
+                async for batch in _row_batches(source_rows, INGEST_BATCH_ROWS):
+                    await asyncio.to_thread(writer.add, batch)
         except TimeoutError as exc:
             if not fetch_deadline.expired():
                 raise
             raise HolonError.unavailable(
                 'SourceFetchTimeout',
-                f"source {dataset_name!r} was not fetched within {fetch_timeout:g}s",
+                f"source {dataset_name!r} did not finish fetching within {fetch_timeout:g}s",
                 dataset_name=dataset_name,
             ) from exc
         except source_registry_base.SourceFetchError as exc:
@@ -228,9 +248,7 @@ async def _run_sync_for_dataset(
             raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
         except httpx.RequestError as exc:
             raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
-        result = await asyncio.to_thread(
-            iceberg_writer.write_snapshot, rows, dataset_name, mode=write_mode, tenant_id=tenant_id, **ICEBERG_CONFIG
-        )
+        result = await asyncio.to_thread(writer.commit)
         if commit_cursor is not None:
             await commit_cursor()
         finished_at = datetime.now(timezone.utc)
