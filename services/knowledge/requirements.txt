@@ -16,4 +16,4 @@ opentelemetry-exporter-otlp-proto-http==1.44.0
 opentelemetry-instrumentation-fastapi==0.65b0
 opentelemetry-instrumentation-httpx==0.65b0
 opentelemetry-instrumentation-asyncpg==0.65b0
-setuptools==83.0.0
+setuptools==84.1.0
