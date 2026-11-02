@@ -11,9 +11,23 @@ from unittest.mock import MagicMock
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KNOWLEDGE_DIR = REPO_ROOT / "services" / "knowledge"
 LIBS = REPO_ROOT / "libs"
+_STUBBED = ("asyncpg", "httpx", "pyiceberg", "pyiceberg.exceptions", "prometheus_client", "holon_common")
 
 
 def _load():
+    saved = {name: sys.modules.get(name) for name in _STUBBED}
+    try:
+        return _import_with_stubs()
+    finally:
+        # Later files in this directory import the real packages at collection.
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+def _import_with_stubs():
     sys.path.insert(0, str(LIBS))
     sys.path.insert(0, str(KNOWLEDGE_DIR))
     app = types.ModuleType("app")
