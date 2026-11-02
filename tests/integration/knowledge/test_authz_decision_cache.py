@@ -3,27 +3,10 @@
 from __future__ import annotations
 
 import re
-import time
 import urllib.error
 import urllib.request
 
-import pytest
-from conftest import IDENTITY, KNOWLEDGE, _request, ontology_url
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
+from conftest import KNOWLEDGE, _request, ontology_url
 
 
 def _read_cache_counters() -> tuple[int, int]:

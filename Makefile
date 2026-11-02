@@ -46,6 +46,54 @@ test-unit:
 	pip3 install -q -r tests/requirements.txt
 	python3 -m pytest -q -m unit tests
 
+# Pure Knowledge rules (validators, wire, glossary/query-log wrappers).
+# These modules have no live stack; the gate is line coverage, not the HTTP suite.
+test-knowledge-unit:
+	pip3 install -q -r tests/requirements.txt
+	python3 -m pytest -q -m unit tests/unit/knowledge \
+		--cov=app.ontology.urns \
+		--cov=app.ontology.type_classes \
+		--cov=app.ontology.render_hints \
+		--cov=app.ontology.lifecycle \
+		--cov=app.ontology.relation_type_validate \
+		--cov=app.ontology.value_type_validate \
+		--cov=app.ontology.publishing_validate \
+		--cov=app.ontology.publishing_validate_formats \
+		--cov=app.ontology.publishing_validate_derived \
+		--cov=app.ontology.publishing_validate_types \
+		--cov=app.struct_values \
+		--cov=app.api.object_wire \
+		--cov=app.api.public_only \
+		--cov=app.actions.wire \
+		--cov=app.actions.notify \
+		--cov=app.actions.hardcoded \
+		--cov=app.actions.metrics \
+		--cov=app.catalog_errors \
+		--cov=app.catalog_state \
+		--cov=app.search_metrics \
+		--cov=app.search_constants \
+		--cov=app.glossary \
+		--cov=app.query_log \
+		--cov-report=term-missing --cov-fail-under=100
+
+# Identity rules with no live stack: claims, SAML/OIDC client, registry,
+# governance, revocation, and the federated-login tail. Routers and SCIM
+# stay on the HTTP suite.
+test-identity-unit:
+	pip3 install -q -r tests/requirements.txt
+	python3 -m pytest -q -m unit tests/unit/identity \
+		--cov=app.federation \
+		--cov=app.saml \
+		--cov=app.oidc \
+		--cov=app.seed \
+		--cov=app.governance \
+		--cov=app.access_ops \
+		--cov=app.federation_login \
+		--cov=app.token_revocation \
+		--cov=app.status_events \
+		--cov=app.deps \
+		--cov-report=term-missing --cov-fail-under=100
+
 test:
 	pip3 install -q -r tests/requirements.txt
 	python3 -m pytest -q -m "not llm and not soak" tests

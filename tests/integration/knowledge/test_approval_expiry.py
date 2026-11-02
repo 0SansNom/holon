@@ -5,28 +5,13 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import IDENTITY, _request, ontology_url, holon_url
+from conftest import _request, ontology_url, holon_url
 
 
 # The background sweep runs every 5s (actions.sweep_expired_approvals_forever's
 # default poll_interval)
 # sweep picks it up.
 EXPIRY_TTL_SECONDS = 2
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
 
 
 def _request_close_account(jdoe_token: str, customer_id: int, *, ttl_seconds: int | None = None) -> int:

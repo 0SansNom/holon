@@ -11,7 +11,7 @@ import urllib.request
 
 import asyncpg
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, _request, ontology_url, holon_url
 
 
 SOURCE_ERP_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holon12345')}@localhost:5432/source_erp"
@@ -20,21 +20,6 @@ SOURCE_ERP_URL = f"postgresql://holon:{os.environ.get('POSTGRES_PASSWORD', 'holo
 # mutate customer email (test_reproducibility.py uses customer 4).
 CUSTOMER_ID = 2
 MUTATED_EMAIL = "p9-bitemporal-test@example.invalid"
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
 
 
 async def _get_email(customer_id: int) -> str:
