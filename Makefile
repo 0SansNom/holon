@@ -48,9 +48,13 @@ test-unit:
 
 # Pure Knowledge rules (validators, wire, glossary/query-log wrappers).
 # These modules have no live stack; the gate is line coverage, not the HTTP suite.
+# Only the contract files: --cov imports the measured modules first, and the
+# other Knowledge unit files then re-import Prometheus collectors.
 test-knowledge-unit:
 	pip3 install -q -r tests/requirements.txt
-	python3 -m pytest -q -m unit tests/unit/knowledge \
+	python3 -m pytest -q -m unit \
+		tests/unit/knowledge/test_publish_rules.py \
+		tests/unit/knowledge/test_wire_contracts.py \
 		--cov=app.ontology.urns \
 		--cov=app.ontology.type_classes \
 		--cov=app.ontology.render_hints \
