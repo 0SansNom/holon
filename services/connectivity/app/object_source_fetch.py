@@ -1,10 +1,9 @@
 """Object-store fetch (S3 / GCS / Azure) for no-code object sources."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import AsyncIterator, Awaitable, Callable, Iterator, Optional
 from urllib.parse import urlsplit
 
 import asyncpg
@@ -14,9 +13,11 @@ import pyarrow.json as pajson
 import pyarrow.parquet as papq
 from pyarrow.lib import ArrowException
 
+from app.file_batches import iter_file_batches, iter_in_thread
 from app.file_cursor import info_mtime_ns, select_files
 from app.source_registry_base import (
     SourceFetchError,
+    attach_resume,
     make_column_cursor_commit,
     resolve_source_secret,
 )
@@ -112,7 +113,7 @@ def _read_table(fs: pafs.FileSystem, path: str, format: str):
         return papq.read_table(stream)
 
 
-def _fetch_sync(
+def _select_object_paths(
     *,
     kind: str,
     endpoint: str,
@@ -126,7 +127,7 @@ def _fetch_sync(
     format: str,
     incremental: bool,
     last_synced_key: Optional[str],
-) -> tuple[list[dict], Optional[str]]:
+) -> tuple[pafs.FileSystem, list[str], Optional[str]]:
     fs = _build_filesystem(
         kind=kind,
         endpoint=endpoint,
@@ -137,8 +138,7 @@ def _fetch_sync(
     )
 
     if object_key:
-        table = _read_table(fs, f"{bucket}/{object_key}", format)
-        return table.to_pylist(), None
+        return fs, [f"{bucket}/{object_key}"], None
 
     selector = pafs.FileSelector(f"{bucket}/{key_prefix}", recursive=True)
     infos = fs.get_file_info(selector)
@@ -156,17 +156,55 @@ def _fetch_sync(
         keys = sorted(key for _, key in entries)
         new_cursor = None
 
-    rows: list[dict] = []
-    for key in keys:
-        table = _read_table(fs, f"{bucket}/{key}", format)
-        rows.extend(table.to_pylist())
+    return fs, [f"{bucket}/{key}" for key in keys], (new_cursor if incremental else None)
 
-    return rows, (new_cursor if incremental else None)
+
+def _fetch_sync(
+    *,
+    kind: str,
+    endpoint: str,
+    access_key_id: str,
+    secret_access_key: str,
+    region: str,
+    path_style: bool,
+    bucket: str,
+    object_key: Optional[str],
+    key_prefix: Optional[str],
+    format: str,
+    incremental: bool,
+    last_synced_key: Optional[str],
+) -> tuple[list[dict], Optional[str]]:
+    fs, paths, cursor = _select_object_paths(
+        kind=kind,
+        endpoint=endpoint,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        region=region,
+        path_style=path_style,
+        bucket=bucket,
+        object_key=object_key,
+        key_prefix=key_prefix,
+        format=format,
+        incremental=incremental,
+        last_synced_key=last_synced_key,
+    )
+    rows: list[dict] = []
+    for path in paths:
+        rows.extend(_read_table(fs, path, format).to_pylist())
+    return rows, cursor
+
+
+def _iter_object_batches(holder: dict, **kwargs) -> Iterator[list[dict]]:
+    fs, paths, cursor = _select_object_paths(**kwargs)
+    holder["cursor"] = cursor
+    for path in paths:
+        with fs.open_input_stream(path) as stream:
+            yield from iter_file_batches(stream, kwargs["format"])
 
 
 async def fetch_for_dataset(
     pool: asyncpg.Pool, tenant_id: str, name: str
-) -> tuple[list[dict], Optional[Callable[[], Awaitable[None]]]]:
+) -> tuple[AsyncIterator[list[dict]], Optional[Callable[[], Awaitable[None]]]]:
     row = await pool.fetchrow(
         "SELECT connection_name, bucket, object_key, key_prefix, format, incremental, last_synced_key "
         "FROM object_source WHERE tenant_id = $1 AND name = $2 AND status = 'active'",
@@ -193,35 +231,49 @@ async def fetch_for_dataset(
         resolved=resolve_source_secret(connection["secret_ref"], tenant_id=tenant_id),
     )
 
-    try:
-        rows, new_cursor = await asyncio.to_thread(
-            _fetch_sync,
-            kind=connection["kind"],
-            endpoint=endpoint,
-            access_key_id=connection["access_key_id"],
-            secret_access_key=secret_access_key,
-            region=connection["region"],
-            path_style=connection["path_style"],
-            bucket=row["bucket"],
-            object_key=row["object_key"],
-            key_prefix=row["key_prefix"],
-            format=row["format"],
-            incremental=row["incremental"],
-            last_synced_key=row["last_synced_key"],
-        )
-    except (OSError, ValueError, ArrowException) as exc:
-        raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
+    kwargs = dict(
+        kind=connection["kind"],
+        endpoint=endpoint,
+        access_key_id=connection["access_key_id"],
+        secret_access_key=secret_access_key,
+        region=connection["region"],
+        path_style=connection["path_style"],
+        bucket=row["bucket"],
+        object_key=row["object_key"],
+        key_prefix=row["key_prefix"],
+        format=row["format"],
+        incremental=row["incremental"],
+        last_synced_key=row["last_synced_key"],
+    )
+    holder: dict = {"cursor": None}
 
-    commit: Optional[Callable[[], Awaitable[None]]] = None
-    if new_cursor is not None and new_cursor != row["last_synced_key"]:
+    def factory() -> Iterator[list[dict]]:
+        try:
+            yield from _iter_object_batches(holder, **kwargs)
+        except (OSError, ValueError, ArrowException) as exc:
+            raise SourceFetchError(f"could not read source {name!r}: {exc}") from exc
 
-        commit = make_column_cursor_commit(
+    async def batches() -> AsyncIterator[list[dict]]:
+        async for batch in iter_in_thread(factory):
+            yield batch
+
+    async def commit() -> None:
+        new_cursor = holder["cursor"]
+        if new_cursor is None or new_cursor == row["last_synced_key"]:
+            return
+        await make_column_cursor_commit(
             pool,
             table="object_source",
             tenant_id=tenant_id,
             name=name,
             column="last_synced_key",
             value=new_cursor,
-        )
+        )()
 
-    return rows, commit
+    def resume() -> Optional[tuple[str, str]]:
+        new_cursor = holder["cursor"]
+        if new_cursor is None or new_cursor == row["last_synced_key"]:
+            return None
+        return new_cursor, ""
+
+    return batches(), attach_resume(commit, resume)
