@@ -110,7 +110,8 @@ export type SqlDialect =
   | "mssql"
   | "azure_synapse"
   | "azure_synapse_serverless"
-  | "snowflake";
+  | "snowflake"
+  | "redshift";
 
 export interface SqlConnection {
   tenant_id: string;
