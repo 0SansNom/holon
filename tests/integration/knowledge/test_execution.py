@@ -67,12 +67,21 @@ def test_first_execution_is_not_cached_and_returns_matching_rows(jdoe_token: str
 
 
 def test_repeated_execution_is_served_from_cache(jdoe_token: str, orders_synced: dict) -> None:
-    first = _execute_pending_filter(jdoe_token)
-    second = _execute_pending_filter(jdoe_token)
-    assert second["cached"] is True, second
-    assert second["planHash"] == first["planHash"], (first, second)
-    assert second["rowCount"] == first["rowCount"], (first, second)
-    assert second["results"] == first["results"], (first, second)
+    # A sync still converging changes the dataset version, hence the plan hash,
+    # so the next call is a fresh plan rather than a cache hit. Wait until two
+    # calls in a row share a plan, then the second one must be cached.
+    deadline = time.monotonic() + 60
+    previous = _execute_pending_filter(jdoe_token)
+    while time.monotonic() < deadline:
+        current = _execute_pending_filter(jdoe_token)
+        if current["planHash"] == previous["planHash"]:
+            assert current["cached"] is True, current
+            assert current["rowCount"] == previous["rowCount"], (previous, current)
+            assert current["results"] == previous["results"], (previous, current)
+            return
+        previous = current
+        time.sleep(1)
+    pytest.fail(f"plan hash kept changing until the deadline: {previous}")
 
 
 def test_a_new_sync_invalidates_the_cache_via_a_new_plan_hash(jdoe_token: str, orders_synced: dict) -> None:
