@@ -1,0 +1,113 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: false
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  suggested_labels: false
+  suggested_reviewers: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_usernames:
+      - "dependabot[bot]"
+
+  path_filters:
+    - "!**/package-lock.json"
+    - "!**/__pycache__/**"
+    - "!**/.ruff_cache/**"
+    - "!services/experience/web/dist/**"
+    - "!services/experience/web/test-results/**"
+    - "!services/experience/app/static/**"
+    - "!docs/**"
+
+  path_instructions:
+    - path: "**/*.py"
+      instructions: >-
+        Report only correctness, security, data-loss and concurrency issues.
+        Skip style and formatting (ruff covers it). No nitpicks on naming
+        or comments.
+
+    - path: "libs/holon_common/{auth,authz,secrets,security_posture,connector_safety,sql_ident,iceberg_ident}.py"
+      instructions: >-
+        Shared security primitives used by every service. Flag any change
+        that weakens a check, widens a default, fails open on error, or
+        alters identifier quoting/escaping. Require tests for behaviour
+        changes.
+
+    - path: "services/knowledge/app/**"
+      instructions: >-
+        Every read and write must go through ReBAC (SpiceDB) then ABAC (OPA)
+        and be tenant-scoped. Confidential fields must be masked
+        (masking.py), not just labelled. Flag any path that returns ontology
+        data or executes an Action without these checks, any search query
+        missing the tenant filter, and any Action that skips its approval
+        requirement.
+
+    - path: "services/intelligence/app/**"
+      instructions: >-
+        Agents must not exceed their principal's rights: tools must call the
+        same governed APIs as a human session. Flag anything that bypasses
+        spend limits (spend_limits.py), weakens plugin subprocess isolation
+        (tool_plugin_sandbox.py, tool_plugin_worker.py), or enables the
+        service without the beta opt-in flags. Flag prompts that put
+        unmasked data into model context.
+
+    - path: "services/automation/app/**"
+      instructions: >-
+        Workflows are sagas. Each step with side effects needs a
+        compensation, and steps and compensations must be idempotent under
+        retry. Flag partial failures that leave state inconsistent.
+
+    - path: "services/connectivity/app/**"
+      instructions: >-
+        Connectors handle untrusted remote input and credentials. Flag SSRF
+        (outbound HTTP must use pinned_http.py), SQL built by string
+        concatenation instead of sql_ident helpers, secrets in logs or
+        errors, and cursor/resume logic that can skip or duplicate rows.
+
+    - path: "services/identity/app/**"
+      instructions: >-
+        Token, OIDC and federation code. Flag missing signature, audience,
+        issuer or expiry checks, timing-unsafe comparisons, and privilege
+        escalation through principal or grant changes.
+
+    - path: "services/*/app/migrations/*.sql"
+      instructions: >-
+        Migrations must be forward-only and safe on populated tables. Flag
+        locking or rewriting operations on large tables, NOT NULL without a
+        default, and edits to migrations that are already merged.
+
+    - path: "deploy/helm/**"
+      instructions: >-
+        Flag production defaults that weaken security: privileged
+        containers, missing resource limits, secrets in values files, or
+        intelligence enabled by default.
+
+    - path: "tests/**"
+      instructions: >-
+        Check that tests assert behaviour, not just absence of exceptions,
+        and that security tests cover the denial path.
+
+  tools:
+    ruff:
+      enabled: false
+    eslint:
+      enabled: false
+    gitleaks:
+      enabled: true
+    hadolint:
+      enabled: true
+    actionlint:
+      enabled: true
+
+chat:
+  auto_reply: true
