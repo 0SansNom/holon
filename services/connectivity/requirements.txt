@@ -11,7 +11,7 @@ pyiceberg[pyarrow,s3fs]==0.10.0
 # CVE-2026-25087 (GHSA-rgxp-2hwp-jwgg): pyarrow < 23.0.1. pyiceberg 0.7.1
 # required pyarrow>=9,<18; 0.10.0 allows >=17 with no upper bound. Azure Blob
 # still uses pyarrow.fs.AzureFileSystem (native since 16.0).
-pyarrow==23.0.1
+pyarrow==26.0.0
 pymongo==4.18.3
 paramiko==5.0.0
 google-auth==2.38.0
