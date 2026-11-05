@@ -19,8 +19,6 @@ reviews:
     drafts: false
     ignore_usernames:
       - "dependabot[bot]"
-    ignore_title_keywords:
-      - "Bump "
 
   path_filters:
     - "!**/package-lock.json"
