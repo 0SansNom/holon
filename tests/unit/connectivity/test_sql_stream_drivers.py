@@ -48,16 +48,25 @@ def test_postgres_reads_a_cursor_inside_a_read_only_transaction() -> None:
     conn.close.assert_awaited_once()
 
 
-def test_cockroachdb_reads_whole_then_batches() -> None:
+def test_cockroachdb_declares_a_cursor_and_fetches() -> None:
+    transaction = MagicMock()
+    transaction.__aenter__ = AsyncMock()
+    transaction.__aexit__ = AsyncMock(return_value=False)
     conn = MagicMock()
-    conn.fetch = AsyncMock(return_value=[{"id": 1}, {"id": 2}, {"id": 3}])
+    conn.transaction.return_value = transaction
+    conn.execute = AsyncMock()
+    conn.fetch = AsyncMock(side_effect=[[{"id": 1}, {"id": 2}], [{"id": 3}], []])
     conn.close = AsyncMock()
 
     with patch.object(sql_drivers.asyncpg, "connect", AsyncMock(return_value=conn)):
         batches = _collect("cockroachdb")
 
     assert batches == [[{"id": 1}, {"id": 2}], [{"id": 3}]]
+    conn.transaction.assert_called_once_with(readonly=True)
+    conn.execute.assert_awaited_once_with("DECLARE holon_sync_cursor NO SCROLL CURSOR FOR SELECT 1")
+    conn.fetch.assert_any_await("FETCH 2 FROM holon_sync_cursor")
     conn.cursor.assert_not_called()
+    conn.close.assert_awaited_once()
 
 
 def test_mysql_uses_an_unbuffered_cursor() -> None:

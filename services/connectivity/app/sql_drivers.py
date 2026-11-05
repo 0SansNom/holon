@@ -193,16 +193,13 @@ async def stream_dicts(
     """Run one read query and yield its rows in batches of at most `batch_size`.
 
     Each driver reads through a server-side cursor, so the result set is never
-    held in memory whole. CockroachDB is the exception: pausing a pgwire portal
-    there is a preview feature, off by default, so its rows are read whole.
+    held in memory whole. CockroachDB has no portal fetch unless a preview
+    feature is on, so it uses DECLARE / FETCH instead.
     """
     d = wire_dialect(dialect)
     if normalize_dialect(dialect) == "cockroachdb":
-        rows = await _fetch_postgres(host, port, database, username, password, sql, args, use_tls=use_tls)
-        for start in range(0, len(rows), batch_size):
-            yield rows[start:start + batch_size]
-        return
-    if d == "postgres":
+        stream = _stream_cockroach(host, port, database, username, password, sql, args, batch_size, use_tls)
+    elif d == "postgres":
         stream = _stream_postgres(host, port, database, username, password, sql, args, batch_size, use_tls)
     elif d == "mysql":
         stream = _stream_mysql(host, port, database, username, password, sql, args, batch_size, use_tls)
@@ -244,6 +241,18 @@ async def _fetch_postgres(
     try:
         records = await conn.fetch(sql, *args)
         return [dict(record) for record in records]
+    finally:
+        await conn.close()
+
+
+async def _stream_cockroach(host, port, database, username, password, sql, args, batch_size, use_tls):
+    conn = await _connect_postgres(host, port, database, username, password, use_tls)
+    size = int(batch_size)
+    try:
+        async with conn.transaction(readonly=True):
+            await conn.execute(f"DECLARE holon_sync_cursor NO SCROLL CURSOR FOR {sql}", *args)
+            while records := await conn.fetch(f"FETCH {size} FROM holon_sync_cursor"):
+                yield [dict(record) for record in records]
     finally:
         await conn.close()
 

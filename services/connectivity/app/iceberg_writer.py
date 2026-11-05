@@ -19,6 +19,8 @@ from holon_common.iceberg_ident import NAMESPACE, iceberg_legacy_identifier, ice
 _OVERWRITE_RETRIES = 4
 _OVERWRITE_RETRY_DELAY_SECONDS = 1.5
 _SYNC_ID_PROPERTY = "holon.sync-id"
+_CURSOR_PROPERTY = "holon.cursor"
+_CURSOR_BOUNDARY_PROPERTY = "holon.cursor-boundary"
 
 
 @dataclass
@@ -189,6 +191,25 @@ class SnapshotWriter:
         self._wrote_first = False
         self.rows_written = 0
 
+    def note_resume(self, cursor: str, boundary: str = "") -> None:
+        """Record the cursor on the snapshot that this commit will publish.
+
+        The database copy is written after the commit. If that write is lost,
+        the next sync reads the cursor back from here instead of appending the
+        same rows again.
+        """
+        if self._txn is None or not cursor:
+            return
+        for update in reversed(getattr(self._txn, "_updates", ())):
+            snapshot = getattr(update, "snapshot", None)
+            summary = getattr(snapshot, "summary", None)
+            if summary is None or not hasattr(summary, "__setitem__"):
+                continue
+            summary[_CURSOR_PROPERTY] = cursor
+            if boundary:
+                summary[_CURSOR_BOUNDARY_PROPERTY] = boundary
+            return
+
     def add(self, rows: list[dict]) -> None:
         if not rows:
             return
@@ -260,6 +281,30 @@ class SnapshotWriter:
             snapshot.summary is not None and snapshot.summary.get(_SYNC_ID_PROPERTY) == self._sync_id
             for snapshot in table.snapshots()
         )
+
+
+def read_snapshot_resume(
+    table_name: str,
+    *,
+    tenant_id: str,
+    catalog_uri: str,
+    warehouse: str,
+    s3_endpoint: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Cursor stamped on the current snapshot, if the table exists."""
+    catalog = _load_catalog(catalog_uri, warehouse, s3_endpoint, access_key, secret_key, region)
+    try:
+        table = catalog.load_table(iceberg_table_identifier(tenant_id, table_name))
+    except NoSuchTableError:
+        return None, None
+    snapshot = table.current_snapshot()
+    if snapshot is None or snapshot.summary is None:
+        return None, None
+    summary = snapshot.summary
+    return summary.get(_CURSOR_PROPERTY), summary.get(_CURSOR_BOUNDARY_PROPERTY)
 
 
 def _without_null_fields(schema: pa.Schema) -> pa.Schema:

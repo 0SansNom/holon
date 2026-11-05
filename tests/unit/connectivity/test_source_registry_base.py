@@ -233,6 +233,24 @@ def test_make_property_cursor_commit() -> None:
     assert name == "orders"
 
 
+def test_file_cursor_with_more_mtime_digits_still_moves_forward() -> None:
+    from app.file_cursor import encode_file_cursor
+
+    older = encode_file_cursor(999, "a")
+    newer = encode_file_cursor(1000, "b")
+    pool, conn = _locking_pool({"last_cursor_value": older})
+    commit = make_column_cursor_commit(
+        pool,
+        table="object_source",
+        tenant_id="t1",
+        name="files",
+        column="last_synced_key",
+        value=newer,
+    )
+    asyncio.run(commit())
+    conn.execute.assert_awaited_once()
+
+
 def test_property_cursor_does_not_move_backwards() -> None:
     pool, conn = _locking_pool({"last_cursor_value": "9", "cursor_boundary_keys": "[]"})
     commit = make_property_cursor_commit(

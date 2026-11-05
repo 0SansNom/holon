@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
+from .file_cursor import decode_file_cursor
+
 # One hot timestamp must not store an unbounded identity list.
 _MAX_BOUNDARY_KEYS = 4096
 _ISO_START = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|[T ])")
@@ -83,6 +85,23 @@ def _cmp(left: Any, right: Any) -> int:
     if type(lk) is not type(rk):
         lk, rk = str(lk), str(rk)
     return (lk > rk) - (lk < rk)
+
+
+def resume_is_newer(candidate: str, stored: Optional[str]) -> bool:
+    """True when `candidate` should replace a cursor already stored.
+
+    File cursors are `(mtime_ns, key)` pairs inside JSON. Comparing those
+    strings in dictionary order treats mtime 1000 as older than 999.
+    """
+    if not stored:
+        return True
+    if candidate == stored:
+        return False
+    newer = decode_file_cursor(candidate)
+    older = decode_file_cursor(stored)
+    if newer is not None and older is not None:
+        return newer > older
+    return _cmp(candidate, stored) > 0
 
 
 def row_identity(row: dict) -> str:

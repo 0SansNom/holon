@@ -17,11 +17,71 @@ from holon_common.connector_safety import ConnectorSafetyError
 from holon_common.correlation import current_correlation_id
 
 from . import deps, iceberg_writer, plugin_registry, source_kinds, source_registry_base
+from .cursor_window import resume_is_newer
 from .deps import ICEBERG_CONFIG, INGEST_BATCH_ROWS, TENANT_ID, WORKSPACE_ID, SyncResult
 
 logger = logging.getLogger("connectivity.scheduler")
 
 _SYNC_ERROR_MAX_CHARS = 2000
+
+# kind name → (table, cursor column, boundary column or None)
+_RESUME_TABLES = {
+    "generic_rest": ("generic_rest_source", "last_cursor_value", "cursor_boundary_keys"),
+    "sql": ("sql_source", "last_cursor_value", "cursor_boundary_keys"),
+    "salesforce": ("salesforce_source", "last_cursor_value", "cursor_boundary_keys"),
+    "object": ("object_source", "last_synced_key", None),
+    "sftp": ("sftp_source", "last_synced_path", None),
+}
+
+
+async def _adopt_committed_resume(pool: asyncpg.Pool, *, tenant_id: str, dataset_name: str, kind_name: str) -> None:
+    """If the last snapshot's cursor never reached the database, store it before reading again."""
+    spec = _RESUME_TABLES.get(kind_name)
+    if spec is None:
+        return
+    table, column, boundary_column = spec
+    cursor, boundary = await asyncio.to_thread(
+        iceberg_writer.read_snapshot_resume, dataset_name, tenant_id=tenant_id, **ICEBERG_CONFIG
+    )
+    if not cursor:
+        return
+    if boundary_column:
+        current = await pool.fetchrow(
+            f"SELECT {column}, {boundary_column} FROM {table} WHERE tenant_id = $1 AND name = $2",
+            tenant_id,
+            dataset_name,
+        )
+        if current is None:
+            return
+        stored = current[column]
+        if stored == cursor and (current[boundary_column] or "") == (boundary or ""):
+            return
+        if stored is not None and stored != cursor and not resume_is_newer(cursor, stored):
+            return
+        await source_registry_base.make_property_cursor_commit(
+            pool,
+            table=table,
+            tenant_id=tenant_id,
+            name=dataset_name,
+            cursor=cursor,
+            boundary_keys=boundary or "[]",
+        )()
+        return
+    stored = await pool.fetchval(
+        f"SELECT {column} FROM {table} WHERE tenant_id = $1 AND name = $2",
+        tenant_id,
+        dataset_name,
+    )
+    if not resume_is_newer(cursor, stored):
+        return
+    await source_registry_base.make_column_cursor_commit(
+        pool,
+        table=table,
+        tenant_id=tenant_id,
+        name=dataset_name,
+        column=column,
+        value=cursor,
+    )()
 
 
 async def _is_quiesced(pool: asyncpg.Pool) -> bool:
@@ -190,6 +250,7 @@ async def _run_sync_for_dataset(
 ) -> SyncResult:
     """Execute sync pipeline: fetch data from source, write Iceberg snapshot, and finalize."""
     write_mode: Literal["overwrite", "append"] = "overwrite"
+    kind_name: Optional[str] = None
     plugin = await plugin_registry.load_active_plugin_for_dataset(deps.pool, dataset_name, tenant_id)
     if plugin is not None:
         local_name = plugin.manifest.connector_local_name or f"plugin-{plugin.manifest.name}"
@@ -217,6 +278,7 @@ async def _run_sync_for_dataset(
                 dataset_name=dataset_name,
             )
         connector_urn = build_urn(tenant_id, "global", "connector", kind.connector_local_name(dataset_name))
+        kind_name = getattr(kind, "name", None)
         read = functools.partial(kind.fetch_for_dataset, deps.pool, tenant_id, dataset_name)
         if kind.uses_append(source):
             write_mode = "append"
@@ -229,6 +291,10 @@ async def _run_sync_for_dataset(
         try:
             # The deadline covers fetching and staging; nothing is visible until the commit below.
             async with fetch_deadline:
+                if kind_name is not None and write_mode == "append":
+                    await _adopt_committed_resume(
+                        deps.pool, tenant_id=tenant_id, dataset_name=dataset_name, kind_name=kind_name
+                    )
                 source_rows, commit_cursor = await read()
                 async for batch in _row_batches(source_rows, INGEST_BATCH_ROWS):
                     await asyncio.to_thread(writer.add, batch)
@@ -248,7 +314,15 @@ async def _run_sync_for_dataset(
             raise HolonError.invalid_argument('SourceHttpError', f"source returned {exc.response.status_code}: {exc.response.text[:300]}") from exc
         except httpx.RequestError as exc:
             raise HolonError.invalid_argument('SourceUnreachable', f"could not reach the source: {exc}") from exc
-        result = await asyncio.to_thread(writer.commit)
+        resume = getattr(commit_cursor, "resume", None)
+        stamped = resume() if callable(resume) else None
+
+        def _commit():
+            if stamped is not None:
+                writer.note_resume(stamped[0], stamped[1])
+            return writer.commit()
+
+        result = await asyncio.to_thread(_commit)
         if commit_cursor is not None:
             await commit_cursor()
         finished_at = datetime.now(timezone.utc)
