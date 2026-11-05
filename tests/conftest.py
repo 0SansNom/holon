@@ -122,7 +122,13 @@ def _request(
     body: dict | None = None,
     timeout: float = 30,
     unwrap_pages: bool = True,
+    raw: bool = False,
 ):
+    """HTTP helper. ``raw`` returns the body bytes (export downloads).
+
+    ``unwrap_pages`` collapses an object page to its ``data`` list. Callers
+    that assert on the page envelope pass ``unwrap_pages=False``.
+    """
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
@@ -130,9 +136,12 @@ def _request(
         req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            status, payload = response.status, json.loads(response.read())
+            status, content = response.status, response.read()
     except urllib.error.HTTPError as exc:
-        status, payload = exc.code, json.loads(exc.read())
+        status, content = exc.code, exc.read()
+    if raw:
+        return status, content
+    payload = json.loads(content)
     if unwrap_pages and _is_pure_object_page(payload):
         return status, payload["data"]
     return status, payload
@@ -223,3 +232,28 @@ def kenji_token() -> str:
 @pytest.fixture(scope="session")
 def alice_token() -> str:
     return _token_for(f"hl:{TENANT_ID}:global:user:alice")
+
+
+def _sync_dataset(token: str, dataset: str) -> dict:
+    """Sync one seeded dataset and require the catalog urn Connectivity returns."""
+    status, result = _request(
+        "POST",
+        f"{CONNECTIVITY}/sync",
+        token=token,
+        body={"dataset": dataset},
+        timeout=60,
+        unwrap_pages=False,
+    )
+    assert status == 200, result
+    assert result["dataset_urn"] == f"hl:{TENANT_ID}:{WORKSPACE_ID}:dataset:{dataset}"
+    return result
+
+
+@pytest.fixture(scope="session")
+def orders_synced(jdoe_token: str) -> dict:
+    return _sync_dataset(jdoe_token, "orders")
+
+
+@pytest.fixture(scope="session")
+def customers_synced(jdoe_token: str) -> dict:
+    return _sync_dataset(jdoe_token, "customers")

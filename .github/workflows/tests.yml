@@ -52,6 +52,12 @@ jobs:
       - name: Unit tests (no stack)
         run: python3 -m pytest -q -m unit tests
 
+      - name: Knowledge contract coverage
+        run: make test-knowledge-unit
+
+      - name: Identity contract coverage
+        run: make test-identity-unit
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30

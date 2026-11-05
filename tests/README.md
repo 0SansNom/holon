@@ -39,6 +39,10 @@ cd services/experience/web && npm run test:e2e
 
 Path `tests/unit/` → auto `unit`; `tests/soak/` → auto `soak`; everything else under `tests/` → auto `integration`.
 
+Knowledge HTTP tests share `orders_synced` and `customers_synced` (session fixtures in the root `conftest`). `make test-knowledge-unit` runs the Knowledge contract tests and fails under 100% line coverage of the pure modules (validators, wire helpers, glossary and query-log wrappers). Routers and stores stay on the stack suite.
+
+`make test-identity-unit` is the same kind of gate for Identity: claims mapping, the SAML and OIDC clients, the registry and bootstrap, governance, access changes, federated login, and token revocation. Routers and SCIM stay on the stack suite. Identity HTTP tests take `kenji_token` from the root `conftest`.
+
 ## Conventions
 
 - Prefer package folders over filename prefixes (`test_second_connector` → `integration/connectivity/…`).

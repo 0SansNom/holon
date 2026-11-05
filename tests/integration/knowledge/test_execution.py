@@ -2,51 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, holon_url
+from conftest import CONNECTIVITY, _request as _http, holon_url
 
 
 def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        # 60s, not 30s: this module's flow chains Iceberg writes, DuckDB
-        # scans and serving-store materialization, which on a
-        # resource-starved dev host can each individually approach 30s.
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
-
-
-@pytest.fixture(scope="session")
-def orders_synced(jdoe_token: str) -> dict:
-    status, result = _request("POST", f"{CONNECTIVITY}/sync", token=jdoe_token, body={"dataset": "orders"})
-    assert status == 200, result
-    return result
+    # 60s, not 30s: Iceberg writes, DuckDB scans and serving-store
+    # materialization can each approach 30s on a small host.
+    return _http(method, url, token=token, body=body, timeout=60, unwrap_pages=False)
 
 
 def _execute_pending_filter(jdoe_token: str) -> dict:
