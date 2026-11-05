@@ -11,7 +11,7 @@ import re
 # No quotes, whitespace, or punctuation that could break out of a quoted identifier.
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 
-_VALID_QUOTE_DIALECTS = frozenset({"postgres", "mysql", "mssql", "snowflake"})
+_VALID_QUOTE_DIALECTS = frozenset({"postgres", "mysql", "mssql", "snowflake", "redshift"})
 
 
 def require_identifier(name: str, *, what: str = "identifier") -> str:
@@ -32,6 +32,8 @@ def quote_identifier(name: str, *, dialect: str = "postgres") -> str:
     `singlestore` must be mapped before calling.
     Snowflake leaves identifiers unquoted so the server folds them to
     UPPERCASE (quoted names would be case-sensitive and miss default objects).
+    Redshift quotes like Postgres: unquoted names fold to lowercase, and a
+    quoted name keeps the case the caller typed.
     """
     require_identifier(name)
     d = (dialect or "postgres").lower()

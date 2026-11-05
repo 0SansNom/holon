@@ -179,6 +179,11 @@ describe("connection dialogs", () => {
 
     await user.selectOptions(screen.getByLabelText("Dialect"), "snowflake");
     expect(screen.queryByLabelText("Require TLS")).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Dialect"), "redshift");
+    expect(screen.getByLabelText("Port")).toHaveValue(5439);
+    expect(screen.getByLabelText("Require TLS")).toBeChecked();
+    expect(screen.getByText(/IAM secret JSON/)).toBeInTheDocument();
   });
 
   it("sends the TLS choice with the connection", async () => {

@@ -1,15 +1,17 @@
 """Async SQL drivers for the no-code SQL source connector.
 
 Wire protocols: postgres → asyncpg, mysql → aiomysql, mssql → aioodbc
-(FreeTDS), snowflake → snowflake-connector-python (sync, worker thread).
+(FreeTDS), snowflake → snowflake-connector-python, redshift →
+redshift_connector. The last two are synchronous and run in a worker thread.
 
 Compatible products (AlloyDB, CockroachDB, …) are named dialects that map
-onto those four wire drivers — same guard, quoting, and bind style.
+onto the wire drivers — same guard, quoting, and bind style.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import ssl
 from typing import Any, AsyncIterator, Optional
@@ -30,6 +32,7 @@ DIALECT_WIRE: dict[str, str] = {
     "azure_synapse": "mssql",
     "azure_synapse_serverless": "mssql",
     "snowflake": "snowflake",
+    "redshift": "redshift",
 }
 VALID_DIALECTS = frozenset(DIALECT_WIRE)
 WIRE_DIALECTS = frozenset(DIALECT_WIRE.values())
@@ -47,6 +50,7 @@ DEFAULT_PORTS: dict[str, int] = {
     "azure_synapse": 1433,
     "azure_synapse_serverless": 1433,
     "snowflake": 443,
+    "redshift": 5439,
 }
 
 # Products that refuse cleartext. Omitted `use_tls` on register uses this set.
@@ -56,6 +60,7 @@ TLS_BY_DEFAULT = frozenset({
     "cockroachdb",
     "azure_synapse",
     "azure_synapse_serverless",
+    "redshift",
 })
 
 _SNOWFLAKE_HOST_SUFFIX = ".snowflakecomputing.com"
@@ -130,7 +135,7 @@ def snowflake_account_from_host(host: str) -> str:
 def cursor_placeholder(dialect: str, index: int = 1) -> str:
     """Bound-parameter marker for a single incremental-cursor compare."""
     d = wire_dialect(dialect)
-    if d in {"mysql", "snowflake"}:
+    if d in {"mysql", "snowflake", "redshift"}:
         return "%s"
     if d == "mssql":
         return "?"
@@ -163,6 +168,18 @@ async def fetch_dicts(
     if d == "mssql":
         return await _fetch_mssql(
             host, port, database, username, password, sql, args, use_tls=use_tls
+        )
+    if d == "redshift":
+        return await asyncio.to_thread(
+            _fetch_redshift_sync,
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            sql=sql,
+            args=args,
+            use_tls=use_tls,
         )
     return await asyncio.to_thread(
         _fetch_snowflake_sync,
@@ -205,6 +222,11 @@ async def stream_dicts(
         stream = _stream_mysql(host, port, database, username, password, sql, args, batch_size, use_tls)
     elif d == "mssql":
         stream = _stream_mssql(host, port, database, username, password, sql, args, batch_size, use_tls)
+    elif d == "redshift":
+        stream = _stream_redshift(
+            host=host, port=port, database=database, username=username, password=password,
+            sql=sql, args=args, batch_size=batch_size, use_tls=use_tls,
+        )
     else:
         stream = _stream_snowflake(
             host=host, database=database, username=username, password=password,
@@ -381,6 +403,110 @@ async def _stream_mssql(host, port, database, username, password, sql, args, bat
                 yield [dict(zip(columns, row)) for row in rows]
     finally:
         await conn.close()
+
+
+def redshift_iam_secret(secret: Optional[str]) -> Optional[dict[str, str]]:
+    """IAM credentials when the stored secret is a JSON object, else a password.
+
+    Both ``access_key_id`` and ``secret_access_key`` are required. Optional
+    ``session_token``, ``region``, and ``cluster_identifier`` are forwarded
+    when present. Any other secret, including invalid JSON, stays a password.
+    """
+    raw = (secret or "").strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    access = parsed.get("access_key_id")
+    key = parsed.get("secret_access_key")
+    if not isinstance(access, str) or not access.strip():
+        return None
+    if not isinstance(key, str) or not key.strip():
+        return None
+    creds = {"access_key_id": access.strip(), "secret_access_key": key.strip()}
+    for name in ("session_token", "region", "cluster_identifier"):
+        value = parsed.get(name)
+        if isinstance(value, str) and value.strip():
+            creds[name] = value.strip()
+    return creds
+
+
+def _connect_redshift(*, host, port, database, username, password, use_tls):
+    import redshift_connector
+
+    iam = redshift_iam_secret(password)
+    if iam is not None:
+        kwargs: dict[str, Any] = {
+            "iam": True,
+            "host": host,
+            "port": port,
+            "database": database,
+            "db_user": username,
+            "user": "",
+            "password": "",
+            "ssl": bool(use_tls),
+            "access_key_id": iam["access_key_id"],
+            "secret_access_key": iam["secret_access_key"],
+        }
+        for name in ("session_token", "region", "cluster_identifier"):
+            if name in iam:
+                kwargs[name] = iam[name]
+        return redshift_connector.connect(**kwargs)
+    return redshift_connector.connect(
+        host=host,
+        port=port,
+        database=database,
+        user=username,
+        password=password or "",
+        ssl=bool(use_tls),
+    )
+
+
+def _redshift_rows(cursor) -> list[dict]:
+    if cursor.description is None:
+        return []
+    columns = [col[0] for col in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _fetch_redshift_sync(*, host, port, database, username, password, sql, args, use_tls) -> list[dict]:
+    conn = _connect_redshift(
+        host=host, port=port, database=database, username=username, password=password, use_tls=use_tls,
+    )
+    try:
+        cur = conn.cursor()
+        try:
+            # None skips pyformat interpolation, so a literal % in a custom query survives.
+            cur.execute(sql, args or None)
+            return _redshift_rows(cur)
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+async def _stream_redshift(*, host, port, database, username, password, sql, args, batch_size, use_tls):
+    conn = await asyncio.to_thread(
+        _connect_redshift,
+        host=host, port=port, database=database, username=username, password=password, use_tls=use_tls,
+    )
+    try:
+        cur = conn.cursor()
+        try:
+            await asyncio.to_thread(cur.execute, sql, args or None)
+            if cur.description is None:
+                return
+            columns = [col[0] for col in cur.description]
+            while rows := await asyncio.to_thread(cur.fetchmany, batch_size):
+                yield [dict(zip(columns, row)) for row in rows]
+        finally:
+            await asyncio.to_thread(cur.close)
+    finally:
+        await asyncio.to_thread(conn.close)
 
 
 def _connect_snowflake(*, host, database, username, password, warehouse):

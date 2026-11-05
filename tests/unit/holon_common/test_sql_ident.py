@@ -62,6 +62,7 @@ def test_quote_identifier_dialects() -> None:
         ("mysql", "`orders`", "`public`.`orders`", "`analytics`.`public`.`orders`"),
         ("mssql", "[orders]", "[public].[orders]", "[analytics].[public].[orders]"),
         ("snowflake", "orders", "public.orders", "analytics.public.orders"),
+        ("redshift", '"orders"', '"public"."orders"', '"analytics"."public"."orders"'),
     ],
 )
 def test_quote_identifier_one_two_three_parts(dialect: str, one: str, two: str, three: str) -> None:
