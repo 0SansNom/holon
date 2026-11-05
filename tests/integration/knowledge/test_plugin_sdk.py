@@ -6,26 +6,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import pytest
-from conftest import CONNECTIVITY, IDENTITY, _request
+from conftest import CONNECTIVITY, _request
 
 
 PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
 
 
 def _write_conflict_plugin(module_name: str, class_name: str, dataset_name: str) -> Path:

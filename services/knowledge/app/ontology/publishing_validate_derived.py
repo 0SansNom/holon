@@ -61,15 +61,12 @@ async def _validate_derived_properties(
                     f"derived property {property_name!r} names {value!r}, "
                     f"which is not a registered, active Function plugin"
                 )
-            continue
-
-        if not isinstance(value, dict) or value.get("kind") not in ("link_aggregate", "struct_reducer"):
+        elif not isinstance(value, dict) or value.get("kind") not in ("link_aggregate", "struct_reducer"):
             raise ValueError(
                 f"derived property {property_name!r} must be either a Function plugin name (string), "
                 f"a {{'kind': 'link_aggregate', ...}} object, or a {{'kind': 'struct_reducer', ...}} object"
             )
-
-        if value["kind"] == "struct_reducer":
+        elif value["kind"] == "struct_reducer":
             array_property = value.get("property")
             array_rule = property_types.get(array_property) if array_property else None
             if array_rule is None or array_rule.get("kind") != "array":
@@ -97,56 +94,55 @@ async def _validate_derived_properties(
                         f"derived property {property_name!r}: reducer {reducer!r} on a scalar array must not set "
                         f"'by' — there's nothing to key by, the values are compared directly"
                     )
-            continue
-
-        aggregate = value.get("aggregate")
-        if aggregate not in _ALLOWED_AGGREGATES:
-            raise ValueError(
-                f"derived property {property_name!r}: unknown aggregate {aggregate!r} "
-                f"(expected one of {sorted(_ALLOWED_AGGREGATES)})"
-            )
-        if "collect_limit" in value:
-            limit = value["collect_limit"]
-            if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        else:
+            aggregate = value.get("aggregate")
+            if aggregate not in _ALLOWED_AGGREGATES:
                 raise ValueError(
-                    f"derived property {property_name!r}: collect_limit must be a positive integer"
+                    f"derived property {property_name!r}: unknown aggregate {aggregate!r} "
+                    f"(expected one of {sorted(_ALLOWED_AGGREGATES)})"
                 )
-        path = _link_aggregate_path(value)
-        if (
-            not path
-            or len(path) > _MAX_LINK_AGGREGATE_HOPS
-            or not all(isinstance(hop, str) and hop for hop in path)
-        ):
-            raise ValueError(
-                f"derived property {property_name!r}: link_aggregate requires 'path' "
-                f"(1–{_MAX_LINK_AGGREGATE_HOPS} link names)"
-            )
-        if relation_types is None:
-            relation_types = await list_relation_types(pool, tenant_id)
-        current_type = object_type_name
-        related_urn: Optional[str] = None
-        for hop in path:
-            relation = _find_relation_by_link_name(relation_types, current_type, hop)
-            if relation is None:
+            if "collect_limit" in value:
+                limit = value["collect_limit"]
+                if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+                    raise ValueError(
+                        f"derived property {property_name!r}: collect_limit must be a positive integer"
+                    )
+            path = _link_aggregate_path(value)
+            if (
+                not path
+                or len(path) > _MAX_LINK_AGGREGATE_HOPS
+                or not all(isinstance(hop, str) and hop for hop in path)
+            ):
                 raise ValueError(
-                    f"derived property {property_name!r} names unknown relation {hop!r} "
-                    f"from ObjectType {current_type!r}"
+                    f"derived property {property_name!r}: link_aggregate requires 'path' "
+                    f"(1–{_MAX_LINK_AGGREGATE_HOPS} link names)"
                 )
-            source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
-            if source_name == current_type:
-                related_urn = relation["target_object_type_urn"]
-            else:
-                related_urn = relation["source_object_type_urn"]
-            current_type = related_urn.rsplit(":", 1)[-1]
-        if aggregate != "count":
-            related_property = value.get("property")
-            if not related_property:
-                raise ValueError(f"derived property {property_name!r}: aggregate {aggregate!r} requires a 'property'")
-            assert related_urn is not None
-            related_definition = await get_object_type(pool, related_urn)
-            if related_definition is None or related_property not in related_definition["property_mapping"]:
-                raise ValueError(
-                    f"derived property {property_name!r}: {related_property!r} is not a mapped property "
-                    f"on the related ObjectType"
-                )
+            if relation_types is None:
+                relation_types = await list_relation_types(pool, tenant_id)
+            current_type = object_type_name
+            related_urn: Optional[str] = None
+            for hop in path:
+                relation = _find_relation_by_link_name(relation_types, current_type, hop)
+                if relation is None:
+                    raise ValueError(
+                        f"derived property {property_name!r} names unknown relation {hop!r} "
+                        f"from ObjectType {current_type!r}"
+                    )
+                source_name = relation["source_object_type_urn"].rsplit(":", 1)[-1]
+                if source_name == current_type:
+                    related_urn = relation["target_object_type_urn"]
+                else:
+                    related_urn = relation["source_object_type_urn"]
+                current_type = related_urn.rsplit(":", 1)[-1]
+            if aggregate != "count":
+                related_property = value.get("property")
+                if not related_property:
+                    raise ValueError(f"derived property {property_name!r}: aggregate {aggregate!r} requires a 'property'")
+                assert related_urn is not None
+                related_definition = await get_object_type(pool, related_urn)
+                if related_definition is None or related_property not in related_definition["property_mapping"]:
+                    raise ValueError(
+                        f"derived property {property_name!r}: {related_property!r} is not a mapped property "
+                        f"on the related ObjectType"
+                    )
 

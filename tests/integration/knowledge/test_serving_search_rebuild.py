@@ -12,7 +12,7 @@ import urllib.request
 import asyncio
 import asyncpg
 import pytest
-from conftest import CONNECTIVITY, IDENTITY, OPENSEARCH, TENANT_ID, _request, ontology_url, holon_url
+from conftest import CONNECTIVITY, OPENSEARCH, TENANT_ID, _request, ontology_url, holon_url
 
 # Both read from the environment, not hardcoded
 # .env with different values than a dev's local one (see
@@ -34,21 +34,6 @@ def _opensearch_request(method: str, path: str, *, body: dict) -> dict:
     req.add_header("Authorization", f"Basic {credentials}")
     with urllib.request.urlopen(req, timeout=30) as response:
         return json.loads(response.read())
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
 
 
 async def _delete_customer_serving_store_rows() -> None:

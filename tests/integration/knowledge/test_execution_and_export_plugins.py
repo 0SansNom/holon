@@ -2,47 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-import pytest
-from conftest import IDENTITY, ontology_url, holon_url
+from conftest import _request as _http, holon_url, ontology_url
 
 
 PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "plugins" / "holon_test_plugins"
 
 
 def _request(method: str, url: str, *, token: str | None = None, body: dict | None = None, raw: bool = False):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            content = response.read()
-            return response.status, (content if raw else json.loads(content))
-    except urllib.error.HTTPError as exc:
-        content = exc.read()
-        return exc.code, (content if raw else json.loads(content))
-
-
-def _token_for(principal_urn: str) -> str:
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        local_name = principal_urn.rsplit(":", 1)[-1]
-        status, body = _request(
-            "POST",
-            f"{IDENTITY}/token",
-            body={"principal_urn": principal_urn, "client_secret": f"{local_name}-dev-secret"},
-        )
-        if status == 200:
-            return body["access_token"]
-        time.sleep(1.5)
-    pytest.fail(f"could not mint a token for {principal_urn}")
+    return _http(
+        method, url, token=token, body=body, timeout=15, unwrap_pages=False, raw=raw,
+    )
 
 
 def _write_adapter_conflict_plugin(module_name: str, class_name: str, adapter_object_type: str) -> Path:

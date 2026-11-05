@@ -1,5 +1,6 @@
 # CI uses Python 3.11; keep a floor that still installs on 3.9 host toolchains.
 pytest>=8.3,<10
+pytest-cov>=5,<8
 pyjwt==2.15.0
 fastapi>=0.110
 python-multipart>=0.0.9

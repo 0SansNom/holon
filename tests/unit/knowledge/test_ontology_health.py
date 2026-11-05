@@ -18,7 +18,8 @@ sys.modules.setdefault("app.core", types.ModuleType("app.core"))
 sys.modules.setdefault("app.ontology", types.ModuleType("app.ontology"))
 # Stub holon_common only when absent — never mutate a real loaded package
 # (``Principal = object`` on the live module poisoned other suites at collection).
-if "holon_common" not in sys.modules:
+_stubbed_holon_common = "holon_common" not in sys.modules
+if _stubbed_holon_common:
     _hc = types.ModuleType("holon_common")
     _hc.Principal = object
     sys.modules["holon_common"] = _hc
@@ -26,11 +27,16 @@ if "holon_common" not in sys.modules:
 # Prefer the knowledge app on sys.path so `import app.ontology_health` works.
 sys.path.insert(0, str(KNOWLEDGE_APP.parent))
 
-from app.ontology_health import (  # noqa: E402
-    _ACTION_SPRAWL_THRESHOLD,
-    _check_action_sprawl,
-    _check_metadata_gaps,
-)
+try:
+    from app.ontology_health import (  # noqa: E402
+        _ACTION_SPRAWL_THRESHOLD,
+        _check_action_sprawl,
+        _check_metadata_gaps,
+    )
+finally:
+    # Later files in this directory import the real holon_common at collection.
+    if _stubbed_holon_common:
+        sys.modules.pop("holon_common", None)
 
 
 def _run(coro):
