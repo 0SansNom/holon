@@ -126,3 +126,70 @@ def test_snowflake_fetches_many_off_the_event_loop() -> None:
     cursor.fetchmany.assert_called_with(2)
     cursor.close.assert_called_once()
     conn.close.assert_called_once()
+
+
+def test_redshift_iam_secret_leaves_ordinary_passwords_alone() -> None:
+    assert sql_drivers.redshift_iam_secret("p@ss") is None
+    assert sql_drivers.redshift_iam_secret("{not json") is None
+    assert sql_drivers.redshift_iam_secret('{"access_key_id": "AKIA"}') is None
+
+
+def test_redshift_streams_batches_and_binds_the_cursor() -> None:
+    cursor = MagicMock()
+    cursor.description = [("updated_at",), ("id",)]
+    cursor.fetchmany.side_effect = [[("2024-01-02", 1), ("2024-01-03", 2)], []]
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    fake = MagicMock()
+    fake.connect.return_value = conn
+
+    with patch.dict(sys.modules, {"redshift_connector": fake}):
+        batches = _collect(
+            "redshift",
+            sql='SELECT * FROM "public"."orders" WHERE "updated_at" >= %s',
+            args=["2024-01-01"],
+            use_tls=True,
+        )
+
+    assert batches == [[{"updated_at": "2024-01-02", "id": 1}, {"updated_at": "2024-01-03", "id": 2}]]
+    fake.connect.assert_called_once_with(
+        host="db.example.com",
+        port=1,
+        database="d",
+        user="u",
+        password="p",
+        ssl=True,
+    )
+    cursor.execute.assert_called_once_with(
+        'SELECT * FROM "public"."orders" WHERE "updated_at" >= %s',
+        ["2024-01-01"],
+    )
+
+
+def test_redshift_iam_secret_does_not_send_the_json_as_a_password() -> None:
+    cursor = MagicMock()
+    cursor.description = [("id",)]
+    cursor.fetchmany.side_effect = [[(1,)], []]
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    fake = MagicMock()
+    fake.connect.return_value = conn
+    secret = (
+        '{"access_key_id":"AKIA","secret_access_key":"secret","session_token":"tok",'
+        '"region":"eu-west-1","cluster_identifier":"analytics"}'
+    )
+
+    with patch.dict(sys.modules, {"redshift_connector": fake}):
+        batches = _collect("redshift", password=secret, use_tls=True)
+
+    assert batches == [[{"id": 1}]]
+    kwargs = fake.connect.call_args.kwargs
+    assert kwargs["iam"] is True
+    assert kwargs["password"] == ""
+    assert kwargs["db_user"] == "u"
+    assert kwargs["access_key_id"] == "AKIA"
+    assert kwargs["secret_access_key"] == "secret"
+    assert kwargs["session_token"] == "tok"
+    assert kwargs["region"] == "eu-west-1"
+    assert kwargs["cluster_identifier"] == "analytics"
+    assert kwargs["ssl"] is True

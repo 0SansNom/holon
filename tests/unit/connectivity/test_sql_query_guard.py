@@ -79,6 +79,7 @@ def test_default_ports_per_dialect() -> None:
     assert sql_drivers.default_port_for("mysql") == 3306
     assert sql_drivers.default_port_for("mssql") == 1433
     assert sql_drivers.default_port_for("snowflake") == 443
+    assert sql_drivers.default_port_for("redshift") == 5439
     assert sql_drivers.default_port_for("alloydb") == 5432
     assert sql_drivers.default_port_for("cockroachdb") == 26257
     assert sql_drivers.default_port_for("enterprisedb") == 5444
@@ -96,6 +97,8 @@ def test_default_tls_per_dialect() -> None:
     assert sql_drivers.default_tls_for("azure_synapse") is True
     assert sql_drivers.default_tls_for("azure_synapse_serverless") is True
     assert sql_drivers.default_tls_for("postgres") is False
+    assert sql_drivers.default_tls_for("redshift") is True
+    assert sql_drivers.resolve_use_tls("redshift", None) is True
     assert sql_drivers.default_tls_for("singlestore") is False
     assert sql_drivers.default_tls_for("mariadb") is False
     assert sql_drivers.resolve_use_tls("alloydb", None) is True
@@ -158,3 +161,4 @@ def test_cursor_placeholders() -> None:
     assert sql_drivers.cursor_placeholder("mysql") == "%s"
     assert sql_drivers.cursor_placeholder("mssql") == "?"
     assert sql_drivers.cursor_placeholder("snowflake") == "%s"
+    assert sql_drivers.cursor_placeholder("redshift") == "%s"

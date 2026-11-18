@@ -1,4 +1,4 @@
-"""No-code SQL source registry for Postgres, MySQL/MariaDB, SQL Server, and Snowflake."""
+"""No-code SQL source registry for Postgres, MySQL/MariaDB, SQL Server, Snowflake, and Redshift."""
 
 from __future__ import annotations
 

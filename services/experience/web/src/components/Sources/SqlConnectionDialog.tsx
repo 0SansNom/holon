@@ -18,6 +18,7 @@ const DEFAULT_PORTS: Record<SqlDialect, number> = {
   azure_synapse: 1433,
   azure_synapse_serverless: 1433,
   snowflake: 443,
+  redshift: 5439,
 };
 
 export const DIALECT_LABELS: Record<SqlDialect, string> = {
@@ -33,6 +34,7 @@ export const DIALECT_LABELS: Record<SqlDialect, string> = {
   azure_synapse: "Azure Synapse (dedicated)",
   azure_synapse_serverless: "Azure Synapse (serverless)",
   snowflake: "Snowflake",
+  redshift: "Amazon Redshift",
 };
 
 const TLS_BY_DEFAULT = new Set<SqlDialect>([
@@ -40,6 +42,7 @@ const TLS_BY_DEFAULT = new Set<SqlDialect>([
   "cockroachdb",
   "azure_synapse",
   "azure_synapse_serverless",
+  "redshift",
 ]);
 
 const DIALECT_HELP: Partial<Record<SqlDialect, string>> = {
@@ -47,6 +50,8 @@ const DIALECT_HELP: Partial<Record<SqlDialect, string>> = {
   azure_synapse: "Dedicated pools reject OPENROWSET. Host looks like workspace.sql.azuresynapse.net.",
   azure_synapse_serverless:
     "Serverless allows OPENROWSET for files. Host looks like workspace-ondemand.sql.azuresynapse.net.",
+  redshift:
+    "Port 5439, TLS on. Password, or an IAM secret JSON with access_key_id and secret_access_key. Username is the database user.",
 };
 
 function isDefaultPort(port: string, dialect: SqlDialect): boolean {
@@ -213,7 +218,7 @@ export function SqlConnectionDialog({ editing, onClose }: { editing: SqlConnecti
         <p className="hl-dialog-desc">
           {isEditing
             ? "Update host, database, or credentials — the name stays fixed since SQL sources already reference it."
-            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/MariaDB/SingleStore, SQL Server/Synapse, or Snowflake. Register once, point several SQL sources at it."}
+            : "PostgreSQL-compatible (AlloyDB, CockroachDB, …), MySQL/MariaDB/SingleStore, SQL Server/Synapse, Snowflake, or Redshift. Register once, point several SQL sources at it."}
         </p>
         <ConnectionFields fields={fields} />
         {error && (

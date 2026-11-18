@@ -65,3 +65,18 @@ def test_snowflake_custom_query_without_args_is_not_formatted() -> None:
         _fetch("snowflake")
 
     cursor.execute.assert_called_once_with(LIKE_QUERY, None)
+
+
+def test_redshift_custom_query_without_args_is_not_formatted() -> None:
+    cursor = MagicMock()
+    cursor.description = None
+    cursor.fetchall.return_value = []
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    fake = MagicMock()
+    fake.connect.return_value = conn
+
+    with patch.dict(sys.modules, {"redshift_connector": fake}):
+        _fetch("redshift")
+
+    cursor.execute.assert_called_once_with(LIKE_QUERY, None)
