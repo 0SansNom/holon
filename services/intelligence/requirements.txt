@@ -15,7 +15,7 @@ opentelemetry-instrumentation-asyncpg==0.66b2
 setuptools==84.2.1
 anthropic==0.120.2
 voyageai==0.5.0
-sentence-transformers==5.6.0
+sentence-transformers==6.3.0
 qdrant-client==1.20.0
 scikit-learn==1.9.1
 boto3==1.43.126
