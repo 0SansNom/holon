@@ -13,7 +13,7 @@ opentelemetry-instrumentation-fastapi==0.66b2
 opentelemetry-instrumentation-httpx==0.66b2
 opentelemetry-instrumentation-asyncpg==0.66b2
 setuptools==84.2.1
-anthropic==0.120.2
+anthropic==2.8.0
 voyageai==0.5.0
 sentence-transformers==5.6.0
 qdrant-client==1.20.0
