@@ -8,7 +8,7 @@ aiokafka==0.15.0
 pyiceberg[pyarrow,s3fs]==0.12.0
 # Same pin as connectivity — CVE-2026-25087, pyarrow < 23.0.1.
 pyarrow==26.0.1
-duckdb==1.1.1
+duckdb==2.0.0
 httpx==0.28.1
 prometheus-client==0.26.0
 opentelemetry-sdk==1.45.2
