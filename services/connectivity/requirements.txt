@@ -1,4 +1,4 @@
-fastapi==0.162.2
+fastapi==0.163.1
 uvicorn[standard]==0.54.0
 asyncpg==0.32.0
 aiomysql==0.3.2
@@ -12,9 +12,9 @@ pyiceberg[pyarrow,s3fs]==0.12.0
 # required pyarrow>=9,<18; 0.10.0 allows >=17 with no upper bound. Azure Blob
 # still uses pyarrow.fs.AzureFileSystem (native since 16.0).
 pyarrow==26.0.1
-pymongo==4.19.0
+pymongo==4.20.0
 paramiko==5.1.0
-google-auth==2.62.1
+google-auth==2.62.2
 # 4.x drops the cffi<2 pin that conflicted with cryptography>=50.
 snowflake-connector-python==5.2.0
 # Owns the botocore window (pulled via pyiceberg[s3fs]); Snowflake's unpinned
