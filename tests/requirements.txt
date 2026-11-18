@@ -3,7 +3,7 @@ pytest>=8.3,<10
 pytest-cov>=5,<8
 pyjwt==2.15.1
 fastapi>=0.110
-python-multipart>=0.0.9
+python-multipart>=0.0.33
 pydantic>=2,<3
 aiokafka>=0.10
 asyncpg>=0.29
