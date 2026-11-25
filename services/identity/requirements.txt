@@ -1,9 +1,9 @@
-fastapi==0.162.2
+fastapi==0.165.0
 uvicorn[standard]==0.54.0
 asyncpg==0.32.0
 pyjwt==2.15.1
 cryptography==50.0.2
-pydantic==2.14.3
+pydantic==2.14.4
 aiokafka==0.15.0
 httpx==0.28.1
 prometheus-client==0.26.0
@@ -14,4 +14,4 @@ opentelemetry-instrumentation-httpx==0.66b2
 opentelemetry-instrumentation-asyncpg==0.66b2
 setuptools==84.2.1
 python3-saml==1.16.0
-python-multipart==0.0.33
+python-multipart==0.0.34
