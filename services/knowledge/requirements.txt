@@ -1,9 +1,9 @@
-fastapi==0.162.2
+fastapi==0.165.0
 uvicorn[standard]==0.54.0
 asyncpg==0.32.0
 pyjwt==2.15.1
 cryptography==50.0.2
-pydantic==2.14.3
+pydantic==2.14.4
 aiokafka==0.15.0
 pyiceberg[pyarrow,s3fs]==0.12.0
 # Same pin as connectivity — CVE-2026-25087, pyarrow < 23.0.1.
